@@ -1,0 +1,34 @@
+[project]
+name = "quant-trade-analysis"
+version = "0.1.0"
+description = "Backtester + multi-agent analyst + real-time NiceGUI dashboard for Gold/Oil/FX"
+requires-python = ">=3.11"
+dependencies = [
+    # backtesting framework
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    # multi-agent analyst
+    "langgraph>=0.2",
+    "langchain-openai>=0.2",
+    "langchain-core>=0.3",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    # TLS (AVG HTTPS interception on this machine -> verify via OS trust store)
+    "truststore>=0.10",
+    "certifi",
+    "httpx>=0.27",
+    # dashboard
+    "nicegui>=2.0",
+    # data + news
+    "yfinance>=0.2.40",
+    "feedparser>=6.0",
+]
+
+[project.optional-dependencies]
+# Live broker prices from a running MetaTrader 5 terminal (Windows only).
+mt5 = ["MetaTrader5; sys_platform == 'win32'"]
+
+[tool.uv]
+# Flat collection of scripts/packages, not an installable distribution.
+package = false

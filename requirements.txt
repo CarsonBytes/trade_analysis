@@ -1,0 +1,16 @@
+# --- backtesting framework ---
+numpy>=2.0
+pandas>=2.2
+scipy>=1.13
+
+# --- multi-agent analyst (analyst/) ---
+langgraph>=0.2
+langchain-openai>=0.2
+langchain-core>=0.3
+pydantic>=2.0
+python-dotenv>=1.0
+truststore>=0.10   # verify TLS via OS trust store (needed behind AV HTTPS inspection)
+httpx>=0.27
+
+# Optional, only for pulling live bars from a running terminal:
+# MetaTrader5

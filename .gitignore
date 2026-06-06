@@ -1,0 +1,11 @@
+# secrets
+analyst/.env
+.env
+
+# data / outputs
+*.csv
+!eurusd_daily.csv
+
+# python
+__pycache__/
+*.pyc
