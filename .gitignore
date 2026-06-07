@@ -13,3 +13,5 @@ __pycache__/
 # keep uv.lock tracked for reproducible installs
 # generated CA bundle (machine-specific)
 dashboard/winca.pem
+# local SQLite state (paper trades, api-usage counter) — not for version control
+dashboard/dashboard.db

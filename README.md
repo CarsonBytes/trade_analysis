@@ -1,72 +1,152 @@
-# 抗自欺回测框架 (anti-self-deception backtester)
+# Quantitative Trade-Analysis Platform
 
-这套框架的目的不是让你看到漂亮的资金曲线，而是**尽快、尽狠地告诉你一个交易想法是不是假的**。
-它把散户量化最容易骗自己的三个地方做成了硬约束，你想作弊都难。
+A research platform for Gold, Oil and FX with three parts:
 
-## 它如何防止你骗自己
+1. **Anti-self-deception backtester** — proves whether a strategy idea actually has an edge (walk-forward, deflated Sharpe, noise test). See [backtester details](#backtester) below.
+2. **Multi-agent analyst** (`analyst/`) — deterministic facts feed LLM agents (regime / technical / sentiment) → a head-trader decision → deterministic risk gate. Decision support, not auto-execution. See [analyst/README.md](analyst/README.md).
+3. **Real-time dashboard + paper trading** (`dashboard/`) — NiceGUI board for Gold/Oil/FX, ranks the most obvious trends, runs a batched LLM scan, and forward-tests SL/TP setups to track success rate. See [dashboard/README.md](dashboard/README.md).
 
-| 自欺方式 | 框架的防御 |
-|---|---|
-| **未来函数**（用还没发生的信息） | 引擎内部强制 `signal.shift(1)`：t 收盘算出的信号，只能从 t+1 开始持仓。无法关闭。见 `engine.py`。 |
-| **零成本回测** | `CostModel` 必填点差/滑点/手续费，设为 0 会警告。默认值 `RETAIL_FX_MAJOR` 故意偏悲观。见 `costs.py`。 |
-| **样本内过拟合** | 只认 **walk-forward**：参数只在训练窗口优化，业绩只取紧随其后、从未参与优化的样本外窗口拼接而成。见 `walkforward.py`。 |
-| **疯狂调参后挑最好的** | **Deflated Sharpe Ratio**：你试了多少组参数，就按概率扣多少分。DSR < 95% = 别信。见 `metrics.py`。 |
-| **整个流程本身有 bug** | **噪声测试**：把同一套流程跑在零漂移随机游走（无 edge 的市场）上。如果它"赚钱"，说明你有未来函数或在挖噪声。见 `run_noise_test.py`。 |
+> **Honest framing:** this measures whether ideas work; it does not manufacture an edge. Everything is decision support — it never places a real trade.
 
-## 快速开始
+---
 
-```bash
-pip install -r requirements.txt
+## Setup (uv)
 
-# 1) 先验证框架本身诚实（最重要的一步，先做这个）
-python run_noise_test.py --trials 40 --strategy ma_crossover
-#   期望: mean OOS Sharpe ~0 或略负(成本)，false 'edges' ≈ 0% → PASS
+The project uses [uv](https://docs.astral.sh/uv/) with a `.venv`. Dependencies are in `pyproject.toml`, pinned in `uv.lock`.
 
-# 2) 在玩具市场上跑完整 walk-forward
-python run_demo.py --strategy ma_crossover
+```powershell
+# 1. Install uv (one-time)
+python -m pip install uv
+# its Scripts dir may not be on PATH — add it for the session (or permanently):
+$env:Path += ";C:\Users\ls\AppData\Local\Python\pythoncore-3.14-64\Scripts"
 
-# 3) 换成你自己的数据
-python run_demo.py --strategy breakout --csv your_data.csv
+# 2. This machine runs AVG, which intercepts HTTPS. Tell uv to trust the Windows
+#    cert store, or package downloads fail with "invalid peer certificate".
+$env:UV_SYSTEM_CERTS = "true"          # permanent:  setx UV_SYSTEM_CERTS true
+
+# 3. Create the environment + install everything
+cd C:\Users\ls\Desktop\Claude\quant    # (or D:\quant)
+uv venv --python 3.14
+uv sync                                 # core
+# uv sync --extra mt5                    # also install MetaTrader5 (live prices)
 ```
 
-用你自己的 MT5 数据（需在本机运行 MT5 终端）：
+Run anything with `uv run` (no manual activation), or activate once with `.venv\Scripts\Activate.ps1`.
 
-```python
-from data import load_mt5
-prices = load_mt5("EURUSD", "H1", n=50000)
-```
+### API keys
 
-## 怎么读结果
-
-只看一个东西：**OOS（样本外）DEFLATED Sharpe**。
-
-- **DSR ≥ 95% 且 OOS Sharpe > 0** → 也许有 edge。即便如此，下一步是**模拟盘实时跑**，不是直接上钱。
-- **OOS Sharpe ≤ 0** → 扣完成本没有 edge，丢掉这个想法。
-- **OOS Sharpe > 0 但 DSR < 95%** → 最常见的情况：正收益只是调参调出来的运气。**不要交易。**
-
-还要看每个 fold 的 `is_sharpe` vs `oos_sharpe`：样本内高、样本外塌 = 过拟合的铁证。
-
-## 文件结构
+Put credentials in `analyst/.env` (git-ignored):
 
 ```
-costs.py          成本模型（强制存在）
-engine.py         向量化引擎（结构上杜绝未来函数）+ 年化推断
-metrics.py        业绩指标 + 抗过拟合指标 (DSR, PSR)
-data.py           合成 GBM / CSV / MT5 三种数据源
-strategies.py     示例策略 + 参数网格（网格大小=试错次数，会被 DSR 惩罚）
-walkforward.py    walk-forward harness（唯一可信的回测）
-run_demo.py       端到端示例
-run_noise_test.py 照妖镜：在噪声上验证框架本身
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.chatanywhere.tech/v1
+OPENAI_MODEL=gpt-5-mini
+# optional, for reliable news:
+FINNHUB_API_KEY=...
+# optional, MT5 auto-login (else it attaches to the running terminal):
+MT5_LOGIN=...
+MT5_PASSWORD=...
+MT5_SERVER=...
+MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
 ```
 
-## 加你自己的策略
+---
 
-在 `strategies.py` 写一个函数 `(prices, **params) -> signal`，signal ∈ {-1,0,+1}，
-其中 `signal[t]` 是用截至 t 收盘的信息做出的决定。**不要自己 shift**，引擎会处理 t+1 执行。
-然后注册到 `STRATEGIES`，附上参数网格。
+## Commands
 
-## 重要前提
+### Dashboard (main app)
 
-这个框架能告诉你一个 edge 是真是假，**但它不会替你创造 edge**。
-对绝大多数散户，外汇里持续的 edge 极难找到。这个工具的最大价值，是让你在亏真钱之前
-就快速否决掉 99% 行不通的想法——以及，诚实地确认你到底有没有那 1%。
+```powershell
+uv run python -m dashboard.app          # → open http://localhost:8080
+# or from the project root:  uv run python run_dashboard.py
+```
+Real-time board: ranked opportunities, batched LLM scan, news, and the Paper Trades
+panel. Auto-refresh selector (1/10/15/30/60 min, default 15), weekend LLM auto-pause,
+manual refresh, and a daily API-call budget guard (default cap 200).
+
+### Paper trading — historical replay (bootstrap a track record now)
+
+```powershell
+uv run python -m dashboard.replay --period 5y
+```
+Replays deterministic signals over history, resolves SL/TP against real prices, and
+reports expectancy-in-R / win rate per method. (LLM signals are not replayed — that
+would be look-ahead; they are validated only by live forward testing in the dashboard.)
+
+### MT5 setup helper (discover broker symbols)
+
+```powershell
+uv run python -m dashboard.mt5_client   # prints availability + matching symbol names
+```
+Put your broker's exact Gold/Oil names into `dashboard/instruments.py` (the `mt5` field).
+With a terminal running, prices become near-tick and SL/TP resolution becomes tick-exact.
+
+### Backtester
+
+```powershell
+# 1) ALWAYS run this first — proves the framework can't manufacture edge from noise
+uv run python run_noise_test.py --trials 40 --strategy ma_crossover
+
+# 2) full walk-forward demo (synthetic, or your own CSV)
+uv run python run_demo.py --strategy ma_crossover
+uv run python run_demo.py --strategy breakout --csv eurusd_daily.csv
+
+# 3) full study across strategies on real data, with buy&hold benchmark
+uv run python run_study.py --csv eurusd_daily.csv
+```
+
+### Multi-agent analyst (one-off briefing)
+
+```powershell
+uv run python -m analyst.run --csv eurusd_daily.csv --symbol EURUSD
+uv run python -m analyst.run --mt5 EURUSD --tf H1          # live from MT5
+uv run python -m analyst.run --csv eurusd_daily.csv --no-news
+```
+
+---
+
+## How to read backtester results
+<a name="backtester"></a>
+
+Look at one thing: the **out-of-sample Deflated Sharpe Ratio**.
+
+- **DSR ≥ 95% and OOS Sharpe > 0** → maybe a real edge. Next step is live paper trading, not real money.
+- **OOS Sharpe ≤ 0** → no edge after costs. Discard.
+- **OOS Sharpe > 0 but DSR < 95%** → most common case: the positive result is luck from searching the parameter grid. Do **not** trade.
+
+The backtester structurally prevents the classic self-deceptions: forced next-bar
+execution (no look-ahead), mandatory costs, walk-forward-only results, and a noise
+test that must NOT find profit in a random walk.
+
+---
+
+## Project layout
+
+```
+pyproject.toml / uv.lock   uv environment (see SETUP.md)
+eurusd_daily.csv           sample real data (ECB EURUSD daily)
+
+# backtester
+engine.py costs.py metrics.py walkforward.py strategies.py data.py
+run_demo.py run_noise_test.py run_study.py
+
+analyst/                   multi-agent LLM analyst (LangGraph + OpenAI)
+  features.py llm.py nodes.py graph.py state.py news.py run.py  .env
+
+dashboard/                 real-time dashboard + paper trading
+  app.py service.py scoring.py board_scan.py store.py
+  providers.py mt5_client.py instruments.py news_sources.py
+  paper.py replay.py        forward paper-trading + historical replay
+```
+
+See [SETUP.md](SETUP.md) for the full environment workflow, and the sub-READMEs in
+`analyst/` and `dashboard/` for component details.
+
+---
+
+## Notes for this machine
+
+- **AVG TLS interception:** all HTTPS is re-signed by AVG's local root. Handled
+  automatically — `truststore` for Python and a Windows-cert bundle (`winca.pem`)
+  for yfinance/libcurl. For `uv` itself, set `UV_SYSTEM_CERTS=true`.
+- `.venv/`, `winca.pem`, `analyst/.env`, and `dashboard/dashboard.db` are git-ignored.
