@@ -79,13 +79,19 @@ def _signal_card(key: str, compact: bool = False):
     # LLM action wins for display if present, else deterministic signal
     action = sig.action if sig else (score.signal if score else "—")
     conf = f"{sig.confidence:.0%}" if sig else ""
-    price = score.facts["last_price"] if score else None
+    live = service.STATE.get("live", {}).get(key)
+    price = live["price"] if live else (score.facts["last_price"] if score else None)
+    src = live["src"] if live else service.STATE["sources"].get(key, "")
     with ui.card().classes("min-w-[260px] grow"):
         with ui.row().classes("items-center justify-between w-full"):
             ui.label(f"{inst.name}").classes("text-base font-bold")
             ui.badge(action, color=SIG_COLOR.get(action, "grey")).classes("text-sm")
         if price is not None:
-            ui.label(f"{price:,.4f}").classes("text-lg")
+            with ui.row().classes("items-baseline gap-2"):
+                ui.label(f"{price:,.4f}").classes("text-lg")
+                tag = "● live" if src == "mt5-tick" else "○ delayed"
+                tcolor = "text-green" if src == "mt5-tick" else "text-grey-5"
+                ui.label(tag).classes(f"text-xs {tcolor}")
         if score:
             ui.label(score.note).classes("text-xs text-grey-7")
         if sig:
@@ -136,8 +142,57 @@ def _open_detail(key: str) -> None:
     dlg.open()
 
 
+@ui.refreshable
+def paper_panel() -> None:
+    from . import paper
+    trades = paper.all_trades()
+    closed = [t for t in trades if t["status"] != "OPEN"]
+    open_t = [t for t in trades if t["status"] == "OPEN"]
+
+    ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
+    ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
+             "Expectancy in R is the number that matters, not win rate.")\
+        .classes("text-xs text-grey-6")
+
+    # stats grouped by method
+    methods = sorted({t["method"] for t in closed})
+    with ui.row().classes("w-full flex-wrap gap-3"):
+        if not closed:
+            ui.label("No resolved trades yet. They settle as price hits SL/TP or the "
+                     "5-day horizon passes.").classes("text-sm text-grey")
+        for m in methods:
+            rs = [t["realized_r"] for t in closed if t["method"] == m]
+            s = paper.stats(rs)
+            color = "bg-green-1" if s["expectancy_R"] > 0 else "bg-red-1"
+            with ui.card().classes(f"min-w-[230px] {color}"):
+                ui.label(m).classes("font-bold")
+                ui.label(f"expectancy: {s['expectancy_R']:+.3f} R").classes("text-base font-bold")
+                ui.label(f"win rate: {s['win_rate']:.0%}   n={s['n']}").classes("text-sm")
+                pf = "inf" if s["profit_factor"] == float("inf") else f"{s['profit_factor']:.2f}"
+                ui.label(f"PF {pf}   total {s['total_R']:+.1f}R").classes("text-xs text-grey-7")
+                if not s["trustworthy"]:
+                    ui.label("n<30 — too few to trust").classes("text-xs text-orange italic")
+
+    # open trades
+    if open_t:
+        ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold mt-2")
+        rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
+                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4),
+                 "TP": round(t["tp"], 4), "R:R": t["rr"]} for t in open_t]
+        ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+            .classes("w-full").props("dense")
+    # recent closed
+    if closed:
+        ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold mt-2")
+        rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
+                 "status": t["status"], "R": round(t["realized_r"], 2)} for t in closed[:20]]
+        ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+            .classes("w-full").props("dense")
+
+
 def _refresh_all_panels() -> None:
-    header_status.refresh(); macro_banner.refresh(); opportunities.refresh(); grid.refresh()
+    header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
+    grid.refresh(); paper_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -189,6 +244,15 @@ async def _manual_refresh() -> None:
         _busy["flag"] = False
 
 
+async def _log_trades_now() -> None:
+    """Manually turn the current signals into paper trades (no LLM call needed)."""
+    from . import paper
+    logs = await run.io_bound(paper.place_from_state, service.STATE)
+    placed = [l for l in logs if "PLACED" in l]
+    paper_panel.refresh()
+    ui.notify(f"Logged {len(placed)} paper trade(s).")
+
+
 # ---- page ------------------------------------------------------------------
 
 @ui.page("/")
@@ -208,11 +272,14 @@ def main_page() -> None:
                         value=SETTINGS["auto_pause"],
                         on_change=lambda e: SETTINGS.update(auto_pause=e.value))
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
+            ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
 
         header_status()
         macro_banner()
         opportunities()
         grid()
+        ui.separator().classes("my-2")
+        paper_panel()
 
     # initial load + periodic master tick (30s); the tick decides what actually runs
     ui.timer(0.1, _tick, once=True)      # kick off immediately on first load

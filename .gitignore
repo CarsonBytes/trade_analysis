@@ -6,6 +6,10 @@ analyst/.env
 *.csv
 !eurusd_daily.csv
 
-# python
+# python / uv
 __pycache__/
 *.pyc
+.venv/
+# keep uv.lock tracked for reproducible installs
+# generated CA bundle (machine-specific)
+dashboard/winca.pem

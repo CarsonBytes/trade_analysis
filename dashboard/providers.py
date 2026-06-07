@@ -9,32 +9,16 @@ from . import net  # noqa: F401  -- MUST be first: sets up TLS for yfinance/curl
 import pandas as pd
 
 from .instruments import Instrument
+from . import mt5_client
 
 
 def _from_mt5(inst: Instrument, timeframe: str = "H1", n: int = 1500) -> pd.Series | None:
-    try:
-        import MetaTrader5 as mt5  # type: ignore
-    except Exception:
+    df = mt5_client.get_rates(inst.mt5, timeframe, n)
+    if df is None or len(df) == 0:
         return None
-    try:
-        if not mt5.initialize():
-            return None
-        tf = {"H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4, "D1": mt5.TIMEFRAME_D1}["H1"]
-        rates = mt5.copy_rates_from_pos(inst.mt5, tf, 0, n)
-        if rates is None or len(rates) == 0:
-            return None
-        df = pd.DataFrame(rates)
-        df["time"] = pd.to_datetime(df["time"], unit="s")
-        s = df.set_index("time")["close"].astype(float)
-        s.name = "close"
-        return s.sort_index()
-    except Exception:
-        return None
-    finally:
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
+    s = df["close"].astype(float)
+    s.name = "close"
+    return s
 
 
 def _from_yf(inst: Instrument, period: str = "60d", interval: str = "1h") -> pd.Series | None:
@@ -63,3 +47,36 @@ def get_history(inst: Instrument) -> tuple[pd.Series | None, str]:
     if s is not None and len(s) > 50:
         return s, "yfinance"
     return None, "none"
+
+
+def get_live_price(inst: Instrument) -> tuple[float | None, str, float | None]:
+    """Return (price, source, spread). Near-tick from MT5 if available, else the
+    last yfinance bar close (delayed). spread is None when unknown."""
+    tick = mt5_client.get_tick(inst.mt5)
+    if tick is not None:
+        return tick["mid"], "mt5-tick", tick["spread"]
+    s = _from_yf(inst)
+    if s is not None and len(s):
+        return float(s.iloc[-1]), "yfinance-bar", None
+    return None, "none", None
+
+
+def get_ohlc(inst: Instrument, period: str = "90d", interval: str = "1h") -> pd.DataFrame | None:
+    """OHLC bars (open/high/low/close) for trade resolution -- we need high & low
+    to know whether SL or TP was touched. MT5 (M1) if available, else yfinance."""
+    df = mt5_client.get_rates(inst.mt5, "M1", 50_000)
+    if df is not None and len(df) > 100:
+        return df
+    try:
+        import yfinance as yf
+        df = yf.download(inst.yf, period=period, interval=interval,
+                         progress=False, auto_adjust=True)
+        if df is None or len(df) == 0:
+            return None
+        if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+            df.columns = df.columns.get_level_values(0)  # flatten single-ticker MultiIndex
+        out = df[["Open", "High", "Low", "Close"]].copy()
+        out.columns = ["open", "high", "low", "close"]
+        return out.dropna().astype(float)
+    except Exception:
+        return None
