@@ -51,17 +51,36 @@ SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "gr
 
 # ---- refreshable panels ----------------------------------------------------
 
+def _data_source_text() -> tuple[str, str]:
+    """Return (label, css) describing the live price source / MT5 connection."""
+    live = service.STATE.get("live", {})
+    mt5_live = {k: v for k, v in live.items() if v.get("src") == "mt5-tick"}
+    if mt5_live:
+        ages = [v["age"] for v in mt5_live.values() if v.get("age") is not None]
+        newest = f", newest tick {min(ages):.0f}s" if ages else ""
+        stale = ages and min(ages) > 120
+        return (f"Data: MT5 ● {len(mt5_live)}/{len(live)} live{newest}",
+                "text-orange font-bold" if stale else "text-green font-bold")
+    if service.STATE.get("mt5_available"):
+        return ("Data: yfinance ○ delayed  (MT5 connected but no symbol match — "
+                "fix names in instruments.py)", "text-orange font-bold")
+    return ("Data: yfinance ○ delayed  (MT5 not connected)", "text-grey-6")
+
+
 @ui.refreshable
 def header_status() -> None:
     cap = SETTINGS["cap"]
     used = store.calls_today()
     near = used >= cap - 10
-    with ui.row().classes("items-center gap-6 w-full"):
-        ui.label("Prices/scores: " + _ago(service.STATE["last_cheap"])).classes("text-sm text-grey-7")
-        ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
-        ui.label(f"API calls today: {used}/{cap}").classes(
-            "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
-        ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
+    data_txt, data_css = _data_source_text()
+    with ui.column().classes("gap-1 w-full"):
+        ui.label(data_txt).classes("text-sm " + data_css)
+        with ui.row().classes("items-center gap-6 w-full"):
+            ui.label("Prices/scores: " + _ago(service.STATE["last_cheap"])).classes("text-sm text-grey-7")
+            ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
+            ui.label(f"API calls today: {used}/{cap}").classes(
+                "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
+            ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
 
 
 @ui.refreshable
@@ -275,11 +294,17 @@ def main_page() -> None:
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
 
         header_status()
-        macro_banner()
-        opportunities()
-        grid()
-        ui.separator().classes("my-2")
-        paper_panel()
+
+        with ui.tabs().classes("w-full") as tabs:
+            t_board = ui.tab("Board", icon="dashboard")
+            t_trades = ui.tab("Paper Trades", icon="receipt_long")
+        with ui.tab_panels(tabs, value=t_board).classes("w-full"):
+            with ui.tab_panel(t_board):
+                macro_banner()
+                opportunities()
+                grid()
+            with ui.tab_panel(t_trades):
+                paper_panel()
 
     # initial load + periodic master tick (30s); the tick decides what actually runs
     ui.timer(0.1, _tick, once=True)      # kick off immediately on first load
