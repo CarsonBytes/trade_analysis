@@ -51,15 +51,29 @@ SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "gr
 
 # ---- refreshable panels ----------------------------------------------------
 
+def _fmt_age(secs: float) -> str:
+    s = abs(secs)
+    if s < 90:
+        return f"{s:.0f}s"
+    if s < 5400:
+        return f"{s/60:.0f}m"
+    if s < 172800:
+        return f"{s/3600:.0f}h"
+    return f"{s/86400:.0f}d"
+
+
 def _data_source_text() -> tuple[str, str]:
     """Return (label, css) describing the live price source / MT5 connection."""
     live = service.STATE.get("live", {})
     mt5_live = {k: v for k, v in live.items() if v.get("src") == "mt5-tick"}
     if mt5_live:
         ages = [v["age"] for v in mt5_live.values() if v.get("age") is not None]
-        newest = f", newest tick {min(ages):.0f}s" if ages else ""
-        stale = ages and min(ages) > 120
-        return (f"Data: MT5 ● {len(mt5_live)}/{len(live)} live{newest}",
+        newest = f", newest tick {_fmt_age(min(ages))}" if ages else ""
+        # >6h ignores the broker's tz offset (a few h) but still catches a
+        # weekend/closed market where the last tick is days old.
+        stale = bool(ages) and min(ages) > 21600
+        return (f"Data: MT5 ● {len(mt5_live)}/{len(live)} live{newest}"
+                + ("  (market closed — last tick is stale)" if stale else ""),
                 "text-orange font-bold" if stale else "text-green font-bold")
     if service.STATE.get("mt5_available"):
         return ("Data: yfinance ○ delayed  (MT5 connected but no symbol match — "
