@@ -116,8 +116,14 @@ def get_tick(symbol: str) -> dict | None:
         if t is None or (t.bid == 0 and t.ask == 0):
             return None
         bid, ask = float(t.bid), float(t.ask)
-        ts = pd.to_datetime(getattr(t, "time_msc", t.time * 1000), unit="ms", utc=True)
-        age = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
+        # `time` is epoch SECONDS (reliable); `time_msc` is milliseconds. Use
+        # seconds and guard against absurd values. NOTE: MT5 timestamps are in
+        # the broker's SERVER timezone, so age can be off by the server's UTC
+        # offset (a few hours) -- fine for a coarse freshness indicator.
+        secs = int(getattr(t, "time", 0) or 0)
+        ts = pd.to_datetime(secs, unit="s", utc=True) if secs > 0 else None
+        raw = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() if ts is not None else None
+        age = raw if (raw is not None and -2_678_400 < raw < 31_536_000) else None
         return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2,
                 "spread": ask - bid, "time": ts, "age_sec": age}
 
