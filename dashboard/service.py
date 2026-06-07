@@ -34,6 +34,7 @@ STATE: dict = {
     "last_cheap": None,    # datetime
     "last_llm": None,      # datetime
     "last_status": "not run yet",
+    "mt5_available": False,
     "cap": 200,
 }
 
@@ -51,21 +52,23 @@ def _score_one(inst):
     # near-tick live price from MT5 if available, else last bar close (no extra fetch)
     tick = mt5_client.get_tick(inst.mt5)
     if tick is not None:
-        live_px, live_src, spread = tick["mid"], "mt5-tick", tick["spread"]
+        live_px, live_src, spread, age = tick["mid"], "mt5-tick", tick["spread"], tick["age_sec"]
     else:
-        live_px, live_src, spread = float(series.iloc[-1]), source, None
-    return inst.key, score, source, live_px, live_src, spread
+        live_px, live_src, spread, age = float(series.iloc[-1]), source, None, None
+    return inst.key, score, source, live_px, live_src, spread, age
 
 
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for key, score, source, live_px, live_src, spread in ex.map(_score_one, UNIVERSE):
+        for key, score, source, live_px, live_src, spread, age in ex.map(_score_one, UNIVERSE):
             STATE["sources"][key] = source
             if score is not None:
                 STATE["scores"][key] = score
             if live_px is not None:
-                STATE["live"][key] = {"price": live_px, "src": live_src, "spread": spread}
+                STATE["live"][key] = {"price": live_px, "src": live_src,
+                                      "spread": spread, "age": age}
+    STATE["mt5_available"] = mt5_client.is_available()
     STATE["last_cheap"] = _now()
     # resolve any open paper trades against the fresh price action
     try:
