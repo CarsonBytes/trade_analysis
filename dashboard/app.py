@@ -223,9 +223,40 @@ def paper_panel() -> None:
             .classes("w-full").props("dense")
 
 
+@ui.refreshable
+def active_panel() -> None:
+    """Open positions shown on the Board with live unrealized P&L in R."""
+    from . import paper
+    open_t = paper.open_trades()
+    ui.label(f"Active Trades ({len(open_t)})").classes("text-lg font-bold")
+    if not open_t:
+        ui.label("No open positions. Setups are logged automatically from "
+                 "qualifying signals.").classes("text-sm text-grey")
+        return
+    with ui.row().classes("w-full flex-wrap gap-3"):
+        for t in open_t:
+            key = t["instrument"]
+            live = service.STATE.get("live", {}).get(key)
+            price = live["price"] if live else t["entry"]
+            risk = abs(t["entry"] - t["sl"]) or 1e-9
+            ur = ((price - t["entry"]) if t["direction"] == "long"
+                  else (t["entry"] - price)) / risk
+            col = "bg-green-1" if ur >= 0 else "bg-red-1"
+            with ui.card().classes(f"min-w-[210px] grow {col}"):
+                with ui.row().classes("items-center justify-between w-full"):
+                    ui.label(BY_KEY[key].name).classes("font-bold")
+                    ui.badge(t["direction"],
+                             color="positive" if t["direction"] == "long" else "negative")
+                ui.label(f"{price:,.4f}").classes("text-base")
+                ui.label(f"unrealized: {ur:+.2f} R").classes("text-sm font-bold")
+                ui.label(f"entry {t['entry']:.4f} · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
+                    .classes("text-xs text-grey-7")
+                ui.label(t["method"]).classes("text-xs text-grey-6")
+
+
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
-    grid.refresh(); paper_panel.refresh()
+    grid.refresh(); paper_panel.refresh(); active_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -282,7 +313,7 @@ async def _log_trades_now() -> None:
     from . import paper
     logs = await run.io_bound(paper.place_from_state, service.STATE)
     placed = [l for l in logs if "PLACED" in l]
-    paper_panel.refresh()
+    paper_panel.refresh(); active_panel.refresh()
     ui.notify(f"Logged {len(placed)} paper trade(s).")
 
 
@@ -315,6 +346,7 @@ def main_page() -> None:
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
             with ui.tab_panel(t_board):
                 macro_banner()
+                active_panel()
                 opportunities()
                 grid()
             with ui.tab_panel(t_trades):
