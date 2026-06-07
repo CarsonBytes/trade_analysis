@@ -166,11 +166,42 @@ def shutdown() -> None:
 
 # ---- setup helper CLI ------------------------------------------------------
 
+def diagnose() -> None:
+    """One-stop check: package present? terminal found? logged in? Prints the
+    exact failure so you know whether to fix the install, the terminal, or login."""
+    import struct
+    print(f"Python bitness: {struct.calcsize('P') * 8}-bit  (must match MT5 = 64-bit)")
+
+    try:
+        import MetaTrader5 as mt5  # type: ignore
+        print(f"[OK] MetaTrader5 package imported (v{mt5.__version__})")
+    except Exception as e:
+        print(f"[FAIL] MetaTrader5 package NOT installed: {e}")
+        print("       -> run:  uv sync --extra mt5   (then restart the dashboard)")
+        return
+
+    kwargs = {}
+    if os.environ.get("MT5_PATH"):
+        kwargs["path"] = os.environ["MT5_PATH"]
+    if os.environ.get("MT5_LOGIN"):
+        kwargs.update(login=int(os.environ["MT5_LOGIN"]),
+                      password=os.environ.get("MT5_PASSWORD", ""),
+                      server=os.environ.get("MT5_SERVER", ""))
+    ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
+    print(f"initialize() = {ok}   last_error = {mt5.last_error()}")
+    if not ok:
+        print("       -> Is the MT5 terminal RUNNING and LOGGED IN on this machine?")
+        print("       -> If installed in a non-default location, set MT5_PATH in analyst/.env")
+        return
+
+    ti, ai = mt5.terminal_info(), mt5.account_info()
+    print(f"terminal: {getattr(ti, 'name', None)}  connected={getattr(ti, 'connected', None)}")
+    print(f"account:  {getattr(ai, 'login', None)}  server={getattr(ai, 'server', None)}")
+    print("Matching symbols (put your Gold/Oil names into instruments.py):")
+    for s in find_symbols():
+        print("  ", s)
+    mt5.shutdown()
+
+
 if __name__ == "__main__":
-    print("MT5 available:", is_available())
-    if is_available():
-        print("Matching symbols (find your Gold/Oil names here):")
-        for s in find_symbols():
-            print("  ", s)
-    else:
-        print("No MT5 terminal/connection. Install + log in, then `uv sync --extra mt5`.")
+    diagnose()
