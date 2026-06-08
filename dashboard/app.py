@@ -182,7 +182,9 @@ def paper_panel() -> None:
     closed = [t for t in trades if t["status"] != "OPEN"]
     open_t = [t for t in trades if t["status"] == "OPEN"]
 
-    ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
+    with ui.row().classes("items-center justify-between w-full"):
+        ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
+        ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
              "Expectancy in R is the number that matters, not win rate.")\
         .classes("text-xs text-grey-6")
@@ -315,6 +317,20 @@ async def _log_trades_now() -> None:
     placed = [l for l in logs if "PLACED" in l]
     paper_panel.refresh(); active_panel.refresh()
     ui.notify(f"Logged {len(placed)} paper trade(s).")
+
+
+async def _export_results() -> None:
+    from . import report
+    csvp, repp = await run.io_bound(report.export)
+    rep = report.build_report()
+    with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
+        ui.label("Paper-trade report (copy to share)").classes("text-lg font-bold")
+        ui.label(f"Saved: {repp}").classes("text-xs text-grey")
+        ui.label(f"CSV:   {csvp}").classes("text-xs text-grey")
+        ui.code(rep).classes("w-full max-h-[60vh] overflow-auto")
+        ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+    ui.notify("Exported report + CSV to exports/")
 
 
 # ---- page ------------------------------------------------------------------

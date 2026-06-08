@@ -15,3 +15,7 @@ __pycache__/
 dashboard/winca.pem
 # local SQLite state (paper trades, api-usage counter) — not for version control
 dashboard/dashboard.db
+# exported reports/CSVs
+exports/
+# debug logs
+logs/

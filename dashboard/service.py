@@ -22,6 +22,7 @@ from .providers import get_ohlc
 from . import store
 from . import paper
 from . import mt5_client
+from .log import log
 
 # ---- live state (single process, so plain dict is fine) --------------------
 STATE: dict = {
@@ -70,11 +71,21 @@ def refresh_cheap() -> None:
                                       "spread": spread, "age": age}
     STATE["mt5_available"] = mt5_client.is_available()
     STATE["last_cheap"] = _now()
+    live = STATE["live"]
+    n_mt5 = sum(1 for v in live.values() if v.get("src") == "mt5-tick")
+    log.info("cheap refresh: %d scored, data source = %s (%d/%d MT5-tick)",
+             len(STATE["scores"]),
+             "MT5" if n_mt5 else ("yfinance" if live else "none"),
+             n_mt5, len(live))
     # resolve any open paper trades against the fresh price action
     try:
-        STATE["paper_resolved"] = paper.resolve_open(get_ohlc)
+        n = paper.resolve_open(get_ohlc)
+        STATE["paper_resolved"] = n
+        if n:
+            log.info("resolved %d paper trade(s) this refresh", n)
     except Exception as e:
         STATE["paper_resolved"] = f"resolve error: {e}"
+        log.exception("paper resolution error: %s", e)
 
 
 def refresh_news() -> None:
@@ -104,6 +115,7 @@ def refresh_llm(cap: int | None = None) -> str:
         except Exception as e:
             STATE["paper_logs"] = [f"placement error: {e}"]
     STATE["last_status"] = status
+    log.info("LLM board scan: %s (calls today %d/%d)", status, store.calls_today(), cap)
     return status
 
 

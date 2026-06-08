@@ -21,6 +21,8 @@ import threading
 
 import pandas as pd
 
+from .log import log
+
 # ---- config (tunable defaults) --------------------------------------------
 SL_ATR_MULT = 2.0          # stop = 2 x ATR (matches the risk gate)
 RR_DEFAULT = 2.0           # take-profit reward:risk for the ATR variant
@@ -76,16 +78,16 @@ def resolve(direction: str, entry: float, sl: float, tp: float,
     (status, exit_price, exit_time) or None if still open (no bars yet)."""
     for ts, row in bars.iterrows():
         hi, lo = row["high"], row["low"]
-        if direction == "long":
-            if lo <= sl:
-                return "LOSS", sl, ts
-            if hi >= tp:
-                return "WIN", tp, ts
-        else:
-            if hi >= sl:
-                return "LOSS", sl, ts
-            if lo <= tp:
-                return "WIN", tp, ts
+        hit_sl = (lo <= sl) if direction == "long" else (hi >= sl)
+        hit_tp = (hi >= tp) if direction == "long" else (lo <= tp)
+        if hit_sl and hit_tp:
+            log.warning("ambiguous bar @ %s: both SL %.5f and TP %.5f inside "
+                        "[%.5f, %.5f] -> assuming SL hit first (conservative)",
+                        ts, sl, tp, lo, hi)
+        if hit_sl:
+            return "LOSS", sl, ts
+        if hit_tp:
+            return "WIN", tp, ts
     if len(bars):
         return "EXPIRED", float(bars["close"].iloc[-1]), bars.index[-1]
     return None
@@ -237,6 +239,7 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
 def place_from_state(state: dict) -> list[str]:
     """Create paper trades for every qualifying signal (both SL/TP methods)."""
     logs: list[str] = []
+    log.info("placement run: evaluating %d instruments", len(state.get("scores", {})))
     now = dt.datetime.now()
     horizon_end = (now + dt.timedelta(days=HORIZON_CAL)).isoformat(timespec="seconds")
     for key, score in state["scores"].items():
@@ -268,8 +271,13 @@ def place_from_state(state: dict) -> list[str]:
                 method=mlabel, entry=entry, sl=sl, tp=tp, rr=round(rr_actual, 2),
                 size_units=round(size, 2), horizon_end=horizon_end,
                 confidence=conf, rationale=rationale))
-            logs.append(f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
-                        f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f})")
+            msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
+                   f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
+            logs.append(msg)
+            log.info("PLACED %s", msg)
+    for line in logs:
+        if "skip" in line:
+            log.debug("funnel %s", line)
     return logs
 
 
@@ -292,20 +300,27 @@ def _outcome_for(t: dict, get_ohlc_fn):
             ticks = mt5_client.get_ticks_range(inst.mt5, t0, t1)
             if ticks is not None and len(ticks):
                 out = resolve_ticks(t["direction"], t["sl"], t["tp"], ticks)
+                log.debug("resolve %s %s via TICKS (%d ticks, exact) -> %s",
+                          t["instrument"], t["method"], len(ticks),
+                          out[0] if out else "open")
                 if out and (out[0] != "EXPIRED" or horizon_passed):
                     return out
                 return "OPEN"
-        except Exception:
-            pass  # fall through to bars
+        except Exception as e:
+            log.debug("tick resolution failed for %s (%s); falling back to OHLC",
+                      t["instrument"], e)
 
     # 2) fallback path: OHLC bars (conservative SL-before-TP)
     ohlc = get_ohlc_fn(inst)
     if ohlc is None:
+        log.debug("no OHLC for %s; trade stays open", t["instrument"])
         return None
     idx = ohlc.index.tz_localize(None) if ohlc.index.tz is not None else ohlc.index
     ohlc = ohlc.set_axis(idx)
     bars = ohlc[(ohlc.index > entry_ts) & (ohlc.index <= end_ts)]
     out = resolve(t["direction"], t["entry"], t["sl"], t["tp"], bars)
+    log.debug("resolve %s %s via OHLC (%d bars, conservative) -> %s",
+              t["instrument"], t["method"], len(bars), out[0] if out else "open")
     if out and (out[0] != "EXPIRED" or horizon_passed):
         return out
     return "OPEN"
@@ -321,5 +336,7 @@ def resolve_open(get_ohlc_fn) -> int:
         status, exit_price, exit_time = out
         r = r_multiple(t["direction"], t["entry"], t["sl"], exit_price)
         _update_resolution(t["id"], status, str(exit_time), exit_price, round(r, 3))
+        log.info("RESOLVED %s %s %s  R=%+.2f  entry=%.5f exit=%.5f @ %s",
+                 t["instrument"], t["method"], status, r, t["entry"], exit_price, exit_time)
         resolved += 1
     return resolved
