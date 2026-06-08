@@ -22,6 +22,7 @@ import threading
 import pandas as pd
 
 from .log import log
+from . import store
 
 # ---- config (tunable defaults) --------------------------------------------
 SL_ATR_MULT = 2.0          # stop = 2 x ATR (matches the risk gate)
@@ -115,6 +116,18 @@ def resolve_ticks(direction: str, sl: float, tp: float,
         px = last["bid"] if direction == "long" else last["ask"]
         return "EXPIRED", float(px), ticks.index[-1]
     return None
+
+
+def _as_utc(x) -> pd.Timestamp:
+    """Parse a stored timestamp to tz-aware UTC (naive is assumed already-UTC)."""
+    ts = pd.Timestamp(x)
+    return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
+
+
+def _mt5_to_utc(x, offset_sec: float) -> pd.Timestamp:
+    """MT5 stamps times in broker SERVER time (labeled UTC). Subtract the
+    detected server offset to get true UTC, so it lines up with entry time."""
+    return _as_utc(x) - pd.Timedelta(seconds=offset_sec)
 
 
 def r_multiple(direction: str, entry: float, sl: float, exit_price: float) -> float:
@@ -240,7 +253,7 @@ def place_from_state(state: dict) -> list[str]:
     """Create paper trades for every qualifying signal (both SL/TP methods)."""
     logs: list[str] = []
     log.info("placement run: evaluating %d instruments", len(state.get("scores", {})))
-    now = dt.datetime.now()
+    now = dt.datetime.now(dt.timezone.utc)  # store entry time in true UTC
     horizon_end = (now + dt.timedelta(days=HORIZON_CAL)).isoformat(timespec="seconds")
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
@@ -287,16 +300,18 @@ def _outcome_for(t: dict, get_ohlc_fn):
     from .instruments import BY_KEY
     from . import mt5_client
     inst = BY_KEY[t["instrument"]]
-    # store ts naive-local; tick history is UTC -> make both UTC-aware
-    entry_ts = pd.Timestamp(t["ts"]).tz_localize(None)
-    end_ts = pd.Timestamp(t["horizon_end"]).tz_localize(None)
-    horizon_passed = pd.Timestamp.now() >= end_ts
+    # everything in true UTC; MT5 source times get the broker offset removed
+    entry_ts = _as_utc(t["ts"])
+    end_ts = _as_utc(t["horizon_end"])
+    now_utc = pd.Timestamp.now(tz="UTC")
+    horizon_passed = now_utc >= end_ts
+    offset = store.cache_get("mt5_offset_sec")[0] or 0
 
     # 1) exact path: MT5 ticks
     if mt5_client.is_available():
         try:
-            t0 = entry_ts.to_pydatetime().astimezone(dt.timezone.utc)
-            t1 = (end_ts if horizon_passed else pd.Timestamp.now()).to_pydatetime().astimezone(dt.timezone.utc)
+            t0 = entry_ts.to_pydatetime()
+            t1 = (end_ts if horizon_passed else now_utc).to_pydatetime()
             ticks = mt5_client.get_ticks_range(inst.mt5, t0, t1)
             if ticks is not None and len(ticks):
                 out = resolve_ticks(t["direction"], t["sl"], t["tp"], ticks)
@@ -304,7 +319,8 @@ def _outcome_for(t: dict, get_ohlc_fn):
                           t["instrument"], t["method"], len(ticks),
                           out[0] if out else "open")
                 if out and (out[0] != "EXPIRED" or horizon_passed):
-                    return out
+                    status, px, xt = out
+                    return status, px, _mt5_to_utc(xt, offset)
                 return "OPEN"
         except Exception as e:
             log.debug("tick resolution failed for %s (%s); falling back to OHLC",
@@ -315,14 +331,18 @@ def _outcome_for(t: dict, get_ohlc_fn):
     if ohlc is None:
         log.debug("no OHLC for %s; trade stays open", t["instrument"])
         return None
-    idx = ohlc.index.tz_localize(None) if ohlc.index.tz is not None else ohlc.index
+    idx = ohlc.index
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
     ohlc = ohlc.set_axis(idx)
     bars = ohlc[(ohlc.index > entry_ts) & (ohlc.index <= end_ts)]
     out = resolve(t["direction"], t["entry"], t["sl"], t["tp"], bars)
     log.debug("resolve %s %s via OHLC (%d bars, conservative) -> %s",
               t["instrument"], t["method"], len(bars), out[0] if out else "open")
     if out and (out[0] != "EXPIRED" or horizon_passed):
-        return out
+        status, px, xt = out
+        # MT5 rates are also server-time; yfinance bars are already UTC
+        xt = _mt5_to_utc(xt, offset) if mt5_client.is_available() else _as_utc(xt)
+        return status, px, xt
     return "OPEN"
 
 

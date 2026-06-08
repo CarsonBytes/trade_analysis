@@ -36,12 +36,40 @@ STATE: dict = {
     "last_llm": None,      # datetime
     "last_status": "not run yet",
     "mt5_available": False,
+    "calls_today": 0,
     "cap": 200,
 }
 
 
 def _now() -> dt.datetime:
     return dt.datetime.now()
+
+
+def _calibrate_mt5_offset() -> float:
+    """MT5 stamps ticks in the broker's SERVER timezone, so raw age = real age +
+    server offset. We estimate the offset as the smallest raw age ever seen from
+    a fresh tick (a truly fresh tick has real age ~0, so raw age ~= offset),
+    rounded to 30 min, persisted. Subtracting it makes a live tick read ~0s.
+    (Converges down automatically; a rare DST forward shift self-heals over time.)"""
+    raw = [v.get("age") for v in STATE["live"].values()
+           if v.get("src") == "mt5-tick" and v.get("age") is not None]
+    fresh = [a for a in raw if 0 <= a < 21600]  # ignore weekend-stale (>6h)
+    prev, _ = store.cache_get("mt5_offset_sec")
+    prev = prev if isinstance(prev, (int, float)) else None
+    if fresh:
+        cand = min(fresh)
+        off = cand if prev is None else min(prev, cand)
+        off = round(off / 1800) * 1800
+        store.cache_set("mt5_offset_sec", off)
+    else:
+        off = prev or 0.0
+    STATE["mt5_offset_sec"] = off
+    # apply correction: store true freshness in 'age', keep raw for the log
+    for v in STATE["live"].values():
+        if v.get("src") == "mt5-tick" and v.get("age") is not None:
+            v["raw_age"] = v["age"]
+            v["age"] = max(0.0, v["age"] - off)
+    return off
 
 
 def _score_one(inst):
@@ -70,6 +98,8 @@ def refresh_cheap() -> None:
                 STATE["live"][key] = {"price": live_px, "src": live_src,
                                       "spread": spread, "age": age}
     STATE["mt5_available"] = mt5_client.is_available()
+    STATE["calls_today"] = store.calls_today()
+    _calibrate_mt5_offset()
     STATE["last_cheap"] = _now()
     live = STATE["live"]
     n_mt5 = sum(1 for v in live.values() if v.get("src") == "mt5-tick")
@@ -115,7 +145,8 @@ def refresh_llm(cap: int | None = None) -> str:
         except Exception as e:
             STATE["paper_logs"] = [f"placement error: {e}"]
     STATE["last_status"] = status
-    log.info("LLM board scan: %s (calls today %d/%d)", status, store.calls_today(), cap)
+    STATE["calls_today"] = store.calls_today()
+    log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)
     return status
 
 

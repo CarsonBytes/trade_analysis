@@ -40,16 +40,25 @@ def _ago(t: dt.datetime | None) -> str:
         return "never"
     secs = (dt.datetime.now() - t).total_seconds()
     if secs < 60:
-        return f"{int(secs)}s ago"
+        return "< 1 min ago"
     if secs < 3600:
-        return f"{int(secs // 60)}m ago"
-    return f"{int(secs // 3600)}h ago"
+        return f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
 
 
 SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "grey-6"}
 
 
 # ---- refreshable panels ----------------------------------------------------
+
+def _fmt_ts(s: str) -> str:
+    """Trim an ISO / pandas timestamp string to 'YYYY-MM-DD HH:MM'."""
+    if not s:
+        return "—"
+    return str(s).replace("T", " ")[:16]
+
 
 def _fmt_age(secs: float) -> str:
     s = abs(secs)
@@ -69,11 +78,13 @@ def _data_source_text() -> tuple[str, str]:
     if mt5_live:
         ages = [v["age"] for v in mt5_live.values() if v.get("age") is not None]
         newest = f", newest tick {_fmt_age(min(ages))}" if ages else ""
-        # >6h ignores the broker's tz offset (a few h) but still catches a
-        # weekend/closed market where the last tick is days old.
-        stale = bool(ages) and min(ages) > 21600
-        return (f"Data: MT5 ● {len(mt5_live)}/{len(live)} live{newest}"
-                + ("  (market closed — last tick is stale)" if stale else ""),
+        # age is now broker-offset-corrected (true freshness), so a tight
+        # threshold is safe: fresh weekday tick ~0; weekend/stalled feed grows.
+        stale = bool(ages) and min(ages) > 3600
+        off = service.STATE.get("mt5_offset_sec", 0) or 0
+        offtxt = f"  (broker clock +{off/3600:.0f}h)" if off else ""
+        return (f"Data: MT5 ● {len(mt5_live)}/{len(live)} live{newest}{offtxt}"
+                + ("  — market closed/feed stale" if stale else ""),
                 "text-orange font-bold" if stale else "text-green font-bold")
     if service.STATE.get("mt5_available"):
         return ("Data: yfinance ○ delayed  (MT5 connected but no symbol match — "
@@ -82,9 +93,27 @@ def _data_source_text() -> tuple[str, str]:
 
 
 @ui.refreshable
+def clock_row() -> None:
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    loc = now_utc.astimezone()
+    loc_off = loc.utcoffset().total_seconds() / 3600
+    parts = [f"Local {loc:%H:%M:%S} (UTC{loc_off:+.0f})", f"UTC {now_utc:%H:%M:%S}"]
+    off = service.STATE.get("mt5_offset_sec", 0) or 0
+    if service.STATE.get("mt5_available") and off:
+        broker = now_utc + dt.timedelta(seconds=off)
+        parts.append(f"Broker {broker:%H:%M:%S} (UTC{off/3600:+.0f})")
+    else:
+        parts.append("Broker — (MT5 offset not detected)")
+    with ui.row().classes("items-center gap-4"):
+        for i, p in enumerate(parts):
+            ui.label(p).classes("text-xs font-mono "
+                                + ("text-green-8" if i == 2 and off else "text-grey-7"))
+
+
+@ui.refreshable
 def header_status() -> None:
     cap = SETTINGS["cap"]
-    used = store.calls_today()
+    used = service.STATE.get("calls_today", 0)  # cached; avoids a DB read each second
     near = used >= cap - 10
     data_txt, data_css = _data_source_text()
     with ui.column().classes("gap-1 w-full"):
@@ -186,7 +215,7 @@ def paper_panel() -> None:
         ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
         ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
-             "Expectancy in R is the number that matters, not win rate.")\
+             "Expectancy in R is the number that matters, not win rate. Times in UTC.")\
         .classes("text-xs text-grey-6")
 
     # stats grouped by method
@@ -213,14 +242,17 @@ def paper_panel() -> None:
         ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold mt-2")
         rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
                  "entry": round(t["entry"], 4), "SL": round(t["sl"], 4),
-                 "TP": round(t["tp"], 4), "R:R": t["rr"]} for t in open_t]
+                 "TP": round(t["tp"], 4), "R:R": t["rr"],
+                 "opened": _fmt_ts(t["ts"])} for t in open_t]
         ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
             .classes("w-full").props("dense")
     # recent closed
     if closed:
         ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold mt-2")
         rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
-                 "status": t["status"], "R": round(t["realized_r"], 2)} for t in closed[:20]]
+                 "status": t["status"], "R": round(t["realized_r"], 2),
+                 "opened": _fmt_ts(t["ts"]), "closed": _fmt_ts(t["exit_ts"])}
+                for t in closed[:20]]
         ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
             .classes("w-full").props("dense")
 
@@ -253,7 +285,7 @@ def active_panel() -> None:
                 ui.label(f"unrealized: {ur:+.2f} R").classes("text-sm font-bold")
                 ui.label(f"entry {t['entry']:.4f} · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
                     .classes("text-xs text-grey-7")
-                ui.label(t["method"]).classes("text-xs text-grey-6")
+                ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}").classes("text-xs text-grey-6")
 
 
 def _refresh_all_panels() -> None:
@@ -342,6 +374,7 @@ def main_page() -> None:
         ui.label("Trade Analysis — Gold · Oil · FX").classes("text-2xl font-bold")
         ui.label("Decision support, not auto-execution. Verify before risking money.")\
             .classes("text-sm text-grey-6")
+        clock_row()
 
         with ui.row().classes("items-center gap-4 w-full"):
             ui.label("Auto-refresh:").classes("text-sm")
@@ -369,6 +402,12 @@ def main_page() -> None:
                 paper_panel()
 
     # initial load + periodic master tick (30s); the tick decides what actually runs
+    # live UI tick (1s): clocks + the "x ago" / tick-age labels stay current
+    # without touching data (cheap: just re-renders labels from cached state).
+    def _ui_tick() -> None:
+        clock_row.refresh()
+        header_status.refresh()
+    ui.timer(1.0, _ui_tick)
     ui.timer(0.1, _tick, once=True)      # kick off immediately on first load
     ui.timer(30.0, _tick)                # master heartbeat
 
