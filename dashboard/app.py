@@ -54,10 +54,17 @@ SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "gr
 # ---- refreshable panels ----------------------------------------------------
 
 def _fmt_ts(s: str) -> str:
-    """Trim an ISO / pandas timestamp string to 'YYYY-MM-DD HH:MM'."""
+    """Format a stored timestamp for display in the user's LOCAL timezone.
+    Stored values are UTC (the canonical form); we convert to local here."""
     if not s:
         return "—"
-    return str(s).replace("T", " ")[:16]
+    try:
+        d = dt.datetime.fromisoformat(str(s))
+    except Exception:
+        return str(s).replace("T", " ")[:16]
+    if d.tzinfo is not None:        # UTC-aware -> local wall time
+        d = d.astimezone()
+    return d.strftime("%Y-%m-%d %H:%M")
 
 
 def _fmt_age(secs: float) -> str:
@@ -215,7 +222,8 @@ def paper_panel() -> None:
         ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
         ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
-             "Expectancy in R is the number that matters, not win rate. Times in UTC.")\
+             "Expectancy in R is the number that matters, not win rate. "
+             "Times shown in your local timezone.")\
         .classes("text-xs text-grey-6")
 
     # stats grouped by method
