@@ -20,8 +20,10 @@ import argparse
 import pandas as pd
 
 from analyst.features import compute_facts
+from metrics import deflated_sharpe_ratio
 from .instruments import UNIVERSE, BY_KEY
 from .providers import get_ohlc
+from . import scoring
 from .scoring import score_from_facts
 from . import paper
 
@@ -75,37 +77,47 @@ def replay_variant(df: pd.DataFrame, key: str, method: str, rr: float) -> list[f
     return rs
 
 
+def _run_block(data: dict, variants: list, n_trials: int) -> None:
+    print(f"{'variant':<12}{'n':>5}{'win%':>8}{'expR':>8}{'PF':>7}{'totalR':>9}{'DSR':>7}")
+    print("-" * 60)
+    for method, rr in variants:
+        all_r: list[float] = []
+        for key, df in data.items():
+            all_r += replay_variant(df, key, method, rr)
+        s = paper.stats(all_r)
+        dsr = deflated_sharpe_ratio(pd.Series(all_r), n_trials=n_trials) if all_r else 0.0
+        label = f"{method} rr{rr:.1f}" if method == "ATR" else "STRUCT"
+        pf = "inf" if s["profit_factor"] == float("inf") else f"{s['profit_factor']:.2f}"
+        flag = "" if s["trustworthy"] else "  (n<30)"
+        print(f"{label:<12}{s['n']:>5}{s['win_rate']*100:>7.1f}%{s['expectancy_R']:>8.3f}"
+              f"{pf:>7}{s['total_R']:>9.1f}{dsr:>7.0%}{flag}")
+    print("-" * 60)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--period", default="5y")
     args = ap.parse_args()
 
     variants = [("ATR", rr) for rr in paper.RR_SWEEP] + [("STRUCT", paper.RR_DEFAULT)]
-    # pull data once per instrument
     data = {}
     for inst in UNIVERSE:
         df = get_ohlc(inst, period=args.period, interval="1d")
         if df is not None and len(df) > 200:
             data[inst.key] = df
     print(f"Replay on {len(data)} instruments, period {args.period}, "
-          f"horizon {paper.HORIZON_DAYS}d, SL {paper.SL_ATR_MULT}xATR\n")
+          f"horizon {paper.HORIZON_DAYS}d, SL {paper.SL_ATR_MULT}xATR")
+    print("Pass bar for the filter: DSR >= 95% AND expR > 0.\n")
 
-    print(f"{'variant':<12}{'n':>5}{'win%':>8}{'expR':>8}{'avgWin':>8}"
-          f"{'avgLoss':>9}{'PF':>7}{'totalR':>9}")
-    print("-" * 66)
-    for method, rr in variants:
-        all_r: list[float] = []
-        for key, df in data.items():
-            all_r += replay_variant(df, key, method, rr)
-        s = paper.stats(all_r)
-        label = f"{method} rr{rr:.1f}" if method == "ATR" else "STRUCT"
-        pf = "inf" if s["profit_factor"] == float("inf") else f"{s['profit_factor']:.2f}"
-        flag = "" if s["trustworthy"] else "  (n<30: noisy)"
-        print(f"{label:<12}{s['n']:>5}{s['win_rate']*100:>7.1f}%{s['expectancy_R']:>8.3f}"
-              f"{s['avg_win_R']:>8.2f}{s['avg_loss_R']:>9.2f}{pf:>7}{s['total_R']:>9.1f}{flag}")
-    print("-" * 66)
-    print("expR = expectancy per trade in R (THE number). >0 means the setup made money\n"
-          "after costs; <=0 means it didn't. PF = gross win R / gross loss R.")
+    # A/B the pre-registered exhaustion filter, same data, deterministic signals.
+    for on in (False, True):
+        scoring.BLOCK_EXHAUSTION_ENTRIES = on
+        print(f"=== exhaustion filter {'ON' if on else 'OFF (baseline)'} ===")
+        _run_block(data, variants, n_trials=len(variants))
+        print()
+    print("expR = per-trade expectancy in R (THE number). DSR = P(true Sharpe>0)\n"
+          "after penalising for trying the variants. LLM signals are NOT replayed\n"
+          "(look-ahead); this judges only the reproducible deterministic logic.")
 
 
 if __name__ == "__main__":

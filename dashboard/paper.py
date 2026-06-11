@@ -25,17 +25,24 @@ from .log import log
 from . import store
 
 # ---- config (tunable defaults) --------------------------------------------
-SL_ATR_MULT = 2.0          # stop = 2 x ATR (matches the risk gate)
-RR_DEFAULT = 2.0           # take-profit reward:risk for the ATR variant
-RR_SWEEP = [1.5, 2.0, 3.0]  # ATR variants we compare
+# Config below was selected by dashboard/optimize.py (in-sample over 5y) and
+# held up out-of-sample at +0.32 R/trade -- BUT deflated Sharpe was only 43%
+# (not the >=95% bar). So this is the best-available, UNPROVEN config: a
+# hypothesis to forward-test, not a validated edge. Profile = trend-following
+# (wide target, tight stop, only the strongest signals -> fewer, higher quality).
+SL_ATR_MULT = 1.5          # stop = 1.5 x ATR
+RR_DEFAULT = 3.0           # take-profit reward:risk (needs only ~25% win rate)
+RR_SWEEP = [2.0, 3.0, 4.0]  # ATR variants we compare in replay
 MIN_RR = 1.5               # reject setups whose geometry is worse than this
 HORIZON_DAYS = 5           # trade validity (trading days ~ calendar 7d window)
 HORIZON_CAL = 7
 RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
 ACCOUNT = 10_000.0
 CONF_THRESHOLD = 0.60      # min LLM confidence (forward only)
-MIN_STRENGTH = 3           # min deterministic trend strength
+MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment
 HALF_SPREAD = 0.00005      # per-side cost as fraction of price (~0.5 bp)
+COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
+                           # of its last close (prevents churning one instrument)
 
 _DB = pathlib.Path(__file__).resolve().parent / "dashboard.db"
 _LOCK = threading.Lock()
@@ -43,10 +50,15 @@ _LOCK = threading.Lock()
 
 # ---- SL/TP computation -----------------------------------------------------
 
-def compute_sltp(facts: dict, direction: str, method: str, rr: float = RR_DEFAULT):
+def compute_sltp(facts: dict, direction: str, method: str, rr: float = RR_DEFAULT,
+                 entry: float | None = None):
     """Return (entry, sl, tp, rr_actual) or None if geometry is invalid.
-    method: 'ATR' (fixed rr) or 'STRUCT' (support/resistance, rr falls out)."""
-    entry = facts["last_price"]
+    method: 'ATR' (fixed rr) or 'STRUCT' (support/resistance, rr falls out).
+
+    `entry` should be the LIVE price at placement. If omitted we fall back to the
+    (possibly stale) last bar close -- which, against live-tick resolution, makes
+    trades enter offside and get stopped instantly. Always pass the live price."""
+    entry = entry if entry is not None else facts["last_price"]
     atr = facts.get("atr14") or 0.0
     if method == "ATR":
         if atr <= 0:
@@ -223,6 +235,43 @@ def _has_open(instrument: str, method: str) -> bool:
                          "AND status='OPEN' LIMIT 1", (instrument, method)).fetchone() is not None
 
 
+# --- de-correlation (Tier-2 step 3) ----------------------------------------
+# Gold + all the FX majors here are essentially one "long/short USD" bet, so
+# holding several at once is one position sized N times. Limit concurrent open
+# positions to ONE instrument per USD direction (different methods on the SAME
+# instrument are still allowed). Oil isn't a clean USD bet -> its own bucket.
+DECORRELATE = True
+_USD_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD"}   # USD is the quote currency
+_USD_BASE = {"USDJPY", "USDCAD"}              # USD is the base currency
+_GOLD = {"XAUUSD"}
+
+
+def _usd_direction(instrument: str, direction: str) -> int:
+    """+1 = the trade is long USD, -1 = short USD, 0 = not a USD bet (oil)."""
+    if instrument in _USD_QUOTE:
+        return +1 if direction == "short" else -1
+    if instrument in _USD_BASE:
+        return +1 if direction == "long" else -1
+    if instrument in _GOLD:
+        return +1 if direction == "short" else -1
+    return 0
+
+
+def _recent_close(instrument: str, minutes: int = COOLDOWN_MIN) -> bool:
+    """True if this instrument had a trade close within the last `minutes`."""
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes))
+    with _LOCK, _conn() as c:
+        rows = c.execute("SELECT exit_ts FROM paper_trades WHERE instrument=? "
+                         "AND status!='OPEN' AND exit_ts!=''", (instrument,)).fetchall()
+    for (xt,) in rows:
+        try:
+            if _as_utc(xt) >= cutoff:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _update_resolution(trade_id: int, status: str, exit_ts: str,
                        exit_price: float, realized_r: float) -> None:
     with _LOCK, _conn() as c:
@@ -255,6 +304,12 @@ def place_from_state(state: dict) -> list[str]:
     log.info("placement run: evaluating %d instruments", len(state.get("scores", {})))
     now = dt.datetime.now(dt.timezone.utc)  # store entry time in true UTC
     horizon_end = (now + dt.timedelta(days=HORIZON_CAL)).isoformat(timespec="seconds")
+    # current USD exposure (instrument set per direction) for de-correlation
+    open_by_ud: dict[int, set] = {}
+    for ot in open_trades():
+        ud = _usd_direction(ot["instrument"], ot["direction"])
+        if ud:
+            open_by_ud.setdefault(ud, set()).add(ot["instrument"])
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
         ok, reasons, direction = evaluate_signal(key, score, llm_sig)
@@ -263,9 +318,26 @@ def place_from_state(state: dict) -> list[str]:
             continue
         conf = llm_sig.confidence if llm_sig else 0.0
         rationale = (llm_sig.rationale if llm_sig else score.note)[:300]
+        # use the LIVE price as entry (same feed as resolution) -- NOT the stale
+        # bar close, which makes trades enter offside and stop instantly.
+        live = state.get("live", {}).get(key) or {}
+        entry_px = live.get("price")
+        if entry_px is None:
+            logs.append(f"{key}: skip (no live price for entry)")
+            continue
+        if _recent_close(key):
+            logs.append(f"{key}: skip (cooldown — closed within {COOLDOWN_MIN}m)")
+            continue
+        ud = _usd_direction(key, direction)
+        if DECORRELATE and ud != 0:
+            holders = open_by_ud.get(ud, set())
+            if holders and key not in holders:
+                side = "long" if ud > 0 else "short"
+                logs.append(f"{key}: skip (de-correlation: already {side} USD via {holders})")
+                continue
         variants = [("ATR", rr) for rr in [RR_DEFAULT]] + [("STRUCT", None)]
         for method, rr in variants:
-            res = compute_sltp(score.facts, direction, method, rr or RR_DEFAULT)
+            res = compute_sltp(score.facts, direction, method, rr or RR_DEFAULT, entry=entry_px)
             if res is None:
                 logs.append(f"{key} {method}: skip (invalid geometry)")
                 continue
@@ -288,6 +360,8 @@ def place_from_state(state: dict) -> list[str]:
                    f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
             logs.append(msg)
             log.info("PLACED %s", msg)
+            if ud:
+                open_by_ud.setdefault(ud, set()).add(key)
     for line in logs:
         if "skip" in line:
             log.debug("funnel %s", line)
@@ -313,6 +387,12 @@ def _outcome_for(t: dict, get_ohlc_fn):
             t0 = entry_ts.to_pydatetime()
             t1 = (end_ts if horizon_passed else now_utc).to_pydatetime()
             ticks = mt5_client.get_ticks_range(inst.mt5, t0, t1)
+            if ticks is not None and len(ticks):
+                # keep only ticks strictly AFTER entry (tick index is broker time;
+                # convert to true UTC before comparing) -- a trade must never be
+                # resolved by a tick at or before the instant it was opened.
+                true_idx = ticks.index - pd.Timedelta(seconds=offset)
+                ticks = ticks[true_idx > entry_ts]
             if ticks is not None and len(ticks):
                 out = resolve_ticks(t["direction"], t["sl"], t["tp"], ticks)
                 log.debug("resolve %s %s via TICKS (%d ticks, exact) -> %s",

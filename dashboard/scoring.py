@@ -13,6 +13,19 @@ from dataclasses import dataclass
 from . import net  # noqa: F401
 from analyst.features import compute_facts  # from quant/
 
+# Pre-registered filter (Tier-2 step 4): do NOT take a trend-continuation entry
+# when momentum is at an extreme AGAINST the trade and price is pinned at the
+# structure it would have to break. I.e. don't short a deeply-oversold market
+# sitting on support, or buy a deeply-overbought market sitting on resistance.
+# Toggleable so replay can A/B it against the baseline.
+# RESULT (5y replay, judged by DSR): REJECTED. Blocking these entries made
+# expectancy WORSE (the deep-oversold shorts continued more often than they
+# bounced), so it ships OFF. Kept here, documented, as a tested-and-failed idea.
+BLOCK_EXHAUSTION_ENTRIES = False
+RSI_EXTREME_LO = 25.0
+RSI_EXTREME_HI = 75.0
+NEAR_STRUCT_ATR = 0.5   # "pinned at structure" = within 0.5 ATR of S/R
+
 
 @dataclass
 class Score:
@@ -49,7 +62,18 @@ def score_from_facts(key: str, facts: dict, facts_text: str) -> Score:
     elif votes <= -2 and mom20 < 0:
         signal = "SELL"
 
+    blocked = ""
+    if BLOCK_EXHAUSTION_ENTRIES:
+        near_support = facts.get("atr_to_support", 99) <= NEAR_STRUCT_ATR
+        near_resist = facts.get("atr_to_resistance", 99) <= NEAR_STRUCT_ATR
+        if signal == "SELL" and rsi <= RSI_EXTREME_LO and near_support:
+            signal, blocked = "WATCH", "blocked: oversold short pinned at support"
+        elif signal == "BUY" and rsi >= RSI_EXTREME_HI and near_resist:
+            signal, blocked = "WATCH", "blocked: overbought long pinned at resistance"
+
     notes = []
+    if blocked:
+        notes.append(blocked)
     notes.append(f"{abs(votes)}/3 timeframes {direction}")
     notes.append(f"20d {mom20:+.1%}")
     if rsi >= 70:
