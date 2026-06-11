@@ -100,6 +100,20 @@ def export() -> tuple[str, str]:
 
 
 if __name__ == "__main__":
-    csvp, repp = export()
-    print(f"Wrote:\n  {csvp}\n  {repp}\n")
-    print(build_report())
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--archive", action="store_true",
+                    help="snapshot + archive all trades and reset counts to zero")
+    args = ap.parse_args()
+    if args.archive:
+        r = paper.archive_and_reset()
+        print(f"Archived {r['archived']} trade(s) as batch {r['batch']}.")
+        print(f"Snapshot saved:\n  {r['csv']}\n  {r['report']}")
+        print("Live journal reset — counting starts fresh.")
+        print("\nArchive batches:")
+        for b in paper.archive_batches():
+            print(f"  {b['batch']}  ({b['n']} trades)")
+    else:
+        csvp, repp = export()
+        print(f"Wrote:\n  {csvp}\n  {repp}\n")
+        print(build_report())

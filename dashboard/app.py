@@ -220,7 +220,9 @@ def paper_panel() -> None:
 
     with ui.row().classes("items-center justify-between w-full"):
         ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
-        ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
+        with ui.row().classes("gap-1"):
+            ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
+            ui.button("Archive & reset", icon="inventory_2", on_click=_archive_reset).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
              "Expectancy in R is the number that matters, not win rate. "
              "Times shown in your local timezone.")\
@@ -371,6 +373,25 @@ async def _export_results() -> None:
         ui.button("Close", on_click=dlg.close).props("flat")
     dlg.open()
     ui.notify("Exported report + CSV to exports/")
+
+
+async def _archive_reset() -> None:
+    from . import paper
+    with ui.dialog() as dlg, ui.card():
+        ui.label("Archive & reset journal?").classes("text-lg font-bold")
+        ui.label("Saves a snapshot (CSV + report) and copies all trades to the "
+                 "archive, then clears the live journal so counting restarts at 0. "
+                 "Nothing is deleted — archived trades are kept.").classes("text-sm")
+        with ui.row():
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            async def _go():
+                dlg.close()
+                r = await run.io_bound(paper.archive_and_reset)
+                paper_panel.refresh(); active_panel.refresh(); header_status.refresh()
+                ui.notify(f"Archived {r['archived']} trade(s) as {r['batch']}. "
+                          f"Journal reset.")
+            ui.button("Archive & reset", on_click=_go).props("color=negative")
+    dlg.open()
 
 
 # ---- page ------------------------------------------------------------------

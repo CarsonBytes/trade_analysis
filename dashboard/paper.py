@@ -426,6 +426,44 @@ def _outcome_for(t: dict, get_ohlc_fn):
     return "OPEN"
 
 
+def archive_and_reset() -> dict:
+    """Snapshot the current journal (CSV + Markdown to exports/), copy every
+    trade into paper_trades_archive tagged with a batch timestamp, then CLEAR
+    the live paper_trades so counting starts fresh. Nothing is lost.
+
+    Returns {archived, batch, csv, report}."""
+    csvp = repp = ""
+    try:
+        from . import report  # lazy import to avoid a circular import
+        csvp, repp = report.export()
+    except Exception as e:
+        log.warning("archive: snapshot export failed: %s", e)
+
+    batch = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    with _LOCK, _conn() as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(paper_trades)").fetchall()]
+        c.execute("CREATE TABLE IF NOT EXISTS paper_trades_archive "
+                  "(archive_batch TEXT, " + ", ".join(cols) + ")")
+        n = c.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        collist = ", ".join(cols)
+        c.execute(f"INSERT INTO paper_trades_archive (archive_batch, {collist}) "
+                  f"SELECT ?, {collist} FROM paper_trades", (batch,))
+        c.execute("DELETE FROM paper_trades")
+    log.info("archived %d trade(s) as batch %s; journal reset", n, batch)
+    return {"archived": n, "batch": batch, "csv": csvp, "report": repp}
+
+
+def archive_batches() -> list[dict]:
+    """List archive batches with counts (for transparency)."""
+    with _LOCK, _conn() as c:
+        if not c.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                         "AND name='paper_trades_archive'").fetchone():
+            return []
+        rows = c.execute("SELECT archive_batch, COUNT(*) FROM paper_trades_archive "
+                         "GROUP BY archive_batch ORDER BY archive_batch DESC").fetchall()
+        return [{"batch": b, "n": n} for b, n in rows]
+
+
 def resolve_open(get_ohlc_fn) -> int:
     """Resolve OPEN trades against fresh data. Returns count resolved."""
     resolved = 0
