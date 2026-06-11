@@ -464,6 +464,47 @@ def archive_batches() -> list[dict]:
         return [{"batch": b, "n": n} for b, n in rows]
 
 
+def archived_trades(batch: str | None = None) -> list[dict]:
+    """Archived trades (optionally one batch). Each row carries `rowid`, the
+    stable selector used by unarchive()."""
+    with _LOCK, _conn() as c:
+        if not c.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                         "AND name='paper_trades_archive'").fetchone():
+            return []
+        q = "SELECT rowid, * FROM paper_trades_archive"
+        params: tuple = ()
+        if batch:
+            q += " WHERE archive_batch=?"
+            params = (batch,)
+        q += " ORDER BY rowid DESC"
+        cur = c.execute(q, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def unarchive(rowids: list[int]) -> int:
+    """Move selected archived rows back into the live journal. They get fresh
+    ids; the archived copies are removed. Returns count restored."""
+    if not rowids:
+        return 0
+    with _LOCK, _conn() as c:
+        live_cols = [r[1] for r in c.execute("PRAGMA table_info(paper_trades)").fetchall()
+                     if r[1] != "id"]
+        collist = ", ".join(live_cols)
+        placeholders = ", ".join("?" * len(live_cols))
+        n = 0
+        for rid in rowids:
+            row = c.execute(f"SELECT {collist} FROM paper_trades_archive WHERE rowid=?",
+                            (rid,)).fetchone()
+            if row is None:
+                continue
+            c.execute(f"INSERT INTO paper_trades ({collist}) VALUES ({placeholders})", row)
+            c.execute("DELETE FROM paper_trades_archive WHERE rowid=?", (rid,))
+            n += 1
+    log.info("unarchived %d trade(s) back to the live journal", n)
+    return n
+
+
 def resolve_open(get_ohlc_fn) -> int:
     """Resolve OPEN trades against fresh data. Returns count resolved."""
     resolved = 0

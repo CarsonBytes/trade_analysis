@@ -223,6 +223,7 @@ def paper_panel() -> None:
         with ui.row().classes("gap-1"):
             ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
             ui.button("Archive & reset", icon="inventory_2", on_click=_archive_reset).props("flat dense")
+            ui.button("View archive", icon="history", on_click=_open_archive).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
              "Expectancy in R is the number that matters, not win rate. "
              "Times shown in your local timezone.")\
@@ -373,6 +374,40 @@ async def _export_results() -> None:
         ui.button("Close", on_click=dlg.close).props("flat")
     dlg.open()
     ui.notify("Exported report + CSV to exports/")
+
+
+def _open_archive() -> None:
+    from . import paper
+    raw = paper.archived_trades()
+    rows = [{"rowid": t["rowid"], "batch": _fmt_ts(t["archive_batch"]),
+             "instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
+             "status": t["status"], "R": round(t["realized_r"], 2),
+             "opened": _fmt_ts(t["ts"]), "closed": _fmt_ts(t["exit_ts"])} for t in raw]
+    with ui.dialog().props("full-width") as dlg, ui.card().classes("w-full"):
+        ui.label(f"Archived trades ({len(rows)})").classes("text-lg font-bold")
+        if not rows:
+            ui.label("No archived trades yet.").classes("text-sm text-grey")
+        else:
+            cols = [{"name": c, "label": c, "field": c, "sortable": True}
+                    for c in ["batch", "instrument", "dir", "method", "status",
+                              "R", "opened", "closed"]]
+            table = ui.table(columns=cols, rows=rows, row_key="rowid",
+                             selection="multiple").classes("w-full").props("dense")
+            ui.label("Tick rows, then Unarchive to move them back to the live journal.")\
+                .classes("text-xs text-grey-6")
+
+            async def _unarch() -> None:
+                ids = [r["rowid"] for r in table.selected]
+                if not ids:
+                    ui.notify("Select one or more rows first."); return
+                n = await run.io_bound(paper.unarchive, ids)
+                paper_panel.refresh(); active_panel.refresh()
+                dlg.close()
+                ui.notify(f"Unarchived {n} trade(s) back to the live journal.")
+
+            ui.button("Unarchive selected", icon="unarchive", on_click=_unarch).props("color=primary")
+        ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
 
 
 async def _archive_reset() -> None:
