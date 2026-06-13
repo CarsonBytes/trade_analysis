@@ -26,8 +26,11 @@ def get_logger() -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S")
 
+    # ~50 MB of history (10 MB x 5) so a multi-week forward test isn't silently
+    # truncated. The structured audit lives in SQLite (journal.py); this is the
+    # human-readable narrative backup.
     fh = logging.handlers.RotatingFileHandler(
-        _LOG_DIR / "dashboard.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+        _LOG_DIR / "dashboard.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     logger.addHandler(fh)

@@ -15,6 +15,7 @@ from __future__ import annotations
 from . import net  # noqa: F401
 from dataclasses import dataclass, asdict
 import datetime as dt
+import json
 import sqlite3
 import pathlib
 import threading
@@ -200,6 +201,14 @@ class Trade:
     exit_price: float = 0.0
     realized_r: float = 0.0
     half_spread: float = HALF_SPREAD  # actual per-side cost fraction at placement
+    # --- frozen decision context (for retrospective; never used in logic) ---
+    invalidation: str = ""    # LLM's explicit "this is wrong if..." level
+    llm_bias: str = ""        # bullish/bearish/neutral
+    det_strength: int = 0     # deterministic trend strength 1..5 at entry
+    det_note: str = ""        # deterministic scorer's note at entry
+    macro_note: str = ""      # macro backdrop at the time of entry
+    entry_facts: str = ""     # JSON snapshot of the key facts at entry
+    exit_reason: str = ""     # human reason at close (TP/SL/horizon/manual)
 
 
 def _conn() -> sqlite3.Connection:
@@ -209,13 +218,25 @@ def _conn() -> sqlite3.Connection:
         method TEXT, entry REAL, sl REAL, tp REAL, rr REAL, size_units REAL,
         horizon_end TEXT, confidence REAL, rationale TEXT, status TEXT,
         exit_ts TEXT, exit_price REAL, realized_r REAL)""")
+    # additive migrations for pre-existing DBs: (column, SQL type + default)
+    _MIGRATIONS = [
+        ("half_spread", "REAL DEFAULT 0.00005"),
+        ("invalidation", "TEXT DEFAULT ''"),
+        ("llm_bias", "TEXT DEFAULT ''"),
+        ("det_strength", "INTEGER DEFAULT 0"),
+        ("det_note", "TEXT DEFAULT ''"),
+        ("macro_note", "TEXT DEFAULT ''"),
+        ("entry_facts", "TEXT DEFAULT ''"),
+        ("exit_reason", "TEXT DEFAULT ''"),
+    ]
     for table in ("paper_trades", "paper_trades_archive"):
         if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                          (table,)).fetchone():
             continue
         cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
-        if "half_spread" not in cols:  # migrate pre-existing DBs
-            c.execute(f"ALTER TABLE {table} ADD COLUMN half_spread REAL DEFAULT 0.00005")
+        for col, decl in _MIGRATIONS:
+            if col not in cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     return c
 
 
@@ -293,10 +314,12 @@ def _recent_close(instrument: str, minutes: int = COOLDOWN_MIN) -> bool:
 
 
 def _update_resolution(trade_id: int, status: str, exit_ts: str,
-                       exit_price: float, realized_r: float) -> None:
+                       exit_price: float, realized_r: float,
+                       exit_reason: str = "") -> None:
     with _LOCK, _conn() as c:
-        c.execute("UPDATE paper_trades SET status=?, exit_ts=?, exit_price=?, realized_r=? "
-                  "WHERE id=?", (status, exit_ts, exit_price, realized_r, trade_id))
+        c.execute("UPDATE paper_trades SET status=?, exit_ts=?, exit_price=?, "
+                  "realized_r=?, exit_reason=? WHERE id=?",
+                  (status, exit_ts, exit_price, realized_r, exit_reason, trade_id))
 
 
 # ---- forward funnel: turn a live signal into trades ------------------------
@@ -334,11 +357,23 @@ def place_from_state(state: dict) -> list[str]:
     for ot in open_trades():
         for b in _risk_buckets(ot["instrument"], ot["direction"]):
             open_by_bucket.setdefault(b, set()).add(ot["instrument"])
+    macro = state.get("macro_note", "")
+    rejected: list[dict] = []  # genuine BUY/SELL candidates that got blocked
+
+    def _reject(reasons: list[str], score, llm_sig, direction: str) -> None:
+        rejected.append({"instrument": score.key, "direction": direction,
+                         "det_strength": score.strength,
+                         "confidence": (llm_sig.confidence if llm_sig else 0.0),
+                         "reasons": reasons})
+
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
         ok, reasons, direction = evaluate_signal(key, score, llm_sig)
         if not ok:
             logs.append(f"{key}: skip ({'; '.join(reasons)})")
+            # only record genuine directional candidates, not WAIT/WATCH noise
+            if reasons != ["action is WAIT/WATCH"]:
+                _reject(reasons, score, llm_sig, direction)
             continue
         conf = llm_sig.confidence if llm_sig else 0.0
         rationale = (llm_sig.rationale if llm_sig else score.note)[:300]
@@ -348,12 +383,14 @@ def place_from_state(state: dict) -> list[str]:
         entry_px = live.get("price")
         if entry_px is None:
             logs.append(f"{key}: skip (no live price for entry)")
+            _reject(["no live price for entry"], score, llm_sig, direction)
             continue
         # real cost: half the observed live spread as a fraction of price;
         # fall back to the flat default when only bar data is available
         hs = (live["spread"] / 2) / entry_px if live.get("spread") else HALF_SPREAD
         if _recent_close(key):
             logs.append(f"{key}: skip (cooldown — closed within {COOLDOWN_MIN}m)")
+            _reject([f"cooldown < {COOLDOWN_MIN}m"], score, llm_sig, direction)
             continue
         buckets = _risk_buckets(key, direction)
         if DECORRELATE:
@@ -364,6 +401,7 @@ def place_from_state(state: dict) -> list[str]:
                 holders = open_by_bucket[clash]
                 logs.append(f"{key}: skip (de-correlation: already {side} "
                             f"{clash[0]} via {holders})")
+                _reject([f"de-correlation {clash[0]}"], score, llm_sig, direction)
                 continue
         variants = [("ATR", rr) for rr in [RR_DEFAULT]] + [("STRUCT", None)]
         for method, rr in variants:
@@ -381,11 +419,24 @@ def place_from_state(state: dict) -> list[str]:
                 continue
             risk_price = abs(entry - sl)
             size = (ACCOUNT * RISK_PER_TRADE) / risk_price if risk_price > 0 else 0
+            f = score.facts
+            entry_facts = json.dumps({
+                "rsi14": f.get("rsi14"), "atr14": f.get("atr14"),
+                "atr14_med60": f.get("atr14_med60"),
+                "realized_vol_annual": f.get("realized_vol_annual"),
+                "trend": f.get("trend"), "returns": f.get("returns"),
+                "support_60": f.get("support_60"), "resistance_60": f.get("resistance_60"),
+                "vol_filter_ok": (f.get("atr14") or 0) >= (f.get("atr14_med60") or 0),
+            }, default=float)
             _insert(Trade(
                 ts=now.isoformat(timespec="seconds"), instrument=key, direction=direction,
                 method=mlabel, entry=entry, sl=sl, tp=tp, rr=round(rr_actual, 2),
                 size_units=round(size, 2), horizon_end=horizon_end,
-                confidence=conf, rationale=rationale, half_spread=hs))
+                confidence=conf, rationale=rationale, half_spread=hs,
+                invalidation=(llm_sig.invalidation if llm_sig else ""),
+                llm_bias=(llm_sig.bias if llm_sig else ""),
+                det_strength=score.strength, det_note=score.note[:300],
+                macro_note=macro[:500], entry_facts=entry_facts))
             msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
                    f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
             logs.append(msg)
@@ -395,6 +446,12 @@ def place_from_state(state: dict) -> list[str]:
     for line in logs:
         if "skip" in line:
             log.debug("funnel %s", line)
+    # persist the counterfactuals (rejected candidates) for constraint analysis
+    try:
+        from . import journal
+        journal.record_rejections(rejected)
+    except Exception as e:
+        log.warning("journal: could not record rejections: %s", e)
     return logs
 
 
@@ -545,7 +602,10 @@ def resolve_open(get_ohlc_fn) -> int:
         status, exit_price, exit_time = out
         r = r_multiple(t["direction"], t["entry"], t["sl"], exit_price,
                        half_spread=t.get("half_spread") or HALF_SPREAD)
-        _update_resolution(t["id"], status, str(exit_time), exit_price, round(r, 3))
+        reason = {"WIN": "take-profit hit", "LOSS": "stop-loss hit",
+                  "EXPIRED": "horizon expired"}.get(status, status)
+        _update_resolution(t["id"], status, str(exit_time), exit_price, round(r, 3),
+                           exit_reason=reason)
         log.info("RESOLVED %s %s %s  R=%+.2f  entry=%.5f exit=%.5f @ %s",
                  t["instrument"], t["method"], status, r, t["entry"], exit_price, exit_time)
         resolved += 1

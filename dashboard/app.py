@@ -299,9 +299,82 @@ def active_panel() -> None:
                 ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}").classes("text-xs text-grey-6")
 
 
+@ui.refreshable
+def retrospective_panel() -> None:
+    """Live equity curve + constraint scorecard for the forward test."""
+    from . import paper, journal
+    from .retrospective import equity_curve
+
+    trades = paper.all_trades()
+    closed = [t for t in trades if t["status"] != "OPEN"]
+    rs = [t["realized_r"] for t in closed]
+    s = paper.stats(rs)
+    curve, max_dd = equity_curve(closed)
+
+    with ui.row().classes("items-center justify-between w-full"):
+        ui.label("Retrospective — KPIs & Constraints").classes("text-lg font-bold")
+        ui.button("Export full report", icon="download",
+                  on_click=_export_retrospective).props("flat dense")
+    ui.label("Equity curve is cumulative R over closed trades (entry order). "
+             "Constraint scorecard counts how often each gate blocked a candidate "
+             "— the evidence for adding/adjusting/removing a rule.")\
+        .classes("text-xs text-grey-6")
+
+    # KPI cards
+    with ui.row().classes("w-full flex-wrap gap-3"):
+        def _kpi(title: str, value: str, sub: str, good: bool | None = None) -> None:
+            col = ("bg-green-1" if good else "bg-red-1") if good is not None else ""
+            with ui.card().classes(f"min-w-[170px] {col}"):
+                ui.label(title).classes("text-xs text-grey-7")
+                ui.label(value).classes("text-base font-bold")
+                ui.label(sub).classes("text-xs text-grey-6")
+        total_r = curve[-1] if curve else 0.0
+        _kpi("Expectancy", f"{s['expectancy_R']:+.3f} R", f"n={s['n']}",
+             good=(s["expectancy_R"] > 0) if s["n"] else None)
+        _kpi("Total / equity", f"{total_r:+.2f} R",
+             f"{total_r*paper.RISK_PER_TRADE:+.2%} acct", good=(total_r > 0) if curve else None)
+        _kpi("Max drawdown", f"{max_dd:.2f} R",
+             f"{-max_dd*paper.RISK_PER_TRADE:.2%} acct", good=(max_dd == 0) if curve else None)
+        _kpi("Win rate", f"{s['win_rate']:.0%}",
+             "≥30 to trust" if not s["trustworthy"] else "trustworthy")
+
+    # equity curve
+    if curve:
+        ui.echart({
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": list(range(1, len(curve) + 1)),
+                      "name": "closed trade #"},
+            "yAxis": {"type": "value", "name": "cumulative R"},
+            "series": [{"type": "line", "data": curve, "smooth": True,
+                        "areaStyle": {}, "lineStyle": {"width": 2}}],
+            "grid": {"left": 50, "right": 20, "top": 30, "bottom": 40},
+        }).classes("w-full h-64")
+    else:
+        ui.label("No closed trades yet — the equity curve appears as trades settle.")\
+            .classes("text-sm text-grey")
+
+    # constraint scorecard
+    ui.label("Constraint scorecard").classes("text-sm font-bold mt-2")
+    counts = journal.rejection_counts()
+    if counts:
+        rows = [{"constraint": reason, "blocked": n} for reason, n in counts]
+        ui.table(rows=rows,
+                 columns=[{"name": "constraint", "label": "constraint (gate)",
+                           "field": "constraint", "align": "left"},
+                          {"name": "blocked", "label": "times blocked",
+                           "field": "blocked", "align": "right",
+                           "sortable": True}])\
+            .classes("w-full").props("dense")
+    else:
+        ui.label("No rejected candidates recorded yet. Once board scans run, "
+                 "every blocked BUY/SELL is tallied here by gate.")\
+            .classes("text-sm text-grey")
+
+
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
     grid.refresh(); paper_panel.refresh(); active_panel.refresh()
+    retrospective_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -374,6 +447,19 @@ async def _export_results() -> None:
         ui.button("Close", on_click=dlg.close).props("flat")
     dlg.open()
     ui.notify("Exported report + CSV to exports/")
+
+
+async def _export_retrospective() -> None:
+    from . import retrospective
+    path = await run.io_bound(retrospective.export)
+    rep = retrospective.build()
+    with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
+        ui.label("Forward-test retrospective").classes("text-lg font-bold")
+        ui.label(f"Saved: {path}").classes("text-xs text-grey")
+        ui.code(rep).classes("w-full max-h-[60vh] overflow-auto")
+        ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+    ui.notify("Exported retrospective to exports/")
 
 
 def _open_archive() -> None:
@@ -456,6 +542,7 @@ def main_page() -> None:
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")
             t_trades = ui.tab("Paper Trades", icon="receipt_long")
+            t_retro = ui.tab("Retrospective", icon="insights")
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
             with ui.tab_panel(t_board):
                 macro_banner()
@@ -464,6 +551,8 @@ def main_page() -> None:
                 grid()
             with ui.tab_panel(t_trades):
                 paper_panel()
+            with ui.tab_panel(t_retro):
+                retrospective_panel()
 
     # initial load + periodic master tick (30s); the tick decides what actually runs
     # live UI tick (1s): clocks + the "x ago" / tick-age labels stay current

@@ -21,6 +21,7 @@ from .board_scan import run_board_scan, InstrumentSignal
 from .providers import get_ohlc
 from . import store
 from . import paper
+from . import journal
 from . import executor
 from . import mt5_client
 from .log import log
@@ -140,6 +141,12 @@ def refresh_llm(cap: int | None = None) -> str:
         STATE["llm"] = {s.key: s for s in result.signals}
         STATE["macro_note"] = result.macro_note
         STATE["last_llm"] = _now()
+        # append the FULL scan to the audit journal (the cache only keeps the
+        # latest; this preserves the whole history for retrospective)
+        try:
+            journal.record_scan(result, STATE["scores"])
+        except Exception as e:
+            log.warning("journal: could not record board scan: %s", e)
         # cache a lightweight snapshot so a restart shows something immediately
         store.cache_set("last_board_scan", {
             "macro_note": result.macro_note,

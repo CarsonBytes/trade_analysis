@@ -272,13 +272,22 @@ def flatten_foreign(poll: bool = False, interval: int = 60,
     this can be launched while the market is shut and it fires on reopen.
     Demo-guarded: refuses to act on a non-demo account."""
     import time
-    mt5 = _guard()
-    if mt5 is None:
-        log.warning("flatten_foreign: not a demo account (or MT5 down) -- aborting")
-        return ["aborted: not a demo account"]
     deadline = time.time() + timeout_h * 3600
     logs: list[str] = []
     while True:
+        # safety + robustness: distinguish "MT5 not up yet" (retryable when
+        # polling -- e.g. terminal launches after this task) from "live account"
+        # (HARD abort, must never retry into a real-money trade).
+        if not mt5_client.is_available():
+            if poll and time.time() < deadline:
+                log.info("flatten_foreign: MT5 terminal not available; retrying in %ds",
+                         interval)
+                time.sleep(interval); continue
+            return ["aborted: MT5 terminal not available"]
+        if not is_demo():
+            log.warning("flatten_foreign: account is NOT demo -- refusing to trade")
+            return ["aborted: not a demo account"]
+        mt5 = _mt5()
         targets = foreign_positions()
         if not targets:
             logs.append("no foreign positions open -- account is flat")
