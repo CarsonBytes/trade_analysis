@@ -61,7 +61,7 @@ uv run python -m dashboard.app          # → open http://localhost:8080
 # or from the project root:  uv run python run_dashboard.py
 ```
 Real-time board: ranked opportunities, batched LLM scan, news, and the Paper Trades
-panel. Auto-refresh selector (1/10/15/30/60 min, default 15), weekend LLM auto-pause,
+panel. Auto-refresh selector (1/10/15/30/60 min, default 10), weekend LLM auto-pause,
 manual refresh, and a daily API-call budget guard (default cap 200).
 
 ### Paper trading — historical replay (bootstrap a track record now)

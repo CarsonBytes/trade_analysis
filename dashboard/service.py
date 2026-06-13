@@ -21,6 +21,7 @@ from .board_scan import run_board_scan, InstrumentSignal
 from .providers import get_ohlc
 from . import store
 from . import paper
+from . import executor
 from . import mt5_client
 from .log import log
 
@@ -116,6 +117,11 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["paper_resolved"] = f"resolve error: {e}"
         log.exception("paper resolution error: %s", e)
+    # keep the demo account in step (close positions whose paper trade resolved)
+    try:
+        executor.sync_closures()
+    except Exception as e:
+        log.exception("executor closure sync error: %s", e)
 
 
 def refresh_news() -> None:
@@ -144,6 +150,13 @@ def refresh_llm(cap: int | None = None) -> str:
             STATE["paper_logs"] = paper.place_from_state(STATE)
         except Exception as e:
             STATE["paper_logs"] = [f"placement error: {e}"]
+        # mirror new live-variant trades to the MT5 DEMO account (real fills);
+        # executor refuses to act unless the account is broker-flagged demo
+        try:
+            STATE["executor_logs"] = executor.mirror_new()
+        except Exception as e:
+            STATE["executor_logs"] = [f"executor error: {e}"]
+            log.exception("executor mirror error: %s", e)
     STATE["last_status"] = status
     STATE["calls_today"] = store.calls_today()
     log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)

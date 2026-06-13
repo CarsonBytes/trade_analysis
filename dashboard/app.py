@@ -21,7 +21,7 @@ from .instruments import BY_KEY
 from .scoring import rank
 
 # ---- settings (live, editable from the UI) --------------------------------
-SETTINGS = {"interval_min": 15, "auto_pause": True, "cap": 200}
+SETTINGS = {"interval_min": 10, "auto_pause": True, "cap": 200}
 LLM_MIN_GAP_MIN = 10           # never call the LLM more often than this
 _busy = {"flag": False}
 

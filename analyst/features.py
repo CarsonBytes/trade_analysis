@@ -50,6 +50,10 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
 
     rsi = _rsi(prices)
     atr = _atr_proxy(prices)
+    # rolling median of the ATR series: the vol-regime baseline (trend entries
+    # only earn their keep when current vol is at/above this -- replay-validated)
+    atr_series = prices.diff().abs().rolling(14).mean()
+    atr_med60 = float(atr_series.tail(60).median())
     realized_vol = float(prices.pct_change().tail(20).std() * np.sqrt(252))
 
     # support/resistance from recent extremes
@@ -76,6 +80,7 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
         "returns": ret,
         "rsi14": rsi,
         "atr14": atr,
+        "atr14_med60": atr_med60,
         "realized_vol_annual": realized_vol,
         "support_60": support,
         "resistance_60": resistance,

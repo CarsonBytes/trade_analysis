@@ -40,6 +40,9 @@ RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
 ACCOUNT = 10_000.0
 CONF_THRESHOLD = 0.60      # min LLM confidence (forward only)
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment
+VOL_FILTER = True          # enter only when atr14 >= its 60-bar median.
+                           # Replay-validated 2026-06-13: OOS expR 0.245->0.423,
+                           # OOS DSR 88%->93% (4-trial penalty) vs baseline.
 HALF_SPREAD = 0.00005      # per-side cost as fraction of price (~0.5 bp)
 COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
                            # of its last close (prevents churning one instrument)
@@ -142,8 +145,9 @@ def _mt5_to_utc(x, offset_sec: float) -> pd.Timestamp:
     return _as_utc(x) - pd.Timedelta(seconds=offset_sec)
 
 
-def r_multiple(direction: str, entry: float, sl: float, exit_price: float) -> float:
-    cost = entry * HALF_SPREAD * 2  # entry + exit
+def r_multiple(direction: str, entry: float, sl: float, exit_price: float,
+               half_spread: float = HALF_SPREAD) -> float:
+    cost = entry * half_spread * 2  # entry + exit
     if direction == "long":
         risk, pnl = entry - sl, exit_price - entry - cost
     else:
@@ -195,6 +199,7 @@ class Trade:
     exit_ts: str = ""
     exit_price: float = 0.0
     realized_r: float = 0.0
+    half_spread: float = HALF_SPREAD  # actual per-side cost fraction at placement
 
 
 def _conn() -> sqlite3.Connection:
@@ -204,6 +209,13 @@ def _conn() -> sqlite3.Connection:
         method TEXT, entry REAL, sl REAL, tp REAL, rr REAL, size_units REAL,
         horizon_end TEXT, confidence REAL, rationale TEXT, status TEXT,
         exit_ts TEXT, exit_price REAL, realized_r REAL)""")
+    for table in ("paper_trades", "paper_trades_archive"):
+        if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                         (table,)).fetchone():
+            continue
+        cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+        if "half_spread" not in cols:  # migrate pre-existing DBs
+            c.execute(f"ALTER TABLE {table} ADD COLUMN half_spread REAL DEFAULT 0.00005")
     return c
 
 
@@ -236,25 +248,33 @@ def _has_open(instrument: str, method: str) -> bool:
 
 
 # --- de-correlation (Tier-2 step 3) ----------------------------------------
-# Gold + all the FX majors here are essentially one "long/short USD" bet, so
-# holding several at once is one position sized N times. Limit concurrent open
-# positions to ONE instrument per USD direction (different methods on the SAME
-# instrument are still allowed). Oil isn't a clean USD bet -> its own bucket.
+# Correlated instruments are one bet sized N times: the FX majors + metals are
+# mostly a "long/short USD" bet, the JPY pairs a "short/long JPY" bet, the two
+# indices a "long/short equities" bet. Limit concurrent open positions to ONE
+# instrument per (bucket, direction); different methods on the SAME instrument
+# are still allowed. Oil isn't a clean member of any bucket -> unconstrained.
 DECORRELATE = True
-_USD_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD"}   # USD is the quote currency
-_USD_BASE = {"USDJPY", "USDCAD"}              # USD is the base currency
-_GOLD = {"XAUUSD"}
+_USD_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"}  # USD is the quote ccy
+_USD_BASE = {"USDJPY", "USDCAD", "USDCHF"}             # USD is the base ccy
+_METALS = {"XAUUSD", "XAGUSD"}                         # priced in USD
+_JPY_SHORT = {"USDJPY", "EURJPY", "GBPJPY"}            # long pair = short JPY
+_EQUITY = {"SPX", "NDX"}
 
 
-def _usd_direction(instrument: str, direction: str) -> int:
-    """+1 = the trade is long USD, -1 = short USD, 0 = not a USD bet (oil)."""
-    if instrument in _USD_QUOTE:
-        return +1 if direction == "short" else -1
+def _risk_buckets(instrument: str, direction: str) -> list[tuple[str, int]]:
+    """The macro bets this trade expresses, as (bucket, +1/-1) pairs.
+    A trade can sit in several buckets (USDJPY is both a USD and a JPY bet)."""
+    sign = +1 if direction == "long" else -1
+    buckets: list[tuple[str, int]] = []
+    if instrument in _USD_QUOTE or instrument in _METALS:
+        buckets.append(("USD", -sign))
     if instrument in _USD_BASE:
-        return +1 if direction == "long" else -1
-    if instrument in _GOLD:
-        return +1 if direction == "short" else -1
-    return 0
+        buckets.append(("USD", sign))
+    if instrument in _JPY_SHORT:
+        buckets.append(("JPY", -sign))
+    if instrument in _EQUITY:
+        buckets.append(("EQ", sign))
+    return buckets
 
 
 def _recent_close(instrument: str, minutes: int = COOLDOWN_MIN) -> bool:
@@ -295,6 +315,11 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
         reasons.append(f"confidence {llm_sig.confidence:.2f} < {CONF_THRESHOLD}")
     if score.strength < MIN_STRENGTH:
         reasons.append(f"trend strength {score.strength} < {MIN_STRENGTH}")
+    if VOL_FILTER:
+        atr = score.facts.get("atr14") or 0.0
+        med = score.facts.get("atr14_med60") or 0.0
+        if med > 0 and atr < med:
+            reasons.append(f"vol filter: atr14 {atr:.5g} < 60-bar median {med:.5g}")
     return (len(reasons) == 0), reasons, direction
 
 
@@ -304,12 +329,11 @@ def place_from_state(state: dict) -> list[str]:
     log.info("placement run: evaluating %d instruments", len(state.get("scores", {})))
     now = dt.datetime.now(dt.timezone.utc)  # store entry time in true UTC
     horizon_end = (now + dt.timedelta(days=HORIZON_CAL)).isoformat(timespec="seconds")
-    # current USD exposure (instrument set per direction) for de-correlation
-    open_by_ud: dict[int, set] = {}
+    # current exposure (instrument set per bucket+direction) for de-correlation
+    open_by_bucket: dict[tuple[str, int], set] = {}
     for ot in open_trades():
-        ud = _usd_direction(ot["instrument"], ot["direction"])
-        if ud:
-            open_by_ud.setdefault(ud, set()).add(ot["instrument"])
+        for b in _risk_buckets(ot["instrument"], ot["direction"]):
+            open_by_bucket.setdefault(b, set()).add(ot["instrument"])
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
         ok, reasons, direction = evaluate_signal(key, score, llm_sig)
@@ -325,15 +349,21 @@ def place_from_state(state: dict) -> list[str]:
         if entry_px is None:
             logs.append(f"{key}: skip (no live price for entry)")
             continue
+        # real cost: half the observed live spread as a fraction of price;
+        # fall back to the flat default when only bar data is available
+        hs = (live["spread"] / 2) / entry_px if live.get("spread") else HALF_SPREAD
         if _recent_close(key):
             logs.append(f"{key}: skip (cooldown — closed within {COOLDOWN_MIN}m)")
             continue
-        ud = _usd_direction(key, direction)
-        if DECORRELATE and ud != 0:
-            holders = open_by_ud.get(ud, set())
-            if holders and key not in holders:
-                side = "long" if ud > 0 else "short"
-                logs.append(f"{key}: skip (de-correlation: already {side} USD via {holders})")
+        buckets = _risk_buckets(key, direction)
+        if DECORRELATE:
+            clash = next((b for b in buckets
+                          if open_by_bucket.get(b, set()) - {key}), None)
+            if clash:
+                side = "long" if clash[1] > 0 else "short"
+                holders = open_by_bucket[clash]
+                logs.append(f"{key}: skip (de-correlation: already {side} "
+                            f"{clash[0]} via {holders})")
                 continue
         variants = [("ATR", rr) for rr in [RR_DEFAULT]] + [("STRUCT", None)]
         for method, rr in variants:
@@ -355,13 +385,13 @@ def place_from_state(state: dict) -> list[str]:
                 ts=now.isoformat(timespec="seconds"), instrument=key, direction=direction,
                 method=mlabel, entry=entry, sl=sl, tp=tp, rr=round(rr_actual, 2),
                 size_units=round(size, 2), horizon_end=horizon_end,
-                confidence=conf, rationale=rationale))
+                confidence=conf, rationale=rationale, half_spread=hs))
             msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
                    f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
             logs.append(msg)
             log.info("PLACED %s", msg)
-            if ud:
-                open_by_ud.setdefault(ud, set()).add(key)
+            for b in buckets:
+                open_by_bucket.setdefault(b, set()).add(key)
     for line in logs:
         if "skip" in line:
             log.debug("funnel %s", line)
@@ -513,7 +543,8 @@ def resolve_open(get_ohlc_fn) -> int:
         if out is None or out == "OPEN":
             continue
         status, exit_price, exit_time = out
-        r = r_multiple(t["direction"], t["entry"], t["sl"], exit_price)
+        r = r_multiple(t["direction"], t["entry"], t["sl"], exit_price,
+                       half_spread=t.get("half_spread") or HALF_SPREAD)
         _update_resolution(t["id"], status, str(exit_time), exit_price, round(r, 3))
         log.info("RESOLVED %s %s %s  R=%+.2f  entry=%.5f exit=%.5f @ %s",
                  t["instrument"], t["method"], status, r, t["entry"], exit_price, exit_time)

@@ -63,8 +63,15 @@ def get_live_price(inst: Instrument) -> tuple[float | None, str, float | None]:
 
 def get_ohlc(inst: Instrument, period: str = "90d", interval: str = "1h") -> pd.DataFrame | None:
     """OHLC bars (open/high/low/close) for trade resolution -- we need high & low
-    to know whether SL or TP was touched. MT5 (M1) if available, else yfinance."""
-    df = mt5_client.get_rates(inst.mt5, "M1", 50_000)
+    to know whether SL or TP was touched. MT5 if available, else yfinance.
+    interval='1d' must return true DAILY bars: replay/optimize depend on it
+    (MT5 M1 bars would silently turn a '5y daily' backtest into ~5 weeks of
+    minute data with a 5-bar = 5-minute horizon)."""
+    if interval == "1d":
+        years = int(period[:-1]) if period.endswith("y") else 2
+        df = mt5_client.get_rates(inst.mt5, "D1", years * 262)
+    else:
+        df = mt5_client.get_rates(inst.mt5, "M1", 50_000)
     if df is not None and len(df) > 100:
         return df
     try:

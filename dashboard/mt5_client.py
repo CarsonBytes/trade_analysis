@@ -121,7 +121,12 @@ def get_tick(symbol: str) -> dict | None:
         # the broker's SERVER timezone, so age can be off by the server's UTC
         # offset (a few hours) -- fine for a coarse freshness indicator.
         secs = int(getattr(t, "time", 0) or 0)
-        ts = pd.to_datetime(secs, unit="s", utc=True) if secs > 0 else None
+        # bound to a sane epoch window: some symbols (esp. weekend / freshly
+        # selected) return a garbage tick time that builds a year-3.6M Timestamp
+        # and overflows the subtraction below. Out-of-range -> treat age unknown.
+        now_s = int(pd.Timestamp.now(tz="UTC").timestamp())
+        ts = (pd.to_datetime(secs, unit="s", utc=True)
+              if 946_684_800 < secs < now_s + 86_400 else None)  # 2000-01-01 .. now+1d
         raw = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() if ts is not None else None
         age = raw if (raw is not None and -2_678_400 < raw < 31_536_000) else None
         return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2,
