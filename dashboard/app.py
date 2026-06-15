@@ -21,7 +21,7 @@ from .instruments import BY_KEY
 from .scoring import rank
 
 # ---- settings (live, editable from the UI) --------------------------------
-SETTINGS = {"interval_min": 10, "auto_pause": True, "cap": 200}
+SETTINGS = {"interval_min": 10, "auto_pause": True, "cap": 200, "grid_cols": 3}
 LLM_MIN_GAP_MIN = 10           # never call the LLM more often than this
 _busy = {"flag": False}
 
@@ -141,7 +141,32 @@ def macro_banner() -> None:
         ui.label(note).classes("text-sm")
 
 
-def _signal_card(key: str, compact: bool = False):
+def _sparkline_svg(series: list[float], up: bool, w: int = 240, h: int = 40) -> str:
+    """Tiny inline-SVG price sparkline. Green if the window closed up, red if
+    down. No axes/labels — a glance, not a chart. Cheap enough for 14 cards."""
+    if not series or len(series) < 2:
+        return ""
+    lo, hi = min(series), max(series)
+    rng = (hi - lo) or 1.0
+    n = len(series)
+    pad = 3
+    def _x(i): return pad + i * (w - 2 * pad) / (n - 1)
+    def _y(v): return pad + (h - 2 * pad) * (1 - (v - lo) / rng)
+    pts = " ".join(f"{_x(i):.1f},{_y(v):.1f}" for i, v in enumerate(series))
+    color = "#21ba45" if up else "#db2828"
+    # faint area fill under the line + the line itself + a dot at the last point
+    area = f"{pad},{h-pad} " + pts + f" {w-pad},{h-pad}"
+    return (
+        f'<svg viewBox="0 0 {w} {h}" width="100%" height="{h}" '
+        f'preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">'
+        f'<polygon points="{area}" fill="{color}" opacity="0.10"/>'
+        f'<polyline points="{pts}" fill="none" stroke="{color}" '
+        f'stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
+        f'<circle cx="{_x(n-1):.1f}" cy="{_y(series[-1]):.1f}" r="2.2" fill="{color}"/>'
+        f'</svg>')
+
+
+def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260px] grow"):
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
     inst = BY_KEY[key]
@@ -151,16 +176,30 @@ def _signal_card(key: str, compact: bool = False):
     live = service.STATE.get("live", {}).get(key)
     price = live["price"] if live else (score.facts["last_price"] if score else None)
     src = live["src"] if live else service.STATE["sources"].get(key, "")
-    with ui.card().classes("min-w-[260px] grow"):
+    with ui.card().classes(f"{width_class} h-full"):
         with ui.row().classes("items-center justify-between w-full"):
             ui.label(f"{inst.name}").classes("text-base font-bold")
-            ui.badge(action, color=SIG_COLOR.get(action, "grey")).classes("text-sm")
+            with ui.row().classes("items-center gap-1"):
+                if score:
+                    from . import paper
+                    scol = ("positive" if score.strength >= paper.MIN_STRENGTH
+                            else ("orange" if score.strength == paper.MIN_STRENGTH - 1
+                                  else "grey"))
+                    ui.badge(f"{score.strength}/5", color=scol)\
+                        .props("outline").classes("text-xs").tooltip(
+                            f"trend strength (need ≥{paper.MIN_STRENGTH} to trade)")
+                ui.badge(action, color=SIG_COLOR.get(action, "grey")).classes("text-sm")
         if price is not None:
             with ui.row().classes("items-baseline gap-2"):
                 ui.label(f"{price:,.4f}").classes("text-lg")
                 tag = "● live" if src == "mt5-tick" else "○ delayed"
                 tcolor = "text-green" if src == "mt5-tick" else "text-grey-5"
                 ui.label(tag).classes(f"text-xs {tcolor}")
+        spark = service.STATE.get("spark", {}).get(key)
+        if spark:
+            up = spark[-1] >= spark[0]
+            ui.html(_sparkline_svg(spark, up, h=32 if compact else 40))\
+                .classes("w-full")
         if score:
             ui.label(score.note).classes("text-xs text-grey-7")
         if sig:
@@ -170,25 +209,79 @@ def _signal_card(key: str, compact: bool = False):
         ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
 
 
+def _top_opportunity_keys() -> list[str]:
+    """Keys shown in Top Opportunities (most-obvious BUY/SELL, top 4). Shared so
+    the Other-instruments grid can exclude them and not show duplicates."""
+    scores = rank(list(service.STATE["scores"].values()))
+    return [s.key for s in scores if s.signal in ("BUY", "SELL")][:4]
+
+
 @ui.refreshable
 def opportunities() -> None:
     scores = rank(list(service.STATE["scores"].values()))
-    obvious = [s for s in scores if s.signal in ("BUY", "SELL")][:4]
+    top = set(_top_opportunity_keys())
+    obvious = [s for s in scores if s.key in top]
     ui.label("Top Opportunities (most obvious trends)").classes("text-lg font-bold")
     if not obvious:
         ui.label("No obviously aligned trends right now — mostly WATCH/WAIT.").classes("text-sm text-grey")
         return
-    with ui.row().classes("w-full flex-wrap gap-3"):
+    n = SETTINGS.get("grid_cols", 3)
+    with ui.element("div").classes("w-full items-stretch").style(
+            f"display:grid; grid-template-columns: repeat({n}, minmax(0,1fr)); gap:0.75rem;"):
         for s in obvious:
-            _signal_card(s.key, compact=True)
+            _signal_card(s.key, compact=True, width_class="w-full")
 
 
 @ui.refreshable
 def grid() -> None:
-    ui.label("All instruments").classes("text-lg font-bold")
-    with ui.row().classes("w-full flex-wrap gap-3"):
-        for s in rank(list(service.STATE["scores"].values())):
-            _signal_card(s.key)
+    ui.label("Other instruments").classes("text-lg font-bold")
+    n = SETTINGS.get("grid_cols", 3)
+    top = set(_top_opportunity_keys())  # don't repeat the highlighted ones
+    others = [s for s in rank(list(service.STATE["scores"].values())) if s.key not in top]
+    if not others:
+        ui.label("All current signals are shown in Top Opportunities above.")\
+            .classes("text-sm text-grey")
+        return
+    # inline CSS grid (not Tailwind grid-cols-N, which Tailwind purges when the
+    # column count is dynamic) so any chosen column count always renders.
+    with ui.element("div").classes("w-full items-stretch").style(
+            f"display:grid; grid-template-columns: repeat({n}, minmax(0,1fr)); gap:0.75rem;"):
+        for s in others:
+            _signal_card(s.key, width_class="w-full")
+
+
+@ui.refreshable
+def gate_panel() -> None:
+    """Per-instrument gate breakdown: why each signal does or doesn't trade."""
+    from . import paper
+    rows_data = paper.gate_report(service.STATE)
+    ui.label("Signal gate status — why a trade does / doesn't fire")\
+        .classes("text-lg font-bold")
+    ui.label(f"Every instrument scored against the live entry gates "
+             f"(need: BUY/SELL · confluence · confidence ≥ {paper.CONF_THRESHOLD:.2f} · "
+             f"strength ≥ {paper.MIN_STRENGTH}/5 · vol ≥ median · cooldown clear · "
+             f"de-correlation clear). Sorted most-obvious first.")\
+        .classes("text-xs text-grey-6")
+    if not rows_data:
+        ui.label("No scores yet — waiting for the first refresh.").classes("text-sm text-grey")
+        return
+    _badge = {"WOULD TRADE": "🟢 would trade", "OPEN": "🔵 open",
+              "BLOCKED": "🔴 blocked", "WAIT": "⚪ wait/watch"}
+    rows = [{
+        "instrument": r["key"],
+        "action": r["action"],
+        "strength": f"{r['strength']}/5",
+        "conf": f"{r['confidence']:.0%}" if r["confidence"] is not None else "—",
+        "vol": "ok" if r["vol_ok"] else "low",
+        "status": _badge.get(r["status"], r["status"]),
+        "blocked by": "; ".join(r["blocked_by"]) or "—",
+    } for r in rows_data]
+    ui.table(rows=rows,
+             columns=[{"name": c, "label": c, "field": c,
+                       "align": "left" if c in ("blocked by", "status") else "center",
+                       "sortable": c in ("instrument", "strength", "conf", "status")}
+                      for c in rows[0]])\
+        .classes("w-full").props("dense")
 
 
 def _open_detail(key: str) -> None:
@@ -374,7 +467,7 @@ def retrospective_panel() -> None:
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
     grid.refresh(); paper_panel.refresh(); active_panel.refresh()
-    retrospective_panel.refresh()
+    gate_panel.refresh(); retrospective_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -534,6 +627,13 @@ def main_page() -> None:
             ui.checkbox("Pause LLM on weekends",
                         value=SETTINGS["auto_pause"],
                         on_change=lambda e: SETTINGS.update(auto_pause=e.value))
+            ui.label("Columns:").classes("text-sm")
+
+            def _set_cols(e) -> None:
+                SETTINGS.update(grid_cols=e.value)
+                grid.refresh(); opportunities.refresh()
+            ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
+                      value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
 
@@ -547,6 +647,7 @@ def main_page() -> None:
             with ui.tab_panel(t_board):
                 macro_banner()
                 active_panel()
+                gate_panel()
                 opportunities()
                 grid()
             with ui.tab_panel(t_trades):

@@ -30,6 +30,7 @@ from .log import log
 STATE: dict = {
     "scores": {},          # key -> Score
     "live": {},            # key -> {price, src, spread}  near-tick when MT5 present
+    "spark": {},           # key -> list[float]  short recent close series for mini-charts
     "llm": {},             # key -> InstrumentSignal
     "macro_note": "",
     "news": [],            # list[str]
@@ -77,28 +78,33 @@ def _calibrate_mt5_offset() -> float:
 def _score_one(inst):
     series, source = get_history(inst)
     if series is None:
-        return inst.key, None, source, None, None, None
+        return inst.key, None, source, None, None, None, None, None
     facts, text = compute_facts(series, inst.key)
     score = score_from_facts(inst.key, facts, text)
+    # short recent close series for the per-card sparkline (last ~72 bars,
+    # rounded + as a plain list to keep the page payload small)
+    spark = [round(float(x), 6) for x in series.tail(72)]
     # near-tick live price from MT5 if available, else last bar close (no extra fetch)
     tick = mt5_client.get_tick(inst.mt5)
     if tick is not None:
         live_px, live_src, spread, age = tick["mid"], "mt5-tick", tick["spread"], tick["age_sec"]
     else:
         live_px, live_src, spread, age = float(series.iloc[-1]), source, None, None
-    return inst.key, score, source, live_px, live_src, spread, age
+    return inst.key, score, source, live_px, live_src, spread, age, spark
 
 
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for key, score, source, live_px, live_src, spread, age in ex.map(_score_one, UNIVERSE):
+        for key, score, source, live_px, live_src, spread, age, spark in ex.map(_score_one, UNIVERSE):
             STATE["sources"][key] = source
             if score is not None:
                 STATE["scores"][key] = score
             if live_px is not None:
                 STATE["live"][key] = {"price": live_px, "src": live_src,
                                       "spread": spread, "age": age}
+            if spark:
+                STATE["spark"][key] = spark
     STATE["mt5_available"] = mt5_client.is_available()
     STATE["calls_today"] = store.calls_today()
     _calibrate_mt5_offset()

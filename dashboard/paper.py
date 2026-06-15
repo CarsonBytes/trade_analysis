@@ -455,6 +455,75 @@ def place_from_state(state: dict) -> list[str]:
     return logs
 
 
+def gate_report(state: dict) -> list[dict]:
+    """Read-only diagnostic: for EVERY instrument, evaluate each entry gate and
+    report pass/fail + the live values, so the UI can show exactly why a signal
+    is or isn't producing a trade. Reuses the same gate functions as
+    place_from_state, so it can never drift from real placement behaviour.
+
+    Returns one dict per instrument, sorted strongest-signal first."""
+    # current de-correlation exposure (same construction as place_from_state)
+    open_by_bucket: dict[tuple[str, int], set] = {}
+    open_methods: dict[str, set] = {}
+    for ot in open_trades():
+        open_methods.setdefault(ot["instrument"], set()).add(ot["method"])
+        for b in _risk_buckets(ot["instrument"], ot["direction"]):
+            open_by_bucket.setdefault(b, set()).add(ot["instrument"])
+
+    rows: list[dict] = []
+    for key, score in state.get("scores", {}).items():
+        llm = state.get("llm", {}).get(key)
+        action = (llm.action if llm else score.signal)
+        conf = llm.confidence if llm else None
+        atr = score.facts.get("atr14") or 0.0
+        med = score.facts.get("atr14_med60") or 0.0
+        ok, reasons, direction = evaluate_signal(key, score, llm)
+
+        # gates that only apply once it's a real directional candidate
+        already_open = ""
+        decorr = ""
+        cooldown = ""
+        if direction:
+            if _recent_close(key):
+                cooldown = f"cooldown < {COOLDOWN_MIN}m"
+            for b in _risk_buckets(key, direction):
+                holders = open_by_bucket.get(b, set()) - {key}
+                if holders:
+                    decorr = f"{b[0]} held by {', '.join(sorted(holders))}"
+                    break
+            # ATR rr-default is the variant we actually trade live
+            mlabel = f"ATR rr{RR_DEFAULT:.1f}"
+            if mlabel in open_methods.get(key, set()):
+                already_open = "position already open"
+
+        blocked = list(reasons)
+        if cooldown:
+            blocked.append(cooldown)
+        if decorr:
+            blocked.append(f"de-correlation: {decorr}")
+        if already_open:
+            blocked.append(already_open)
+
+        if already_open:
+            status = "OPEN"
+        elif action not in ("BUY", "SELL"):
+            status = "WAIT"
+        elif not blocked:
+            status = "WOULD TRADE"
+        else:
+            status = "BLOCKED"
+
+        rows.append({
+            "key": key, "action": action, "direction": direction,
+            "strength": score.strength, "confidence": conf,
+            "atr14": atr, "atr14_med60": med, "vol_ok": (med == 0 or atr >= med),
+            "status": status, "blocked_by": blocked,
+            "obviousness": score.obviousness,
+        })
+    rows.sort(key=lambda r: r["obviousness"], reverse=True)
+    return rows
+
+
 def _outcome_for(t: dict, get_ohlc_fn):
     """Resolve one open trade. Prefers exact MT5 tick resolution; falls back to
     (conservative) OHLC-bar resolution. Returns outcome tuple, "OPEN", or None."""
