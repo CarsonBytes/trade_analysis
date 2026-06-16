@@ -39,11 +39,20 @@ HORIZON_DAYS = 5           # trade validity (trading days ~ calendar 7d window)
 HORIZON_CAL = 7
 RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
 ACCOUNT = 10_000.0
-CONF_THRESHOLD = 0.60      # min LLM confidence (forward only)
-MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment
-VOL_FILTER = True          # enter only when atr14 >= its 60-bar median.
-                           # Replay-validated 2026-06-13: OOS expR 0.245->0.423,
-                           # OOS DSR 88%->93% (4-trial penalty) vs baseline.
+CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
+                           # for calibration but no longer gates entries
+MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
+                           # this signal's regime (strength x vol) to be >= this.
+                           # Data-driven replacement for the arbitrary 0.60.
+MIN_STRENGTH = 4           # FLOOR only: trade strength-4+ signals (the regimes
+                           # the confidence model has data for; blocks untested
+                           # strength-3). Quality within 4-5 is judged by the
+                           # objective edge gate below, not by this floor.
+VOL_FILTER = False         # RETIRED 2026-06-16: superseded by the objective gate,
+                           # which conditions edge on (strength x vol regime)
+                           # directly. The blunt filter blocked positive-edge
+                           # low-vol regimes (s5-low +0.008R, s4-low +0.018R),
+                           # contradicting the model. Kept as a toggle for A/B.
 HALF_SPREAD = 0.00005      # per-side cost as fraction of price (~0.5 bp)
 COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
                            # of its last close (prevents churning one instrument)
@@ -277,14 +286,19 @@ def _has_open(instrument: str, method: str) -> bool:
 DECORRELATE = True
 _USD_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"}  # USD is the quote ccy
 _USD_BASE = {"USDJPY", "USDCAD", "USDCHF"}             # USD is the base ccy
-_METALS = {"XAUUSD", "XAGUSD"}                         # priced in USD
-_JPY_SHORT = {"USDJPY", "EURJPY", "GBPJPY"}            # long pair = short JPY
-_EQUITY = {"SPX", "NDX"}
+_METALS = {"XAUUSD", "XAGUSD", "XPTUSD", "XPDUSD"}     # priced in USD
+_JPY_SHORT = {"USDJPY", "EURJPY", "GBPJPY", "AUDJPY"}  # long pair = short JPY
+_EQUITY = {"SPX", "NDX", "DJI", "DE40", "UK100",       # broadly co-move
+           "JP225", "HK50", "AUS200"}
+_CRYPTO = {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD"}     # highly correlated bloc
 
 
 def _risk_buckets(instrument: str, direction: str) -> list[tuple[str, int]]:
-    """The macro bets this trade expresses, as (bucket, +1/-1) pairs.
-    A trade can sit in several buckets (USDJPY is both a USD and a JPY bet)."""
+    """The macro bets this trade expresses, as (bucket, +1/-1) pairs. A trade can
+    sit in several buckets (USDJPY is both a USD and a JPY bet). Holding several
+    instruments in the same (bucket, direction) is really one position sized N
+    times, so de-correlation allows only one per (bucket, direction).
+    Energy (oil/gas) is left unconstrained -- not a clean member of any bucket."""
     sign = +1 if direction == "long" else -1
     buckets: list[tuple[str, int]] = []
     if instrument in _USD_QUOTE or instrument in _METALS:
@@ -295,6 +309,8 @@ def _risk_buckets(instrument: str, direction: str) -> list[tuple[str, int]]:
         buckets.append(("JPY", -sign))
     if instrument in _EQUITY:
         buckets.append(("EQ", sign))
+    if instrument in _CRYPTO:
+        buckets.append(("CRYPTO", sign))
     return buckets
 
 
@@ -334,8 +350,16 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     det_action = score.signal
     if det_action not in ("BUY", "SELL") or (det_action == "BUY") != (action == "BUY"):
         reasons.append("no confluence: deterministic trend disagrees with action")
-    if llm_sig and llm_sig.confidence < CONF_THRESHOLD:
-        reasons.append(f"confidence {llm_sig.confidence:.2f} < {CONF_THRESHOLD}")
+    # objective confidence: gate on the empirical edge of this regime
+    # (strength x volatility), measured from replay + journal -- not the LLM's
+    # self-reported number. Neutral when the bucket has too little data.
+    from . import confidence_model
+    obj = confidence_model.objective(score)
+    if obj is not None:
+        win, exp, nobs = obj
+        if nobs >= confidence_model.MIN_SAMPLES and exp < MIN_EDGE_R:
+            reasons.append(f"objective edge {exp:+.2f}R < {MIN_EDGE_R:+.2f} "
+                           f"(empirical n={nobs}, win {win:.0%})")
     if score.strength < MIN_STRENGTH:
         reasons.append(f"trend strength {score.strength} < {MIN_STRENGTH}")
     if VOL_FILTER:
@@ -420,13 +444,22 @@ def place_from_state(state: dict) -> list[str]:
             risk_price = abs(entry - sl)
             size = (ACCOUNT * RISK_PER_TRADE) / risk_price if risk_price > 0 else 0
             f = score.facts
+            try:
+                from . import confidence_model
+                _obj = confidence_model.objective(score)
+            except Exception:
+                _obj = None
             entry_facts = json.dumps({
                 "rsi14": f.get("rsi14"), "atr14": f.get("atr14"),
                 "atr14_med60": f.get("atr14_med60"),
                 "realized_vol_annual": f.get("realized_vol_annual"),
                 "trend": f.get("trend"), "returns": f.get("returns"),
+                "trend_tstat": f.get("trend_tstat"),
                 "support_60": f.get("support_60"), "resistance_60": f.get("resistance_60"),
                 "vol_filter_ok": (f.get("atr14") or 0) >= (f.get("atr14_med60") or 0),
+                "obj_win": _obj[0] if _obj else None,
+                "obj_expectancy_R": _obj[1] if _obj else None,
+                "obj_n": _obj[2] if _obj else None,
             }, default=float)
             _insert(Trade(
                 ts=now.isoformat(timespec="seconds"), instrument=key, direction=direction,
@@ -477,6 +510,11 @@ def gate_report(state: dict) -> list[dict]:
         conf = llm.confidence if llm else None
         atr = score.facts.get("atr14") or 0.0
         med = score.facts.get("atr14_med60") or 0.0
+        try:
+            from . import confidence_model
+            obj = confidence_model.objective(score)
+        except Exception:
+            obj = None
         ok, reasons, direction = evaluate_signal(key, score, llm)
 
         # gates that only apply once it's a real directional candidate
@@ -517,6 +555,8 @@ def gate_report(state: dict) -> list[dict]:
             "key": key, "action": action, "direction": direction,
             "strength": score.strength, "confidence": conf,
             "atr14": atr, "atr14_med60": med, "vol_ok": (med == 0 or atr >= med),
+            "obj_win": obj[0] if obj else None,
+            "obj_edge": obj[1] if obj else None, "obj_n": obj[2] if obj else None,
             "status": status, "blocked_by": blocked,
             "obviousness": score.obviousness,
         })
@@ -540,15 +580,34 @@ def _outcome_for(t: dict, get_ohlc_fn):
     # 1) exact path: MT5 ticks
     if mt5_client.is_available():
         try:
-            t0 = entry_ts.to_pydatetime()
-            t1 = (end_ts if horizon_passed else now_utc).to_pydatetime()
+            # Pad the query window generously. MT5 stamps ticks in the broker's
+            # SERVER timezone, so passing real-UTC bounds makes copy_ticks_range
+            # truncate the window by the server offset (several hours) -- which
+            # silently drops the most recent ticks and leaves trades unresolved
+            # even after their SL/TP was hit. A 12h pad is larger than any real
+            # broker offset; we re-trim precisely below using `offset`.
+            margin = pd.Timedelta(hours=12)
+            t0 = (entry_ts - margin).to_pydatetime()
+            t1 = ((end_ts if horizon_passed else now_utc) + margin).to_pydatetime()
             ticks = mt5_client.get_ticks_range(inst.mt5, t0, t1)
             if ticks is not None and len(ticks):
-                # keep only ticks strictly AFTER entry (tick index is broker time;
-                # convert to true UTC before comparing) -- a trade must never be
-                # resolved by a tick at or before the instant it was opened.
+                # CRITICAL: derive the broker server offset from the DATA, not the
+                # cached value (which can be 0/stale). MT5 stamps ticks in server
+                # time; the newest tick is ~now in reality, so the gap is the
+                # offset. Getting this wrong feeds PRE-entry ticks into the
+                # resolver and stops fresh trades instantly at a phantom SL.
+                est = (ticks.index.max() - now_utc).total_seconds()
+                if -7200 <= est <= 50400:        # plausible offsets: -2h .. +14h
+                    offset = round(est / 1800) * 1800
+                # keep only ticks strictly AFTER entry (convert server->true UTC
+                # first) -- a trade must never be resolved by a tick at or before
+                # the instant it was opened.
                 true_idx = ticks.index - pd.Timedelta(seconds=offset)
                 ticks = ticks[true_idx > entry_ts]
+                # ...and never resolve on ticks past the horizon once it's passed
+                if horizon_passed:
+                    true_idx = ticks.index - pd.Timedelta(seconds=offset)
+                    ticks = ticks[true_idx <= end_ts]
             if ticks is not None and len(ticks):
                 out = resolve_ticks(t["direction"], t["sl"], t["tp"], ticks)
                 log.debug("resolve %s %s via TICKS (%d ticks, exact) -> %s",
@@ -607,6 +666,29 @@ def archive_and_reset() -> dict:
         c.execute("DELETE FROM paper_trades")
     log.info("archived %d trade(s) as batch %s; journal reset", n, batch)
     return {"archived": n, "batch": batch, "csv": csvp, "report": repp}
+
+
+def archive_trades(ids: list[int]) -> int:
+    """Archive SPECIFIC trades by id: copy them into paper_trades_archive (one
+    batch) and remove them from the live journal. Nothing is lost -- they can be
+    restored via unarchive(). Returns the count archived."""
+    if not ids:
+        return 0
+    batch = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    placeholders = ",".join("?" * len(ids))
+    with _LOCK, _conn() as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(paper_trades)").fetchall()]
+        c.execute("CREATE TABLE IF NOT EXISTS paper_trades_archive "
+                  "(archive_batch TEXT, " + ", ".join(cols) + ")")
+        collist = ", ".join(cols)
+        n = c.execute(f"SELECT COUNT(*) FROM paper_trades WHERE id IN ({placeholders})",
+                      ids).fetchone()[0]
+        c.execute(f"INSERT INTO paper_trades_archive (archive_batch, {collist}) "
+                  f"SELECT ?, {collist} FROM paper_trades WHERE id IN ({placeholders})",
+                  [batch] + ids)
+        c.execute(f"DELETE FROM paper_trades WHERE id IN ({placeholders})", ids)
+    log.info("archived %d specific trade(s) as batch %s", n, batch)
+    return n
 
 
 def archive_batches() -> list[dict]:

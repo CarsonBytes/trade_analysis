@@ -167,6 +167,80 @@ def get_ticks_range(symbol: str, t0: dt.datetime, t1: dt.datetime) -> pd.DataFra
         return df.set_index("time")[["bid", "ask"]].astype(float).sort_index()
 
 
+def data_path() -> str | None:
+    """Terminal data directory (where logs/ lives), or None."""
+    with _LOCK:
+        if not _ensure_init():
+            return None
+        ti = _mod().terminal_info()
+        return getattr(ti, "data_path", None) if ti else None
+
+
+def reconnect(login: int, password: str, server: str) -> bool:
+    """Re-login the running terminal to `server`, forcing it to re-pick an access
+    point. Serialised behind the MT5 lock so it can't race other calls."""
+    with _LOCK:
+        return bool(_mod().login(login, password=password, server=server))
+
+
+def connection_status() -> dict | None:
+    """Live connection quality: server name, ping (ms), connected flag, and
+    retransmission rate. None if MT5 isn't available. ping_last is in microsec."""
+    with _LOCK:
+        if not _ensure_init():
+            return None
+        mt5 = _mod()
+        ti = mt5.terminal_info()
+        ai = mt5.account_info()
+        if ti is None:
+            return None
+        return {
+            "server": getattr(ai, "server", "?") if ai else "?",
+            "ping_ms": round(getattr(ti, "ping_last", 0) / 1000.0, 1),
+            "connected": bool(getattr(ti, "connected", False)),
+            "retransmission": round(getattr(ti, "retransmission", 0.0), 2),
+        }
+
+
+def ping_servers(candidates: list[str], login: int, password: str,
+                 samples: int = 3) -> list[dict]:
+    """On-demand: log the running terminal into each candidate SERVER name and
+    measure its ping. Returns [{server, ping_ms, ok}] sorted best-first. This
+    BRIEFLY drops the connection per candidate, so run it when idle, not on a
+    timer. Only servers your account is valid on will connect."""
+    import time as _t
+    mt5 = _mod()
+    if mt5 is None:
+        return []
+    out = []
+    for srv in candidates:
+        with _LOCK:
+            ok = mt5.login(login, password=password, server=srv)
+            ping = None
+            if ok:
+                pings = []
+                for _ in range(samples):
+                    ti = mt5.terminal_info()
+                    if ti is not None:
+                        pings.append(getattr(ti, "ping_last", 0) / 1000.0)
+                    _t.sleep(0.3)
+                ping = round(min(pings), 1) if pings else None
+        out.append({"server": srv, "ping_ms": ping, "ok": bool(ok)})
+    out.sort(key=lambda r: (r["ping_ms"] is None, r["ping_ms"] or 1e9))
+    return out
+
+
+def select_best_server(candidates: list[str], login: int, password: str) -> str | None:
+    """Ping all candidates and log into the lowest. Returns the chosen server."""
+    ranked = [r for r in ping_servers(candidates, login, password) if r["ok"] and r["ping_ms"]]
+    if not ranked:
+        return None
+    best = ranked[0]["server"]
+    with _LOCK:
+        _mod().login(login, password=password, server=best)
+    return best
+
+
 def shutdown() -> None:
     with _LOCK:
         mt5 = _mod()
@@ -214,5 +288,48 @@ def diagnose() -> None:
     mt5.shutdown()
 
 
+def _ping_cli(servers: list[str], select: bool) -> None:
+    """Compare ping across candidate servers (names from the MT5 bottom-right
+    connection icon). Needs MT5_LOGIN/MT5_PASSWORD in analyst/.env."""
+    if not _ensure_init():
+        print("MT5 not available (terminal running + logged in?)."); return
+    cur = connection_status()
+    print(f"current: {cur['server']} {cur['ping_ms']:.0f}ms "
+          f"(retransmission {cur['retransmission']:.0%})\n")
+    login = os.environ.get("MT5_LOGIN")
+    password = os.environ.get("MT5_PASSWORD", "")
+    if not login:
+        print("Set MT5_LOGIN and MT5_PASSWORD in analyst/.env to compare/switch "
+              "servers (login is required to re-connect to each)."); return
+    if not servers:
+        print("Pass candidate server names, e.g.:\n"
+              "  uv run python -m dashboard.mt5_client --ping ICMarketsSC-Demo ICMarketsSC-Demo02")
+        return
+    print(f"pinging {len(servers)} server(s) (briefly reconnects each)...")
+    ranked = ping_servers(servers, int(login), password)
+    for r in ranked:
+        p = f"{r['ping_ms']:.0f}ms" if r["ping_ms"] is not None else "no-connect"
+        print(f"  {r['server']:<28} {p}")
+    if select and ranked and ranked[0]["ok"] and ranked[0]["ping_ms"]:
+        best = select_best_server(servers, int(login), password)
+        print(f"\nselected lowest-ping server: {best}")
+    else:
+        # always restore the original connection if we were only measuring
+        with _LOCK:
+            _mod().login(int(login), password=password, server=cur["server"])
+        print(f"\nrestored original server: {cur['server']} "
+              "(re-run with --select to switch to the best)")
+
+
 if __name__ == "__main__":
-    diagnose()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ping", nargs="*", metavar="SERVER",
+                    help="candidate server names to compare ping")
+    ap.add_argument("--select", action="store_true",
+                    help="with --ping: log into the lowest-ping server")
+    args = ap.parse_args()
+    if args.ping is not None:
+        _ping_cli(args.ping, args.select)
+    else:
+        diagnose()

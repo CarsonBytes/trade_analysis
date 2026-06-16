@@ -21,8 +21,10 @@ from .instruments import BY_KEY
 from .scoring import rank
 
 # ---- settings (live, editable from the UI) --------------------------------
-SETTINGS = {"interval_min": 10, "auto_pause": True, "cap": 200, "grid_cols": 3}
-LLM_MIN_GAP_MIN = 10           # never call the LLM more often than this
+# cheap_min: prices/scores/trade-resolution interval (deterministic, free).
+# llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
+SETTINGS = {"cheap_min": 1, "llm_min": 30, "auto_pause": True,
+            "cap": 200, "grid_cols": 4}
 _busy = {"flag": False}
 
 
@@ -130,6 +132,29 @@ def header_status() -> None:
             ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
             ui.label(f"API calls today: {used}/{cap}").classes(
                 "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
+            conn = service.STATE.get("conn")
+            if conn:
+                from . import link_monitor
+                lk = link_monitor.status()
+                ap = lk.get("access_point") or conn["server"]
+                ping = lk.get("ping_ms") or conn["ping_ms"]
+                dot = "●" if conn["connected"] else "○"
+                css = ("text-green" if conn["connected"] and ping < 150
+                       else "text-orange" if conn["connected"] and ping < 300
+                       else "text-red")
+                ui.label(f"MT5: {ap} · {ping:.0f}ms {dot}")\
+                    .classes(f"text-sm {css}")\
+                    .tooltip(f"server {conn['server']}; retransmission "
+                             f"{conn['retransmission']:.0%}; "
+                             f"seen: {lk.get('history', {})}")
+                best_ap, best_ping = lk.get("best_ap"), lk.get("best_ping")
+                if best_ap and ap and best_ap != ap and best_ping and ping - best_ping > 15:
+                    hint = (f"→ {best_ap} ~{best_ping:.0f}ms"
+                            + ("" if lk.get("can_reroll") else " (pin via icon)"))
+                    ui.label(hint).classes("text-sm text-orange")\
+                        .tooltip("a faster access point is available; the link "
+                                 "monitor re-rolls automatically when credentials "
+                                 "are set, else pin it via the MT5 connection icon")
             ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
 
 
@@ -257,10 +282,16 @@ def gate_panel() -> None:
     rows_data = paper.gate_report(service.STATE)
     ui.label("Signal gate status — why a trade does / doesn't fire")\
         .classes("text-lg font-bold")
-    ui.label(f"Every instrument scored against the live entry gates "
-             f"(need: BUY/SELL · confluence · confidence ≥ {paper.CONF_THRESHOLD:.2f} · "
-             f"strength ≥ {paper.MIN_STRENGTH}/5 · vol ≥ median · cooldown clear · "
-             f"de-correlation clear). Sorted most-obvious first.")\
+    gates = ["BUY/SELL", "confluence",
+             f"objective edge ≥ {paper.MIN_EDGE_R:+.2f}R",
+             f"strength ≥ {paper.MIN_STRENGTH}/5"]
+    if paper.VOL_FILTER:
+        gates.append("vol ≥ median")
+    gates += [f"R:R ≥ {paper.MIN_RR}", "cooldown clear", "de-correlation clear"]
+    ui.label("Every instrument scored against the live entry gates (need: "
+             + " · ".join(gates) + "). 'edge' = empirical expectancy of this "
+             "regime (strength × vol) from the confidence model. "
+             "Sorted most-obvious first.")\
         .classes("text-xs text-grey-6")
     if not rows_data:
         ui.label("No scores yet — waiting for the first refresh.").classes("text-sm text-grey")
@@ -271,7 +302,8 @@ def gate_panel() -> None:
         "instrument": r["key"],
         "action": r["action"],
         "strength": f"{r['strength']}/5",
-        "conf": f"{r['confidence']:.0%}" if r["confidence"] is not None else "—",
+        "edge": (f"{r['obj_edge']:+.2f}R (n{r['obj_n']})"
+                 if r["obj_edge"] is not None else "—"),
         "vol": "ok" if r["vol_ok"] else "low",
         "status": _badge.get(r["status"], r["status"]),
         "blocked by": "; ".join(r["blocked_by"]) or "—",
@@ -279,7 +311,7 @@ def gate_panel() -> None:
     ui.table(rows=rows,
              columns=[{"name": c, "label": c, "field": c,
                        "align": "left" if c in ("blocked by", "status") else "center",
-                       "sortable": c in ("instrument", "strength", "conf", "status")}
+                       "sortable": c in ("instrument", "strength", "edge", "status")}
                       for c in rows[0]])\
         .classes("w-full").props("dense")
 
@@ -341,23 +373,31 @@ def paper_panel() -> None:
                 if not s["trustworthy"]:
                     ui.label("n<30 — too few to trust").classes("text-xs text-orange italic")
 
-    # open trades
+    # open trades (selectable -> archive specific records)
     if open_t:
-        ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold mt-2")
-        rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
-                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4),
-                 "TP": round(t["tp"], 4), "R:R": t["rr"],
+        with ui.row().classes("items-center gap-2 mt-2"):
+            ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold")
+            ui.button("Archive selected", icon="archive",
+                      on_click=lambda: _archive_records(open_tbl)).props("flat dense")
+        rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
+                 "method": t["method"], "entry": round(t["entry"], 4),
+                 "SL": round(t["sl"], 4), "TP": round(t["tp"], 4), "R:R": t["rr"],
                  "opened": _fmt_ts(t["ts"])} for t in open_t]
-        ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+        open_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
+                            columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
             .classes("w-full").props("dense")
-    # recent closed
+    # recent closed (selectable -> archive specific records)
     if closed:
-        ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold mt-2")
-        rows = [{"instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
-                 "status": t["status"], "R": round(t["realized_r"], 2),
-                 "opened": _fmt_ts(t["ts"]), "closed": _fmt_ts(t["exit_ts"])}
-                for t in closed[:20]]
-        ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+        with ui.row().classes("items-center gap-2 mt-2"):
+            ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold")
+            ui.button("Archive selected", icon="archive",
+                      on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
+        rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
+                 "method": t["method"], "status": t["status"],
+                 "R": round(t["realized_r"], 2), "opened": _fmt_ts(t["ts"]),
+                 "closed": _fmt_ts(t["exit_ts"])} for t in closed[:20]]
+        closed_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
+                              columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
             .classes("w-full").props("dense")
 
 
@@ -396,10 +436,13 @@ def active_panel() -> None:
 def retrospective_panel() -> None:
     """Live equity curve + constraint scorecard for the forward test."""
     from . import paper, journal
-    from .retrospective import equity_curve
+    from .retrospective import equity_curve, _demo_executed_ids
 
     trades = paper.all_trades()
-    closed = [t for t in trades if t["status"] != "OPEN"]
+    # broker truth: KPIs/equity from trades the demo ACTUALLY executed (have an
+    # MT5 order). Signals never sent to the broker don't count here.
+    demo_ids = _demo_executed_ids()
+    closed = [t for t in trades if t["status"] != "OPEN" and t["id"] in demo_ids]
     rs = [t["realized_r"] for t in closed]
     s = paper.stats(rs)
     curve, max_dd = equity_curve(closed)
@@ -408,9 +451,9 @@ def retrospective_panel() -> None:
         ui.label("Retrospective — KPIs & Constraints").classes("text-lg font-bold")
         ui.button("Export full report", icon="download",
                   on_click=_export_retrospective).props("flat dense")
-    ui.label("Equity curve is cumulative R over closed trades (entry order). "
-             "Constraint scorecard counts how often each gate blocked a candidate "
-             "— the evidence for adding/adjusting/removing a rule.")\
+    ui.label("KPIs/equity are over DEMO-EXECUTED trades only (real MT5 fills) — "
+             "signals the demo never placed are excluded. Constraint scorecard "
+             "counts how often each gate blocked a candidate.")\
         .classes("text-xs text-grey-6")
 
     # KPI cards
@@ -464,8 +507,40 @@ def retrospective_panel() -> None:
             .classes("text-sm text-grey")
 
 
+@ui.refreshable
+def connection_panel() -> None:
+    """MT5 link quality + access-point ping comparison (the 'advise' view)."""
+    from . import link_monitor
+    conn = service.STATE.get("conn")
+    lk = link_monitor.status()
+    stats = link_monitor.ap_stats()
+    ui.label("MT5 connection quality").classes("text-lg font-bold")
+    if not conn:
+        ui.label("MT5 not connected.").classes("text-sm text-grey"); return
+    cur = lk.get("access_point") or conn["server"]
+    ui.label(f"Connected via {cur} · {conn['retransmission']:.0%} retransmission · "
+             f"server {conn['server']}").classes("text-xs text-grey-6")
+    if not stats:
+        ui.label("Gathering access-point pings from the journal…").classes("text-sm text-grey")
+        return
+    best = stats[0]["ap"]
+    rows = [{"access point": s["ap"] + (" ← current" if s["ap"] == cur else ""),
+             "mean ping": f"{s['mean_ms']} ms", "jitter": f"±{s['jitter_ms']} ms",
+             "samples": s["n"],
+             "verdict": "✅ fastest" if s["ap"] == best else f"+{s['mean_ms']-stats[0]['mean_ms']} ms"}
+            for s in stats]
+    ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c,
+             "align": "left"} for c in rows[0]]).classes("w-full").props("dense")
+    if best != cur:
+        mode = ("auto-rerolling to it" if lk.get("can_reroll")
+                else "pin it via the MT5 bottom-right connection icon")
+        ui.label(f"→ {best} is faster than {cur} — {mode}.")\
+            .classes("text-sm text-orange")
+
+
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
+    connection_panel.refresh()
     grid.refresh(); paper_panel.refresh(); active_panel.refresh()
     gate_panel.refresh(); retrospective_panel.refresh()
 
@@ -494,12 +569,11 @@ async def _tick() -> None:
     try:
         now = dt.datetime.now()
         last_cheap = service.STATE["last_cheap"]
-        if last_cheap is None or (now - last_cheap).total_seconds() >= SETTINGS["interval_min"] * 60:
+        if last_cheap is None or (now - last_cheap).total_seconds() >= SETTINGS["cheap_min"] * 60:
             await run.io_bound(service.refresh_news)
             await _do_cheap()
         last_llm = service.STATE["last_llm"]
-        gap = max(SETTINGS["interval_min"], LLM_MIN_GAP_MIN) * 60
-        if last_llm is None or (now - last_llm).total_seconds() >= gap:
+        if last_llm is None or (now - last_llm).total_seconds() >= SETTINGS["llm_min"] * 60:
             await _do_llm()
     finally:
         _busy["flag"] = False
@@ -526,6 +600,17 @@ async def _log_trades_now() -> None:
     placed = [l for l in logs if "PLACED" in l]
     paper_panel.refresh(); active_panel.refresh()
     ui.notify(f"Logged {len(placed)} paper trade(s).")
+
+
+async def _archive_records(table) -> None:
+    """Archive the rows ticked in a paper-trades table (specific records)."""
+    from . import paper
+    ids = [r["id"] for r in table.selected]
+    if not ids:
+        ui.notify("Select one or more rows first."); return
+    n = await run.io_bound(paper.archive_trades, ids)
+    paper_panel.refresh(); active_panel.refresh(); retrospective_panel.refresh()
+    ui.notify(f"Archived {n} record(s). Restore them via View archive.")
 
 
 async def _export_results() -> None:
@@ -614,16 +699,16 @@ async def _archive_reset() -> None:
 def main_page() -> None:
     service.restore_cache()
     with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-4"):
-        ui.label("Trade Analysis — Gold · Oil · FX").classes("text-2xl font-bold")
+        ui.label("Trade Analysis — all popular signals").classes("text-2xl font-bold")
         ui.label("Decision support, not auto-execution. Verify before risking money.")\
             .classes("text-sm text-grey-6")
         clock_row()
 
         with ui.row().classes("items-center gap-4 w-full"):
-            ui.label("Auto-refresh:").classes("text-sm")
-            ui.toggle({1: "1m", 10: "10m", 15: "15m", 30: "30m", 60: "60m"},
-                      value=SETTINGS["interval_min"],
-                      on_change=lambda e: SETTINGS.update(interval_min=e.value)).props("dense")
+            ui.label("LLM scan:").classes("text-sm")
+            ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
+                      value=SETTINGS["llm_min"],
+                      on_change=lambda e: SETTINGS.update(llm_min=e.value)).props("dense")
             ui.checkbox("Pause LLM on weekends",
                         value=SETTINGS["auto_pause"],
                         on_change=lambda e: SETTINGS.update(auto_pause=e.value))
@@ -650,6 +735,7 @@ def main_page() -> None:
                 gate_panel()
                 opportunities()
                 grid()
+                connection_panel()
             with ui.tab_panel(t_trades):
                 paper_panel()
             with ui.tab_panel(t_retro):
@@ -665,5 +751,10 @@ def main_page() -> None:
     ui.timer(0.1, _tick, once=True)      # kick off immediately on first load
     ui.timer(30.0, _tick)                # master heartbeat
 
+
+# MT5 link monitor: tracks access-point ping, re-rolls to the fastest on
+# sustained degradation (needs MT5_LOGIN/PASSWORD in .env; else monitor-only).
+from . import link_monitor  # noqa: E402
+link_monitor.start()
 
 ui.run(title="Trade Analysis", port=8080, reload=False, show=False)

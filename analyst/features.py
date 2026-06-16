@@ -25,6 +25,29 @@ def _atr_proxy(prices: pd.Series, period: int = 14) -> float:
     return float(prices.diff().abs().rolling(period).mean().iloc[-1])
 
 
+def _trend_tstat(prices: pd.Series, n: int = 60) -> float:
+    """Objective trend strength: the t-statistic of the slope of a linear fit to
+    the last n closes. |t| large = a statistically significant (un-noisy) trend;
+    near 0 = directionless chop. Sign = trend direction. Reproducible, unlike a
+    subjective 'confidence'."""
+    y = prices.tail(n).to_numpy(dtype=float)
+    m = len(y)
+    if m < 10:
+        return 0.0
+    x = np.arange(m, dtype=float)
+    xm = x.mean()
+    sxx = float(((x - xm) ** 2).sum())
+    if sxx == 0:
+        return 0.0
+    slope = float(((x - xm) * (y - y.mean())).sum() / sxx)
+    intercept = y.mean() - slope * xm
+    resid = y - (slope * x + intercept)
+    dof = m - 2
+    s2 = float((resid ** 2).sum() / dof) if dof > 0 else 0.0
+    se = (s2 / sxx) ** 0.5
+    return slope / se if se > 0 else 0.0
+
+
 def _trend(prices: pd.Series, fast: int, slow: int) -> str:
     if len(prices) < slow:
         return "n/a"
@@ -81,6 +104,7 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
         "rsi14": rsi,
         "atr14": atr,
         "atr14_med60": atr_med60,
+        "trend_tstat": _trend_tstat(prices, 60),
         "realized_vol_annual": realized_vol,
         "support_60": support,
         "resistance_60": resistance,

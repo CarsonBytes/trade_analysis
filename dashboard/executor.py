@@ -109,6 +109,12 @@ def mirror_new() -> list[str]:
     mt5 = _guard()
     if mt5 is None:
         return []
+    from . import link_monitor
+    with link_monitor.ORDER_GATE:           # block link re-rolls while we trade
+        return _mirror_new(mt5)
+
+
+def _mirror_new(mt5) -> list[str]:
     done = _mirrored_ids()
     logs: list[str] = []
     with mt5_client._LOCK:
@@ -178,6 +184,12 @@ def sync_closures() -> list[str]:
     mt5 = _guard()
     if mt5 is None:
         return []
+    from . import link_monitor
+    with link_monitor.ORDER_GATE:           # block link re-rolls while we trade
+        return _sync_closures(mt5)
+
+
+def _sync_closures(mt5) -> list[str]:
     logs: list[str] = []
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, ticket FROM mt5_mirror "

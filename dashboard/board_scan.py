@@ -36,7 +36,8 @@ class BoardScan(BaseModel):
 
 SYSTEM = (
     "You are the head analyst on a trading desk. You are given pre-computed, "
-    "factual indicators for several instruments (Gold, Oil, FX) plus recent "
+    "factual indicators for several instruments (metals, energy, FX, indices, "
+    "crypto) plus recent "
     "headlines. Do NOT invent numbers; reason only from the facts provided. "
     "For each instrument give a bias, an action (BUY/SELL/WAIT), a calibrated "
     "confidence, a one-line rationale, and the explicit invalidation level. "
@@ -56,15 +57,26 @@ def _facts_block(scores: list[Score]) -> str:
     return "\n\n".join(blocks)
 
 
+# Only the TOP of the deterministic ranking is worth an LLM deep-dive -- the
+# rest are clear WAIT/WATCH. Capping this also keeps the prompt within provider
+# input-token limits (free tiers cap at ~4k). Tune to your provider's budget.
+MAX_INSTRUMENTS = 10
+MAX_NEWS = 10
+
+
 def run_board_scan(scores: list[Score], headlines: list[str],
                    cap: int = 200) -> tuple[BoardScan | None, str]:
-    """Returns (BoardScan|None, status). status explains why None if applicable."""
+    """Returns (BoardScan|None, status). status explains why None if applicable.
+    Only the top MAX_INSTRUMENTS of the (already-ranked) scores are sent to the
+    LLM -- it deep-dives the most actionable, not the whole board."""
     if not store.can_call(cap=cap):
         return None, f"budget guard: {store.calls_today()}/{cap} calls used today"
 
-    news_block = "\n".join(f"- {h}" for h in headlines) or "(no headlines available)"
+    top = scores[:MAX_INSTRUMENTS]
+    news = headlines[:MAX_NEWS]
+    news_block = "\n".join(f"- {h}" for h in news) or "(no headlines available)"
     human = (
-        f"INSTRUMENT FACTS:\n{_facts_block(scores)}\n\n"
+        f"INSTRUMENT FACTS (top {len(top)} by signal strength):\n{_facts_block(top)}\n\n"
         f"RECENT HEADLINES (may be irrelevant; filter yourself):\n{news_block}\n\n"
         "Return a signal for EVERY instrument above, plus a macro_note."
     )

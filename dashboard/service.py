@@ -39,6 +39,7 @@ STATE: dict = {
     "last_llm": None,      # datetime
     "last_status": "not run yet",
     "mt5_available": False,
+    "conn": None,          # MT5 connection quality: {server, ping_ms, connected, ...}
     "calls_today": 0,
     "cap": 200,
 }
@@ -49,29 +50,30 @@ def _now() -> dt.datetime:
 
 
 def _calibrate_mt5_offset() -> float:
-    """MT5 stamps ticks in the broker's SERVER timezone, so raw age = real age +
-    server offset. We estimate the offset as the smallest raw age ever seen from
-    a fresh tick (a truly fresh tick has real age ~0, so raw age ~= offset),
-    rounded to 30 min, persisted. Subtracting it makes a live tick read ~0s.
-    (Converges down automatically; a rare DST forward shift self-heals over time.)"""
+    """MT5 stamps ticks in the broker's SERVER timezone. raw age = now - server
+    stamp = real_age - offset, where offset = server lead over UTC (e.g. +3h for
+    a UTC+3 broker). A truly fresh tick has real_age ~ 0, so its raw age ~ -offset
+    -- i.e. NEGATIVE for a broker ahead of UTC. So we estimate the offset as
+    -(most-negative raw age), rounded to 30 min. This handles brokers ahead of
+    UTC (the previous version only handled brokers behind, and silently left
+    offset=0 -- which fed pre-entry ticks into trade resolution)."""
     raw = [v.get("age") for v in STATE["live"].values()
            if v.get("src") == "mt5-tick" and v.get("age") is not None]
-    fresh = [a for a in raw if 0 <= a < 21600]  # ignore weekend-stale (>6h)
+    # the freshest tick has the most-negative raw age; -that ~= the server lead
+    cand = -min(raw) if raw else None
     prev, _ = store.cache_get("mt5_offset_sec")
     prev = prev if isinstance(prev, (int, float)) else None
-    if fresh:
-        cand = min(fresh)
-        off = cand if prev is None else min(prev, cand)
-        off = round(off / 1800) * 1800
+    if cand is not None and -7200 <= cand <= 50400:  # plausible: -2h .. +14h
+        off = round(cand / 1800) * 1800
         store.cache_set("mt5_offset_sec", off)
     else:
         off = prev or 0.0
     STATE["mt5_offset_sec"] = off
-    # apply correction: store true freshness in 'age', keep raw for the log
+    # apply correction so 'age' shows true freshness; keep raw for the log
     for v in STATE["live"].values():
         if v.get("src") == "mt5-tick" and v.get("age") is not None:
             v["raw_age"] = v["age"]
-            v["age"] = max(0.0, v["age"] - off)
+            v["age"] = max(0.0, v["age"] + off)  # real_age = raw_age + offset
     return off
 
 
@@ -106,6 +108,10 @@ def refresh_cheap() -> None:
             if spark:
                 STATE["spark"][key] = spark
     STATE["mt5_available"] = mt5_client.is_available()
+    STATE["conn"] = mt5_client.connection_status()
+    if STATE["conn"] and STATE["conn"]["ping_ms"] > 300:
+        log.warning("MT5 link: %s ping %.0fms (high)", STATE["conn"]["server"],
+                    STATE["conn"]["ping_ms"])
     STATE["calls_today"] = store.calls_today()
     _calibrate_mt5_offset()
     STATE["last_cheap"] = _now()

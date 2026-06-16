@@ -118,6 +118,7 @@ def record_rejections(rows: list[dict]) -> None:
 # values aggregate into one bucket (the scorecard counts gates, not values).
 _GATE_PREFIXES = [
     ("confidence", "confidence below threshold"),
+    ("objective edge", "objective edge below threshold (losing regime)"),
     ("trend strength", "trend strength below MIN_STRENGTH"),
     ("vol filter", "volatility filter (atr < median)"),
     ("no confluence", "deterministic disagrees with LLM"),
