@@ -97,6 +97,14 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
     stretch_to_high = (resistance - last) / atr_safe
     stretch_to_low = (last - support) / atr_safe
 
+    # market structure: swing-based trend (BOS/CHoCH), liquidity sweep,
+    # supply/demand zones, displacement (FVG proxy). Deterministic, no look-ahead.
+    try:
+        from dashboard import structure
+        struct = structure.analyse(prices, atr)
+    except Exception:
+        struct = {}
+
     facts = {
         "symbol": symbol,
         "last_price": last,
@@ -111,6 +119,7 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
         "trend": trends,
         "atr_to_resistance": stretch_to_high,
         "atr_to_support": stretch_to_low,
+        "structure": struct,
         "n_bars": len(prices),
     }
 
@@ -123,6 +132,16 @@ def compute_facts(prices: pd.Series, symbol: str) -> tuple[dict, str]:
         f"Trend by horizon -> short: {trends['short']}, medium: {trends['medium']}, long: {trends['long']}\n"
         f"Recent 60-bar support: {support:.5f}  resistance: {resistance:.5f}\n"
         f"Price is {stretch_to_high:.1f} ATR below resistance, {stretch_to_low:.1f} ATR above support.\n"
-        f"Bars available: {len(prices)}"
     )
+    if struct:
+        ns = struct.get("nearest_supply"); nd = struct.get("nearest_demand")
+        summary += (
+            f"Structure: {struct['trend']} (last event {struct['last_event']}), "
+            f"sweep {struct['swept']}, displacement {struct['fvg']}.\n"
+            f"Supply zone {ns if ns is not None else '-'} "
+            f"({struct.get('atr_to_supply')} ATR up), "
+            f"demand zone {nd if nd is not None else '-'} "
+            f"({struct.get('atr_to_demand')} ATR down).\n"
+        )
+    summary += f"Bars available: {len(prices)}"
     return facts, summary

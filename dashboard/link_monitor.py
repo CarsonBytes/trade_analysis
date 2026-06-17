@@ -120,69 +120,52 @@ class LinkMonitor(threading.Thread):
                 self.state = {
                     "access_point": ap, "ping_ms": ping,
                     "best_ap": best_ap, "best_ping": round(best_mean, 0) if best_mean else None,
-                    "can_reroll": bool(login) and not self.reroll_disabled,
-                    "reroll_disabled": self.reroll_disabled, "target_ms": self.target_ms,
+                    "can_reroll": False,    # auto-reroll disabled; switch manually
                     "history": {k: round(statistics.mean(v)) for k, v in self.history.items()},
                 }
-                if not login or ping is None or self.reroll_disabled:
-                    continue
-                # Re-roll when the current link is above the acceptable target
-                # (this DISCOVERS a faster access point even if we've only seen
-                # the slow one), OR when a known access point is clearly faster.
-                need = ping > self.target_ms
-                if (best_ap and best_ap != ap and best_mean
-                        and ping > best_mean + self.min_margin_ms):
-                    need = True
-                if need and (time.time() - self.last_reroll) > self.cooldown_s:
-                    self._reroll(int(login), password)
+                # AUTO-REROLL DISABLED -- access point is switched MANUALLY via the
+                # MT5 connection icon. The monitor still tracks ping for the header.
+                # (re-enable by uncommenting the trigger below + _reroll())
+                # if login and ping is not None:
+                #     need = ping > self.target_ms or (
+                #         best_ap and best_ap != ap and best_mean
+                #         and ping > best_mean + self.min_margin_ms)
+                #     if need and (time.time() - self.last_reroll) > self.cooldown_s:
+                #         self._reroll(int(login), password)
             except Exception as e:
                 log.debug("link monitor: %s", e)
 
-    def _reroll(self, login: int, password: str) -> None:
-        """Reconnect (which re-rolls the terminal's access-point pick) up to
-        max_rerolls times, stopping as soon as we land on a link at/under the
-        target ping. Can't pin a specific access point via the API, so this is
-        'reconnect until acceptable'."""
-        conn = mt5_client.connection_status()
-        if not conn:
-            return
-        server = conn["server"]
-        if not ORDER_GATE.acquire(blocking=False):
-            log.info("link monitor: order in flight -- deferring reroll")
-            return
-        try:
-            start = conn["ping_ms"]
-            log.info("link monitor: rerolling %s (now %.0fms, target ≤%.0fms)",
-                     server, start, self.target_ms)
-            seen_aps: set = set()
-            for attempt in range(1, self.max_rerolls + 1):
-                mt5_client.reconnect(login, password, server)
-                time.sleep(3)            # let it authorize + log the access point
-                scan = self._scan()
-                ap, _ = scan[-1] if scan else (None, None)
-                c = mt5_client.connection_status()
-                ping = c["ping_ms"] if c else None
-                if ap:
-                    seen_aps.add(ap)
-                log.info("link monitor: reroll %d/%d -> %s (%.0fms)",
-                         attempt, self.max_rerolls, ap, ping if ping else -1)
-                if ping is not None and ping <= self.target_ms:
-                    log.info("link monitor: landed on %s at %.0fms (≤target)", ap, ping)
-                    break
-                # bail early once it's clear reconnect won't change the AP
-                if attempt >= 2 and len(seen_aps) <= 1:
-                    break
-            # if reconnecting never produced a different access point, this
-            # broker's login() is deterministic -- the API can't switch APs.
-            if len(seen_aps) <= 1:
-                self.reroll_disabled = True
-                log.warning("link monitor: reconnect always lands on %s -- the MT5 "
-                            "API cannot switch access points on this broker. "
-                            "Auto-reroll DISABLED; pin a faster access point "
-                            "manually via the MT5 connection icon.", next(iter(seen_aps), "?"))
-            self.last_reroll = time.time()
-        finally:
-            ORDER_GATE.release()
+    # ---- _reroll: DISABLED (access points switched manually) ----------------
+    # Auto-reroll is turned off -- on this broker mt5.login() is deterministic
+    # (always lands on the same access point), so switching is done manually via
+    # the MT5 connection icon. Implementation kept below, commented, for re-enable.
+    #
+    # def _reroll(self, login: int, password: str) -> None:
+    #     conn = mt5_client.connection_status()
+    #     if not conn:
+    #         return
+    #     server = conn["server"]
+    #     if not ORDER_GATE.acquire(blocking=False):
+    #         log.info("link monitor: order in flight -- deferring reroll")
+    #         return
+    #     try:
+    #         seen_aps: set = set()
+    #         for attempt in range(1, self.max_rerolls + 1):
+    #             mt5_client.reconnect(login, password, server)
+    #             time.sleep(3)
+    #             scan = self._scan()
+    #             ap, _ = scan[-1] if scan else (None, None)
+    #             c = mt5_client.connection_status()
+    #             ping = c["ping_ms"] if c else None
+    #             if ap:
+    #                 seen_aps.add(ap)
+    #             if ping is not None and ping <= self.target_ms:
+    #                 break
+    #             if attempt >= 2 and len(seen_aps) <= 1:
+    #                 break
+    #         self.last_reroll = time.time()
+    #     finally:
+    #         ORDER_GATE.release()
 
 
 _monitor: LinkMonitor | None = None
@@ -193,8 +176,8 @@ def start(**kw) -> LinkMonitor:
     if _monitor is None:
         _monitor = LinkMonitor(**kw)
         _monitor.start()
-        log.info("link monitor started (poll %ds, reroll=%s)",
-                 _monitor.poll, bool(os.environ.get("MT5_LOGIN")))
+        log.info("link monitor started (poll %ds, monitor-only; switch access "
+                 "points manually)", _monitor.poll)
     return _monitor
 
 

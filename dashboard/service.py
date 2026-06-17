@@ -31,6 +31,7 @@ STATE: dict = {
     "scores": {},          # key -> Score
     "live": {},            # key -> {price, src, spread}  near-tick when MT5 present
     "spark": {},           # key -> list[float]  short recent close series for mini-charts
+    "positions": {},       # paper_id -> live MT5 position (real fill + P&L)
     "llm": {},             # key -> InstrumentSignal
     "macro_note": "",
     "news": [],            # list[str]
@@ -108,6 +109,10 @@ def refresh_cheap() -> None:
             if spark:
                 STATE["spark"][key] = spark
     STATE["mt5_available"] = mt5_client.is_available()
+    try:
+        STATE["positions"] = executor.live_positions()   # paper_id -> real fill/P&L
+    except Exception as e:
+        log.debug("live_positions error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
     if STATE["conn"] and STATE["conn"]["ping_ms"] > 300:
         log.warning("MT5 link: %s ping %.0fms (high)", STATE["conn"]["server"],

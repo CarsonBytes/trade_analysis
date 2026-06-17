@@ -411,14 +411,19 @@ def active_panel() -> None:
         ui.label("No open positions. Setups are logged automatically from "
                  "qualifying signals.").classes("text-sm text-grey")
         return
+    positions = service.STATE.get("positions", {})
     with ui.row().classes("w-full flex-wrap gap-3"):
         for t in open_t:
             key = t["instrument"]
             live = service.STATE.get("live", {}).get(key)
             price = live["price"] if live else t["entry"]
-            risk = abs(t["entry"] - t["sl"]) or 1e-9
-            ur = ((price - t["entry"]) if t["direction"] == "long"
-                  else (t["entry"] - price)) / risk
+            # prefer the REAL MT5 fill price when this trade is on the demo, so
+            # the card matches what the MT5 terminal shows (not the paper entry).
+            pos = positions.get(t["id"])
+            entry = pos["open"] if pos else t["entry"]
+            risk = abs(entry - t["sl"]) or 1e-9
+            ur = ((price - entry) if t["direction"] == "long"
+                  else (entry - price)) / risk
             col = "bg-green-1" if ur >= 0 else "bg-red-1"
             with ui.card().classes(f"min-w-[210px] grow {col}"):
                 with ui.row().classes("items-center justify-between w-full"):
@@ -426,10 +431,14 @@ def active_panel() -> None:
                     ui.badge(t["direction"],
                              color="positive" if t["direction"] == "long" else "negative")
                 ui.label(f"{price:,.4f}").classes("text-base")
-                ui.label(f"unrealized: {ur:+.2f} R").classes("text-sm font-bold")
-                ui.label(f"entry {t['entry']:.4f} · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
+                pnl = f"  (${pos['profit']:+,.2f})" if pos else ""
+                ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
+                src = "MT5 fill" if pos else "paper"
+                ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
                     .classes("text-xs text-grey-7")
-                ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}").classes("text-xs text-grey-6")
+                tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos else " (not on demo)")
+                ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
+                    .classes("text-xs text-grey-6")
 
 
 @ui.refreshable
@@ -507,40 +516,13 @@ def retrospective_panel() -> None:
             .classes("text-sm text-grey")
 
 
-@ui.refreshable
-def connection_panel() -> None:
-    """MT5 link quality + access-point ping comparison (the 'advise' view)."""
-    from . import link_monitor
-    conn = service.STATE.get("conn")
-    lk = link_monitor.status()
-    stats = link_monitor.ap_stats()
-    ui.label("MT5 connection quality").classes("text-lg font-bold")
-    if not conn:
-        ui.label("MT5 not connected.").classes("text-sm text-grey"); return
-    cur = lk.get("access_point") or conn["server"]
-    ui.label(f"Connected via {cur} · {conn['retransmission']:.0%} retransmission · "
-             f"server {conn['server']}").classes("text-xs text-grey-6")
-    if not stats:
-        ui.label("Gathering access-point pings from the journal…").classes("text-sm text-grey")
-        return
-    best = stats[0]["ap"]
-    rows = [{"access point": s["ap"] + (" ← current" if s["ap"] == cur else ""),
-             "mean ping": f"{s['mean_ms']} ms", "jitter": f"±{s['jitter_ms']} ms",
-             "samples": s["n"],
-             "verdict": "✅ fastest" if s["ap"] == best else f"+{s['mean_ms']-stats[0]['mean_ms']} ms"}
-            for s in stats]
-    ui.table(rows=rows, columns=[{"name": c, "label": c, "field": c,
-             "align": "left"} for c in rows[0]]).classes("w-full").props("dense")
-    if best != cur:
-        mode = ("auto-rerolling to it" if lk.get("can_reroll")
-                else "pin it via the MT5 bottom-right connection icon")
-        ui.label(f"→ {best} is faster than {cur} — {mode}.")\
-            .classes("text-sm text-orange")
+# connection_panel removed -- access points are switched manually; the header
+# already shows the live access point + ping. (See git history / link_monitor
+# for the ap-comparison table if you want it back.)
 
 
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
-    connection_panel.refresh()
     grid.refresh(); paper_panel.refresh(); active_panel.refresh()
     gate_panel.refresh(); retrospective_panel.refresh()
 
@@ -735,7 +717,6 @@ def main_page() -> None:
                 gate_panel()
                 opportunities()
                 grid()
-                connection_panel()
             with ui.tab_panel(t_trades):
                 paper_panel()
             with ui.tab_panel(t_retro):

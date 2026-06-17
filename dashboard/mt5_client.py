@@ -167,6 +167,17 @@ def get_ticks_range(symbol: str, t0: dt.datetime, t1: dt.datetime) -> pd.DataFra
         return df.set_index("time")[["bid", "ask"]].astype(float).sort_index()
 
 
+def symbol_digits(symbol: str) -> int | None:
+    """Price decimal precision the broker uses for `symbol` (e.g. 5 for EURGBP).
+    SL/TP must be rounded to this or the broker's rounded level won't match the
+    paper trade's, leaving the paper trade unresolved when the broker stops out."""
+    with _LOCK:
+        if not _ensure_init() or not _select(symbol):
+            return None
+        info = _mod().symbol_info(symbol)
+        return int(info.digits) if info is not None else None
+
+
 def data_path() -> str | None:
     """Terminal data directory (where logs/ lives), or None."""
     with _LOCK:

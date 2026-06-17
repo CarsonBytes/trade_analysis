@@ -192,16 +192,26 @@ def sync_closures() -> list[str]:
 def _sync_closures(mt5) -> list[str]:
     logs: list[str] = []
     with paper._LOCK, _conn() as c:
-        rows = c.execute("SELECT paper_id, ticket FROM mt5_mirror "
-                         "WHERE status='OPEN'").fetchall()
-    resolved = {t["id"]: t for t in paper.all_trades() if t["status"] != "OPEN"}
-    for paper_id, ticket in rows:
+        rows = c.execute("SELECT paper_id, ticket, status FROM mt5_mirror").fetchall()
+    journal = {t["id"]: t for t in paper.all_trades()}
+    resolved = {tid: t for tid, t in journal.items() if t["status"] != "OPEN"}
+    for paper_id, ticket, mstatus in rows:
+        pt = journal.get(paper_id)
+        if pt is None or (mstatus == "CLOSED" and pt["status"] != "OPEN"):
+            continue  # fully reconciled (both closed) -- skip
         with mt5_client._LOCK:
             pos = mt5.positions_get(ticket=ticket)
-        if not pos:  # closed server-side (SL/TP hit)
+        if not pos:  # MT5 position is gone (closed server-side or already closed)
             with paper._LOCK, _conn() as c:
                 c.execute("UPDATE mt5_mirror SET status='CLOSED' WHERE paper_id=?",
                           (paper_id,))
+            # GROUND TRUTH: if the paper trade is still OPEN, resolve it from the
+            # broker's actual close (the tick re-derivation can disagree due to
+            # SL/TP rounding, leaving the paper trade stuck open forever).
+            if pt["status"] == "OPEN":
+                msg = _resolve_from_broker(mt5, pt, ticket)
+                if msg:
+                    logs.append(msg); log.info("executor: %s", msg)
             continue
         if paper_id not in resolved:
             continue  # both still open -- nothing to do
@@ -235,6 +245,30 @@ def _sync_closures(mt5) -> list[str]:
     return logs
 
 
+def _resolve_from_broker(mt5, trade: dict, ticket: int) -> str | None:
+    """Resolve a paper trade from its mirrored MT5 position's CLOSING deal --
+    the broker is ground truth for trades it executed. Returns a log line."""
+    with mt5_client._LOCK:
+        deals = mt5.history_deals_get(position=ticket) or []
+    closeds = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+    if not closeds:
+        return None
+    d = closeds[-1]
+    exit_price = float(d.price)
+    r = paper.r_multiple(trade["direction"], trade["entry"], trade["sl"], exit_price,
+                         half_spread=trade.get("half_spread") or paper.HALF_SPREAD)
+    reason = {4: "stop-loss hit", 5: "take-profit hit"}.get(
+        getattr(d, "reason", -1), "closed at broker")
+    status = "WIN" if r > 0 else "LOSS"
+    import pandas as pd
+    offset = paper.store.cache_get("mt5_offset_sec")[0] or 0
+    exit_ts = paper._mt5_to_utc(pd.Timestamp(d.time, unit="s", tz="UTC"), offset)
+    paper._update_resolution(trade["id"], status, str(exit_ts), exit_price,
+                             round(r, 3), exit_reason=f"{reason} (broker)")
+    return (f"#{trade['id']} {trade['instrument']} resolved from BROKER: {status} "
+            f"R={r:+.2f} exit={exit_price} ({reason})")
+
+
 # ---- one-off maintenance: flatten positions that aren't ours ----------------
 
 def _close_position(mt5, p) -> tuple[bool, str]:
@@ -266,6 +300,29 @@ def _close_position(mt5, p) -> tuple[bool, str]:
         return False, "no response"
     ok = res.retcode == mt5.TRADE_RETCODE_DONE
     return ok, getattr(res, "comment", str(res.retcode))
+
+
+def live_positions() -> dict:
+    """Map paper_id -> live MT5 position {ticket, open, profit, volume, sl, tp,
+    direction} for OUR trades (matched by the 'quant#<id>' order comment). Lets
+    the UI show the REAL fill price + P&L instead of the paper entry."""
+    mt5 = _mt5()
+    if mt5 is None:
+        return {}
+    out: dict[int, dict] = {}
+    with mt5_client._LOCK:
+        for p in (mt5.positions_get() or []):
+            if p.magic != MAGIC or not str(p.comment).startswith("quant#"):
+                continue
+            try:
+                pid = int(str(p.comment).split("#")[1])
+            except (ValueError, IndexError):
+                continue
+            out[pid] = {"ticket": p.ticket, "open": float(p.price_open),
+                        "profit": float(p.profit), "volume": float(p.volume),
+                        "sl": float(p.sl), "tp": float(p.tp),
+                        "direction": "long" if p.type == mt5.POSITION_TYPE_BUY else "short"}
+    return out
 
 
 def foreign_positions() -> list:

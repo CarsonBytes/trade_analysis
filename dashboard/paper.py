@@ -44,10 +44,11 @@ CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
 MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
                            # this signal's regime (strength x vol) to be >= this.
                            # Data-driven replacement for the arbitrary 0.60.
-MIN_STRENGTH = 4           # FLOOR only: trade strength-4+ signals (the regimes
-                           # the confidence model has data for; blocks untested
-                           # strength-3). Quality within 4-5 is judged by the
-                           # objective edge gate below, not by this floor.
+MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
+                           # regimes (esp. s4-low, +0.018R) are barely-positive
+                           # and noisy -- excluded by choice. The objective edge
+                           # gate still applies on top, but with this at 5 only
+                           # the (positive-edge) s5 regimes reach it.
 VOL_FILTER = False         # RETIRED 2026-06-16: superseded by the objective gate,
                            # which conditions edge on (strength x vol regime)
                            # directly. The blunt filter blocked positive-edge
@@ -372,6 +373,8 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
 
 def place_from_state(state: dict) -> list[str]:
     """Create paper trades for every qualifying signal (both SL/TP methods)."""
+    from .instruments import BY_KEY
+    from . import mt5_client
     logs: list[str] = []
     log.info("placement run: evaluating %d instruments", len(state.get("scores", {})))
     now = dt.datetime.now(dt.timezone.utc)  # store entry time in true UTC
@@ -437,6 +440,13 @@ def place_from_state(state: dict) -> list[str]:
             if rr_actual < MIN_RR:
                 logs.append(f"{key} {method}: skip (R:R {rr_actual:.2f} < {MIN_RR})")
                 continue
+            # round SL/TP to the broker's price precision so the paper trade and
+            # the demo order use the SAME levels -- otherwise the broker stops out
+            # at its rounded level while the paper resolver waits for an unrounded
+            # one the market never quite reaches (leaving the trade stuck open).
+            digits = mt5_client.symbol_digits(BY_KEY[key].mt5)
+            if digits:
+                entry, sl, tp = round(entry, digits), round(sl, digits), round(tp, digits)
             mlabel = f"ATR rr{rr:.1f}" if method == "ATR" else "STRUCT"
             if _has_open(key, mlabel):
                 logs.append(f"{key} {mlabel}: skip (already open)")
