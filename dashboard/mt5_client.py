@@ -48,10 +48,10 @@ def _ensure_init() -> bool:
     kwargs = {}
     if os.environ.get("MT5_PATH"):
         kwargs["path"] = os.environ["MT5_PATH"]
-    if os.environ.get("MT5_LOGIN"):
-        kwargs.update(login=int(os.environ["MT5_LOGIN"]),
-                      password=os.environ.get("MT5_PASSWORD", ""),
-                      server=os.environ.get("MT5_SERVER", ""))
+    # ATTACH to the already-running, logged-in terminal -- do NOT pass
+    # login/server here. Passing credentials forces a re-login that resets the
+    # access point (e.g. back to HK-Demo), wiping a manual selection. Explicit
+    # login is only done by the --ping/--select CLI when you ask for it.
     ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
     _S["init"] = bool(ok)
     _S["available"] = bool(ok)

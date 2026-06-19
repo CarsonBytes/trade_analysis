@@ -297,7 +297,8 @@ def gate_panel() -> None:
         ui.label("No scores yet — waiting for the first refresh.").classes("text-sm text-grey")
         return
     _badge = {"WOULD TRADE": "🟢 would trade", "OPEN": "🔵 open",
-              "BLOCKED": "🔴 blocked", "WAIT": "⚪ wait/watch"}
+              "BLOCKED": "🔴 blocked"}
+    # hide WAIT/WATCH instruments -- only show directional candidates
     rows = [{
         "instrument": r["key"],
         "action": r["action"],
@@ -307,7 +308,11 @@ def gate_panel() -> None:
         "vol": "ok" if r["vol_ok"] else "low",
         "status": _badge.get(r["status"], r["status"]),
         "blocked by": "; ".join(r["blocked_by"]) or "—",
-    } for r in rows_data]
+    } for r in rows_data if r["status"] != "WAIT"]
+    if not rows:
+        ui.label("No directional candidates right now — all instruments are "
+                 "WAIT/WATCH.").classes("text-sm text-grey")
+        return
     ui.table(rows=rows,
              columns=[{"name": c, "label": c, "field": c,
                        "align": "left" if c in ("blocked by", "status") else "center",
@@ -701,6 +706,22 @@ def main_page() -> None:
                 grid.refresh(); opportunities.refresh()
             ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
                       value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
+
+            from . import paper as _paper
+
+            def _set_overext(e) -> None:
+                _paper.OVEREXT_FILTER = bool(e.value)
+                gate_panel.refresh()
+
+            def _set_band(e) -> None:
+                _paper.OVEREXT_HI = float(e.value)
+                _paper.OVEREXT_LO = float(100 - e.value)
+                gate_panel.refresh()
+            ui.checkbox("Block overextended", value=_paper.OVEREXT_FILTER,
+                        on_change=_set_overext)\
+                .tooltip("skip longs above / shorts below the RSI band (don't chase)")
+            ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
+                      value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
 

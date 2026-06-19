@@ -44,6 +44,13 @@ CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
 MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
                            # this signal's regime (strength x vol) to be >= this.
                            # Data-driven replacement for the arbitrary 0.60.
+# Overextension filter: don't CHASE -- skip a long when already overbought / a
+# short when already oversold. Replay-validated 2026-06-18 (s5, OOS): expR
+# 0.150 -> 0.172, DSR held at 92%. Matches the live tape + win_model (entering
+# with strong momentum at extremes loses).
+OVEREXT_FILTER = True
+OVEREXT_HI = 70.0          # block longs with RSI above this
+OVEREXT_LO = 30.0          # block shorts with RSI below this
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
                            # regimes (esp. s4-low, +0.018R) are barely-positive
                            # and noisy -- excluded by choice. The objective edge
@@ -363,6 +370,11 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
                            f"(empirical n={nobs}, win {win:.0%})")
     if score.strength < MIN_STRENGTH:
         reasons.append(f"trend strength {score.strength} < {MIN_STRENGTH}")
+    if OVEREXT_FILTER:
+        rsi = score.facts.get("rsi14") or 50.0
+        if (direction == "long" and rsi > OVEREXT_HI) or \
+           (direction == "short" and rsi < OVEREXT_LO):
+            reasons.append(f"overextended: RSI {rsi:.0f} (chasing {direction})")
     if VOL_FILTER:
         atr = score.facts.get("atr14") or 0.0
         med = score.facts.get("atr14_med60") or 0.0
