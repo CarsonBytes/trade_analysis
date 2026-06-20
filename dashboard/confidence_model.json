@@ -1,27 +1,27 @@
 {
-  "built": "2026-06-16T13:21:57+00:00",
+  "built": "2026-06-20T08:15:52+00:00",
   "period": "5y",
-  "n_total": 3501,
+  "n_total": 4904,
   "buckets": {
     "s4-high": {
-      "n": 773,
-      "win_rate": 0.3532,
-      "expectancy_R": -0.0738
+      "n": 496,
+      "win_rate": 0.4476,
+      "expectancy_R": 0.2133
     },
     "s4-low": {
-      "n": 1014,
-      "win_rate": 0.3353,
-      "expectancy_R": 0.0177
+      "n": 607,
+      "win_rate": 0.3707,
+      "expectancy_R": 0.0699
     },
     "s5-high": {
-      "n": 988,
-      "win_rate": 0.3735,
-      "expectancy_R": 0.0563
+      "n": 2169,
+      "win_rate": 0.402,
+      "expectancy_R": 0.1436
     },
     "s5-low": {
-      "n": 726,
-      "win_rate": 0.3333,
-      "expectancy_R": 0.0077
+      "n": 1632,
+      "win_rate": 0.3805,
+      "expectancy_R": 0.1597
     }
   }
 }

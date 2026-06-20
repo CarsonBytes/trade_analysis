@@ -31,6 +31,23 @@ from .log import log
 _MODEL_PATH = pathlib.Path(__file__).resolve().parent / "confidence_model.json"
 _model: dict | None = None
 
+
+def _weekly_ohlc(inst):
+    """Max-history WEEKLY OHLC from yfinance (the strategy trades weekly, so the
+    model must be trained on weekly bars or its regime edges are mis-scaled)."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    import yfinance as yf
+    raw = yf.download(inst.yf, period="max", interval="1wk",
+                      progress=False, auto_adjust=True)
+    if raw is None or len(raw) == 0:
+        return None
+    if hasattr(raw.columns, "nlevels") and raw.columns.nlevels > 1:
+        raw.columns = raw.columns.get_level_values(0)
+    df = raw[["Open", "High", "Low", "Close"]].copy()
+    df.columns = ["open", "high", "low", "close"]
+    return df.dropna()
+
 MIN_SAMPLES = 20   # a bucket below this is too noisy to gate on (stays neutral)
 
 
@@ -58,8 +75,8 @@ def _collect_from_replay(period: str = "5y", rr: float | None = None) -> list[di
     rr = rr or paper.RR_DEFAULT
     records: list[dict] = []
     for inst in UNIVERSE:
-        df = get_ohlc(inst, period=period, interval="1d")
-        if df is None or len(df) < 300:
+        df = _weekly_ohlc(inst)          # WEEKLY bars -- coherent with the strategy
+        if df is None or len(df) < 220:
             continue
         close = df["close"]
         n = len(df)

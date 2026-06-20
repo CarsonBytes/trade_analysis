@@ -119,6 +119,7 @@ def record_rejections(rows: list[dict]) -> None:
 _GATE_PREFIXES = [
     ("confidence", "confidence below threshold"),
     ("objective edge", "objective edge below threshold (losing regime)"),
+    ("overextended", "overextended entry (chasing RSI extreme)"),
     ("trend strength", "trend strength below MIN_STRENGTH"),
     ("vol filter", "volatility filter (atr < median)"),
     ("no confluence", "deterministic disagrees with LLM"),

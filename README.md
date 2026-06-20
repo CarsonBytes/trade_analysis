@@ -10,6 +10,36 @@ A research platform for Gold, Oil and FX with three parts:
 
 ---
 
+## Key research findings (2026-06)
+
+A full out-of-sample, deflated-Sharpe-penalised study across 31 instruments (metals,
+energy, FX, indices, crypto). The honest conclusions:
+
+- **Daily-timeframe technical strategies have NO edge.** Trend-following and
+  mean-reversion both came out ~breakeven (deflated Sharpe 53–58%, i.e. no
+  statistical confidence) with ~24% drawdowns. The daily strategy space on liquid
+  spot/CFD instruments is fully arbitraged.
+- **Weekly time-series momentum DOES have an edge.** Re-validated on 20+ years with a
+  real OOS split: **OOS expectancy +0.11 R/trade, DSR 100%, ~+3% CAGR at 0.5% risk,
+  −9% max drawdown.** This rediscovers the published TSMOM result (Moskowitz-Ooi-
+  Pedersen): momentum works at weekly/monthly horizons, not daily/intraday.
+- **It's an asset-class effect.** Breadth test: strongly positive in **metals**
+  (gold +0.50R, silver +0.34R) and **equity indices** (S&P +0.28R, Nikkei +0.19R);
+  **FX is negative** (AUDUSD −0.36R) — FX mean-reverts at the weekly scale. So the
+  trend strategy is restricted to commodities + indices (`paper.WEEKLY_TREND_CLASSES`).
+- **Validated filters:** overextension (skip longs RSI>70 / shorts RSI<30) and the
+  objective regime-edge gate. The **ADX regime filter helps daily but HURTS weekly**
+  (weekly signal is already slow/clean). **Order-flow / Volume-Profile is infeasible**
+  here — spot FX/CFD have no real exchange volume (MT5 "volume" is tick-count).
+- **Frequency is the point, not a bug.** The weekly edge fires ~1 trade every 1–2
+  weeks (≪1/day), held ~7 weeks. Frequent trading = the no-edge daily game. The
+  patience IS the alpha.
+
+The live system (`dashboard/`) trades the **weekly** configuration: strength-5 signals
+on weekly bars, overextension filter, commodities+indices only, 0.5% risk, ~7-week hold.
+
+---
+
 ## Setup (uv)
 
 The project uses [uv](https://docs.astral.sh/uv/) with a `.venv`. Dependencies are in `pyproject.toml`, pinned in `uv.lock`.

@@ -35,6 +35,22 @@ from .log import log
 _MODEL_PATH = pathlib.Path(__file__).resolve().parent / "win_model.json"
 _model: dict | None = None
 
+
+def _weekly_ohlc(inst):
+    """Max-history WEEKLY OHLC from yfinance (model must match the weekly strategy)."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    import yfinance as yf
+    raw = yf.download(inst.yf, period="max", interval="1wk",
+                      progress=False, auto_adjust=True)
+    if raw is None or len(raw) == 0:
+        return None
+    if hasattr(raw.columns, "nlevels") and raw.columns.nlevels > 1:
+        raw.columns = raw.columns.get_level_values(0)
+    df = raw[["Open", "High", "Low", "Close"]].copy()
+    df.columns = ["open", "high", "low", "close"]
+    return df.dropna()
+
 # continuous features, in fixed order. Magnitude-based (trades are trend-aligned,
 # so sign carries no info); each is a quantity that could plausibly move P(win).
 FEATURES = ["strength", "abs_tstat", "atr_ratio", "abs_mom20", "rsi_stretch", "rvol"]
@@ -150,8 +166,8 @@ def _collect(period="5y", rr=None):
     rr = rr or paper.RR_DEFAULT
     rows = []
     for inst in UNIVERSE:
-        df = get_ohlc(inst, period=period, interval="1d")
-        if df is None or len(df) < 300:
+        df = _weekly_ohlc(inst)          # WEEKLY bars -- coherent with the strategy
+        if df is None or len(df) < 220:
             continue
         close = df["close"]; n = len(df); i = 160
         while i < n - 1:

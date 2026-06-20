@@ -39,11 +39,14 @@ def _from_yf(inst: Instrument, period: str = "60d", interval: str = "1h") -> pd.
 
 
 def get_history(inst: Instrument) -> tuple[pd.Series | None, str]:
-    """Return (close_series, source_label). source is 'mt5' | 'yfinance' | 'none'."""
-    s = _from_mt5(inst)
+    """Return (close_series, source_label) of WEEKLY closes for signal scoring.
+    Weekly time-series momentum is the validated edge (daily is arbitraged away);
+    the scorer's MA/RSI/ATR periods are in BARS, so feeding weekly bars makes
+    them weekly signals. ~320 weekly bars (~6y) covers the 150-bar long MA."""
+    s = _from_mt5(inst, "W1", 320)
     if s is not None and len(s) > 200:
         return s, "mt5"
-    s = _from_yf(inst)
+    s = _from_yf(inst, period="8y", interval="1wk")
     if s is not None and len(s) > 50:
         return s, "yfinance"
     return None, "none"

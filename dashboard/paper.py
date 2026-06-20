@@ -35,8 +35,8 @@ SL_ATR_MULT = 1.5          # stop = 1.5 x ATR
 RR_DEFAULT = 3.0           # take-profit reward:risk (needs only ~25% win rate)
 RR_SWEEP = [2.0, 3.0, 4.0]  # ATR variants we compare in replay
 MIN_RR = 1.5               # reject setups whose geometry is worse than this
-HORIZON_DAYS = 5           # trade validity (trading days ~ calendar 7d window)
-HORIZON_CAL = 7
+HORIZON_DAYS = 5           # trade validity in BARS (weekly now -> ~5 weeks);
+HORIZON_CAL = 49           # live horizon window in calendar days (~7 weeks)
 RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
 ACCOUNT = 10_000.0
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
@@ -51,6 +51,11 @@ MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
 OVEREXT_FILTER = True
 OVEREXT_HI = 70.0          # block longs with RSI above this
 OVEREXT_LO = 30.0          # block shorts with RSI below this
+# Weekly time-series momentum works in COMMODITIES + EQUITY INDICES and NOT in
+# FX (mean-reverting) -- confirmed by the breadth test and the TSMOM literature
+# (Moskowitz/Ooi/Pedersen). Restrict the trend strategy to those classes.
+# Empty set = trade all classes.
+WEEKLY_TREND_CLASSES = {"metal", "energy", "index"}
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
                            # regimes (esp. s4-low, +0.018R) are barely-positive
                            # and noisy -- excluded by choice. The objective edge
@@ -366,15 +371,19 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     if obj is not None:
         win, exp, nobs = obj
         if nobs >= confidence_model.MIN_SAMPLES and exp < MIN_EDGE_R:
-            reasons.append(f"objective edge {exp:+.2f}R < {MIN_EDGE_R:+.2f} "
-                           f"(empirical n={nobs}, win {win:.0%})")
+            reasons.append(f"objective edge {exp:+.2f}R (win {win:.0%}, n{nobs})")
     if score.strength < MIN_STRENGTH:
         reasons.append(f"trend strength {score.strength} < {MIN_STRENGTH}")
+    if WEEKLY_TREND_CLASSES:
+        from .instruments import BY_KEY
+        cls = BY_KEY[key].asset_class
+        if cls not in WEEKLY_TREND_CLASSES:
+            reasons.append(f"off-strategy: {cls} (weekly trend = commodities/indices)")
     if OVEREXT_FILTER:
         rsi = score.facts.get("rsi14") or 50.0
         if (direction == "long" and rsi > OVEREXT_HI) or \
            (direction == "short" and rsi < OVEREXT_LO):
-            reasons.append(f"overextended: RSI {rsi:.0f} (chasing {direction})")
+            reasons.append(f"overextended RSI {rsi:.0f}")
     if VOL_FILTER:
         atr = score.facts.get("atr14") or 0.0
         med = score.facts.get("atr14_med60") or 0.0
@@ -599,8 +608,13 @@ def _outcome_for(t: dict, get_ohlc_fn):
     horizon_passed = now_utc >= end_ts
     offset = store.cache_get("mt5_offset_sec")[0] or 0
 
+    # tick resolution is only worth it for SHORT windows -- over a multi-week
+    # (weekly-strategy) horizon the tick fetch is millions of rows. For long
+    # windows skip straight to daily-bar resolution (ample for weekly SL/TP).
+    win_days = ((end_ts if horizon_passed else now_utc) - entry_ts).days
+
     # 1) exact path: MT5 ticks
-    if mt5_client.is_available():
+    if mt5_client.is_available() and win_days <= 10:
         try:
             # Pad the query window generously. MT5 stamps ticks in the broker's
             # SERVER timezone, so passing real-UTC bounds makes copy_ticks_range

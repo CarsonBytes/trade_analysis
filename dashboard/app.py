@@ -307,7 +307,9 @@ def gate_panel() -> None:
                  if r["obj_edge"] is not None else "—"),
         "vol": "ok" if r["vol_ok"] else "low",
         "status": _badge.get(r["status"], r["status"]),
-        "blocked by": "; ".join(r["blocked_by"]) or "—",
+        # an OPEN position's re-entry gates are irrelevant -- don't list them
+        "blocked by": ("—" if r["status"] == "OPEN"
+                       else "; ".join(r["blocked_by"]) or "—"),
     } for r in rows_data if r["status"] != "WAIT"]
     if not rows:
         ui.label("No directional candidates right now — all instruments are "
@@ -589,6 +591,18 @@ async def _log_trades_now() -> None:
     ui.notify(f"Logged {len(placed)} paper trade(s).")
 
 
+def _restart_server() -> None:
+    """Exit the process so the watchdog (DashboardApp task / dashboard.ps1)
+    relaunches it fresh with the latest code, ~10s later."""
+    import os
+    import threading
+    from .log import log
+    ui.notify("Restarting — the watchdog relaunches in ~10s. Reload the page shortly.",
+              type="warning", timeout=9000)
+    log.info("restart requested from UI; exiting for watchdog relaunch")
+    threading.Timer(1.2, lambda: os._exit(0)).start()
+
+
 async def _archive_records(table) -> None:
     """Archive the rows ticked in a paper-trades table (specific records)."""
     from . import paper
@@ -722,8 +736,17 @@ def main_page() -> None:
                 .tooltip("skip longs above / shorts below the RSI band (don't chase)")
             ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
                       value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
+            ui.label("Risk/trade:").classes("text-sm")
+            ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
+                      value=_paper.RISK_PER_TRADE,
+                      on_change=lambda e: setattr(_paper, "RISK_PER_TRADE", e.value))\
+                .props("dense").tooltip("% of demo equity risked per trade "
+                                        "(applied to real equity at order time)")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
+            ui.button("Restart", icon="restart_alt", on_click=_restart_server)\
+                .props("flat color=negative")\
+                .tooltip("exit the app so the watchdog relaunches it fresh (~10s)")
 
         header_status()
 

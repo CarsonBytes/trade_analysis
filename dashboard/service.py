@@ -126,9 +126,10 @@ def refresh_cheap() -> None:
              len(STATE["scores"]),
              "MT5" if n_mt5 else ("yfinance" if live else "none"),
              n_mt5, len(live))
-    # resolve any open paper trades against the fresh price action
+    # resolve any open paper trades against the fresh price action. Use DAILY
+    # bars (covers the multi-week weekly horizon; M1 only spans ~34 days).
     try:
-        n = paper.resolve_open(get_ohlc)
+        n = paper.resolve_open(lambda inst: get_ohlc(inst, period="1y", interval="1d"))
         STATE["paper_resolved"] = n
         if n:
             log.info("resolved %d paper trade(s) this refresh", n)
