@@ -5,6 +5,11 @@ analyst/.env
 # data / outputs
 *.csv
 !eurusd_daily.csv
+# cached/serialised datasets (replay caches, etc.) — regenerated locally, not for VC
+*.pkl
+# generated artifacts (datasets, model dumps, exports) — see artifacts/README.md
+artifacts/*
+!artifacts/README.md
 
 # python / uv
 __pycache__/
