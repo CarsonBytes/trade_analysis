@@ -155,19 +155,32 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
 - Verified no regression: default → executor + 31-instrument universe; `BROKER=ib` →
   ib_exec + 21 futures. Both import and run clean; pure-math tests pass.
 
-**NOT yet done — needs a running TWS/IB Gateway paper session (can't verify offline):**
-1. `uv run python -m dashboard.ib_client` (diagnose) — confirm connectivity + the SPECS
-   cross-check (multiplier/tick vs broker). **Curated SPECS must be broker-verified before
-   any order.**
-2. Validate `continuous_rates` weekly vs yfinance GC=F/ES=F (the #1 continuous-vs-front
-   trap, IBKR_SCOPE §6).
-3. Set `.env`: `BROKER=ib IB_HOST=127.0.0.1 IB_PORT=7497 IB_CLIENT_ID=7 IB_ACCOUNT=DU…`
-   then place ONE live signal end-to-end on paper; confirm bracket + fill + reconcile.
-4. **Strategy decision (not code):** `WEEKLY_TREND_CLASSES={metal,energy,index}` currently
+**LIVE-VERIFIED 2026-06-21** against IB Gateway paper (port 4002, account DUK968178):
+- ✅ Connectivity + paper guard (`is_paper`=True). ✅ SPECS cross-check passes (MES/GC/ZN
+  multiplier+tick match broker). ✅ Front-month resolves (GCN6/ESU6, live prices sane).
+  ✅ `continuous_rates` weekly works through the full provider path (`source=ib`): GC 418wk,
+  ES 223wk. Continuous-vs-front split confirmed (GC continuous 4245.9 vs front 4229.3 =
+  back-adjustment offset, as expected).
+- 🐞 **Bug found+fixed during verification** (`ib_client.py`): weekly `durationStr` was built
+  as "60 W" → IB Error 366; must be expressed in YEARS. Also ContFuture now `qualifyContracts`
+  first (bare ContFuture has no conId → 366). Install ib_async with `uv pip install ib_async`
+  (a full `uv sync --extra ib` fails while the live dashboard locks MetaTrader5's .pyd).
+- ⚠️ IB ContFuture history is SHALLOW for newer contracts (ZN ~132wk < the 200-bar signal
+  threshold) → those fall back to yfinance for signals. Fine, but uneven; revisit if it matters.
+- ⚠️ clientId collisions are real: a lingering prior connection holds clientId 7 (Error 326).
+  Ensure `ib_client.shutdown()` on exit; use a distinct IB_CLIENT_ID for ad-hoc probes.
+
+**Still to do:**
+1. Flip `BROKER=ib` in analyst/.env (currently commented) and place ONE live signal
+   end-to-end on paper; confirm bracket + fill + reconcile. (CME real-time data NOT yet
+   activated → live ticks unavailable; weekly runs on delayed/historical — acceptable.)
+2. **Strategy decision (not code):** `WEEKLY_TREND_CLASSES={metal,energy,index}` currently
    EXCLUDES the new rate/grain/soft/fx futures. On futures, diversification is the whole
-   edge (HANDOFF §"Open items") — to trade ZN/ZB/ZF etc. set `WEEKLY_TREND_CLASSES=set()`
-   (all) or add the classes. Deliberate user call; left as-is so nothing changes silently.
-5. Run the weekly backtest on IB continuous futures to re-confirm the edge before scaling.
+   edge — to trade ZN/ZB/ZF etc. set `WEEKLY_TREND_CLASSES=set()` (all) or add the classes.
+   Deliberate user call; left as-is so nothing changes silently.
+3. Run the weekly backtest on IB continuous futures to re-confirm the edge before scaling.
+4. **Folder reorg** (filed task) now UNBLOCKED — IBKR layer is live-verified. Do it as one
+   atomic, test-covered commit AFTER the verification bugfix is committed.
 
 ## How a NEW context window should continue
 

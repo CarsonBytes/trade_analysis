@@ -133,10 +133,17 @@ def _bars_to_df(bars) -> pd.DataFrame | None:
 
 
 def _hist(ib, contract, timeframe: str, n: int) -> pd.DataFrame | None:
+    import math
     bar = _BARSIZE.get(timeframe, "1 week")
-    # duration sized generously from n bars; IB caps very long intraday ranges.
-    per = {"1 week": "W", "1 day": "D"}.get(bar)
-    duration = f"{n} {per}" if per else f"{max(1, n)} D"
+    # IB durationStr is finicky about units: a weekly barSize with a "W" duration
+    # (e.g. "60 W") fails with Error 366 -- it must be expressed in YEARS. Daily
+    # over ~1y must also roll up to years. Size generously from n bars (+pad).
+    if bar == "1 week":
+        duration = f"{max(1, math.ceil(n / 52) + 1)} Y"
+    elif bar == "1 day":
+        duration = f"{n} D" if n <= 365 else f"{math.ceil(n / 252) + 1} Y"
+    else:                                    # intraday: keep in days (IB caps long ranges)
+        duration = f"{max(1, math.ceil(n / 390))} D"
     try:
         bars = ib.reqHistoricalData(
             contract, endDateTime="", durationStr=duration, barSizeSetting=bar,
@@ -157,6 +164,17 @@ def continuous_rates(spec: FutureSpec, timeframe: str = "W1", n: int = 320):
         ib_async = _mod()
         cont = ib_async.ContFuture(symbol=spec.symbol, exchange=spec.exchange,
                                    currency=spec.currency)
+        # MUST qualify first: a bare ContFuture has no conId, so reqHistoricalData
+        # fails with Error 366 ("no historical data query found"). Qualifying
+        # resolves it to the live front month with a conId.
+        try:
+            ib.qualifyContracts(cont)
+        except Exception as e:
+            log.info("ib_client: qualify ContFuture(%s) failed: %s", spec.symbol, e)
+            return None
+        if not getattr(cont, "conId", 0):
+            log.info("ib_client: ContFuture(%s) did not qualify (no conId)", spec.symbol)
+            return None
         return _hist(ib, cont, timeframe, n)
 
 
