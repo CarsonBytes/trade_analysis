@@ -18,7 +18,7 @@ from nicegui import ui, run
 
 from dashboard.web import service
 from dashboard.core import store
-from dashboard.instruments import BY_KEY
+from dashboard.instruments import BY_KEY, active_by_key
 from dashboard.core.scoring import rank
 
 # ---- settings (live, editable from the UI) --------------------------------
@@ -156,6 +156,20 @@ def header_status() -> None:
                     .classes(f"text-sm {css}")\
                     .tooltip("BROKER=ib — orders go to the IBKR paper account; "
                              "guard requires a DU… paper account on a paper port")
+                acct = service.STATE.get("account") or {}
+                if acct:
+                    cc = acct.get("_ccy", "")
+                    nl = acct.get("NetLiquidation"); cash = acct.get("TotalCashValue")
+                    bp = acct.get("BuyingPower"); upnl = acct.get("UnrealizedPnL")
+                    parts = []
+                    if nl is not None:   parts.append(f"NetLiq {cc} {nl:,.0f}")
+                    if cash is not None: parts.append(f"cash {cc} {cash:,.0f}")
+                    if bp is not None:   parts.append(f"BP {cc} {bp:,.0f}")
+                    if upnl:             parts.append(f"uPnL {cc} {upnl:+,.0f}")
+                    ui.label(" · ".join(parts)).classes(
+                        "text-sm " + ("text-green" if (upnl or 0) >= 0 else "text-red"))\
+                        .tooltip("IBKR paper account (base ccy): net liquidation, cash, "
+                                 "buying power, unrealized P&L")
                 ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
                 return
             conn = service.STATE.get("conn")
@@ -220,7 +234,7 @@ def _sparkline_svg(series: list[float], up: bool, w: int = 240, h: int = 40) -> 
 def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260px] grow"):
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
-    inst = BY_KEY[key]
+    inst = active_by_key(key)
     # LLM action wins for display if present, else deterministic signal
     action = sig.action if sig else (score.signal if score else "—")
     conf = f"{sig.confidence:.0%}" if sig else ""
@@ -353,7 +367,7 @@ def _open_detail(key: str) -> None:
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
     with ui.dialog() as dlg, ui.card().classes("min-w-[520px]"):
-        ui.label(BY_KEY[key].name).classes("text-xl font-bold")
+        ui.label(active_by_key(key).name).classes("text-xl font-bold")
         ui.label(f"Source: {service.STATE['sources'].get(key,'?')}").classes("text-xs text-grey")
         ui.separator()
         ui.label("Deterministic facts").classes("font-bold text-sm")
@@ -460,7 +474,7 @@ def active_panel() -> None:
             col = "bg-green-1" if ur >= 0 else "bg-red-1"
             with ui.card().classes(f"min-w-[210px] grow {col}"):
                 with ui.row().classes("items-center justify-between w-full"):
-                    ui.label(BY_KEY[key].name).classes("font-bold")
+                    ui.label(active_by_key(key).name).classes("font-bold")
                     ui.badge(t["direction"],
                              color="positive" if t["direction"] == "long" else "negative")
                 ui.label(f"{price:,.4f}").classes("text-base")
@@ -808,8 +822,10 @@ def main_page() -> None:
 
 
 # MT5 link monitor: tracks access-point ping, re-rolls to the fastest on
-# sustained degradation (needs MT5_LOGIN/PASSWORD in .env; else monitor-only).
-from dashboard.execution import link_monitor  # noqa: E402
-link_monitor.start()
+# sustained degradation. MT5-ONLY -- skip under BROKER=ib (else it polls a broken/
+# absent MetaTrader5 every 60s and spams "no attribute initialize").
+from dashboard.execution import link_monitor, broker as _bk0  # noqa: E402
+if not _bk0.is_ib():
+    link_monitor.start()
 
 ui.run(title="Trade Analysis", port=8080, reload=False, show=False)

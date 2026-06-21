@@ -73,6 +73,23 @@ def executed_ids() -> set:
         return set()
 
 
+def account_summary() -> dict | None:
+    """Active-broker account balances for the header. IBKR: NetLiquidation/cash/
+    buying-power/PnL. MT5: balance/equity. None if unavailable."""
+    if is_ib():
+        from dashboard.data import ib_client
+        return ib_client.account_summary()
+    from dashboard.data import mt5_client
+    try:
+        info = mt5_client.account_info()           # may not exist on all builds
+    except Exception:
+        info = None
+    if not info:
+        return None
+    return {"NetLiquidation": getattr(info, "equity", None),
+            "TotalCashValue": getattr(info, "balance", None)}
+
+
 def connection() -> dict:
     """Uniform connection status for the header. Keys: label, ok (on safe acct),
     available (link up), detail (account/server string)."""

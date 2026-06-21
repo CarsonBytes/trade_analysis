@@ -34,7 +34,12 @@ from dashboard.research.replay import _resolve_daily
 RISK_LEVELS = [0.0025, 0.005, 0.01]   # 0.25% / 0.5% / 1%
 START_EQUITY = 100.0
 MIN_ADX: float | None = None          # set via --adx to add the trend-regime filter
-_DIRECTIONS: tuple = ("long", "short")  # set by --direction-test to long-only/short-only
+# default matches the live config: long-only under BROKER=ib (paper.LONG_ONLY),
+# both directions on MT5/spot. --direction / --direction-test override.
+_DIRECTIONS: tuple = ("long",) if paper.LONG_ONLY else ("long", "short")
+CONCENTRATED: bool = False    # --concentrated: drop one-per-instrument + de-correlation caps
+CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): pause new
+                                 # entries when portfolio DD >= stop, resume when DD <= resume
 
 
 def _adx(df, n=14):
@@ -153,13 +158,26 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
             eq_points.append((v["exit_date"], equity))
             realized.append(v["r"])
 
+    peak_eq = START_EQUITY
+    paused = False
     for c in cands:
         _close_due(c["entry_date"])
-        if c["key"] in open_keys:
-            continue                                    # already in this instrument
+        if CIRCUIT_DD:                                  # tail-risk circuit breaker
+            peak_eq = max(peak_eq, equity)
+            dd = (peak_eq - equity) / peak_eq if peak_eq > 0 else 0.0
+            stop, resume = CIRCUIT_DD
+            if not paused and dd >= stop:
+                paused = True
+            elif paused and dd <= resume:
+                paused = False
+            if paused:
+                continue                                # no new entries while halted
         buckets = paper._risk_buckets(c["key"], c["direction"])
-        if any(b in open_buckets for b in buckets):
-            continue                                    # de-correlation
+        if not CONCENTRATED:                            # risk caps (off in concentrated mode)
+            if c["key"] in open_keys:
+                continue                                # already in this instrument
+            if any(b in open_buckets for b in buckets):
+                continue                                # de-correlation
         nid += 1
         risk_money = equity * risk * _vol_factor()
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"],
@@ -222,6 +240,14 @@ def _dd_report(cands, years, risks=(0.005, 0.01, 0.015)) -> None:
             f"{e['depth']*100:.1f}% ({e['trough_dt'].date()}, "
             f"{'recovered '+str(e['rec_days'])+'d' if e['rec_days'] is not None else 'UNDERWATER'})"
             for e in worst))
+
+
+def _span_years(trades: list[dict]) -> float:
+    """Calendar years between the EARLIEST and LATEST entry. trades/cands are grouped
+    by instrument (NOT date-sorted), so list[-1]-list[0] is wrong -- use min/max.
+    (This was the IS/OOS CAGR bug: a tiny/garbage span inflated CAGR to ~90%.)"""
+    ds = [c["entry_date"] for c in trades]
+    return max((max(ds) - min(ds)).days / 365.25, 0.1) if len(ds) > 1 else 0.1
 
 
 def _metrics(eq: pd.Series, realized: list[float], years: float) -> dict:
@@ -289,17 +315,30 @@ def main():
                          "OOS, with a pre-registered risk-aware decision rule")
     ap.add_argument("--direction-test", action="store_true",
                     help="long+short vs long-only vs short-only (regime/asymmetry), OOS")
-    ap.add_argument("--direction", choices=["both", "long", "short"], default="both",
-                    help="restrict trade direction for a full IS/OOS run")
+    ap.add_argument("--direction", choices=["both", "long", "short"], default=None,
+                    help="override trade direction (default: config = long-only under "
+                         "BROKER=ib, both on MT5)")
     ap.add_argument("--exit-test", action="store_true",
                     help="compare exit methods (fixed/breakeven/trailing) on the "
                          "current locked config, OOS -- data fetched once")
+    ap.add_argument("--concentrated", action="store_true",
+                    help="drop one-per-instrument + de-correlation caps (concentrate "
+                         "on strong trends -- higher return, much higher DD)")
+    ap.add_argument("--circuit", action="store_true",
+                    help="tail-risk circuit breaker: pause new entries when DD>=15%%, "
+                         "resume when DD<=10%% (tests if it helps or just locks out the recovery)")
     args = ap.parse_args()
-    global _DIRECTIONS
-    _DIRECTIONS = {"both": ("long", "short"), "long": ("long",),
-                   "short": ("short",)}[args.direction]
-    if args.direction != "both":
-        print(f"[DIRECTION: {args.direction}-only]")
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD
+    if args.concentrated:
+        CONCENTRATED = True
+        print("[CONCENTRATED: risk caps OFF -- one-per-instrument + de-correlation disabled]")
+    if args.circuit:
+        CIRCUIT_DD = (0.15, 0.10)
+        print("[CIRCUIT BREAKER: pause new entries when DD>=15%, resume when DD<=10%]")
+    if args.direction:                            # explicit override; else keep config default
+        _DIRECTIONS = {"both": ("long", "short"), "long": ("long",),
+                       "short": ("short",)}[args.direction]
+    print(f"[DIRECTION: {'+'.join(_DIRECTIONS)}]")
     if args.all_classes:
         paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
         print("[ALL CLASSES: WEEKLY_TREND_CLASSES whitelist disabled]")
@@ -401,7 +440,7 @@ def main():
         if not sub:
             continue
         eq, real = _portfolio(sub, 0.005)
-        yrs = (sub[-1]["entry_date"] - sub[0]["entry_date"]).days / 365.25 if len(sub) > 1 else 1
+        yrs = _span_years(sub)
         m = _metrics(eq, real, max(yrs, 0.1))
         ss = paper.stats(real)
         print(f"  {lbl:<22} n={len(real):<4} win {ss['win_rate']:.0%} "
@@ -493,7 +532,7 @@ def _direction_test(data, span, years) -> None:
         oos = [c for c in cands if c["entry_date"] > cut]
         if len(oos) < 2:
             print(f"  {label:<14}(no OOS trades)"); continue
-        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        yrs = _span_years(oos)
         eq, real = _portfolio(oos, 0.005)
         m = _metrics(eq, real, yrs); ss = paper.stats(real)
         cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
@@ -537,7 +576,7 @@ def _exit_test(data, span, years) -> None:
         oos = [c for c in cands if c["entry_date"] > cut]
         if len(oos) < 2:
             continue
-        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        yrs = _span_years(oos)
         eq, real = _portfolio(oos, 0.005)
         m = _metrics(eq, real, yrs); ss = paper.stats(real)
         cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
@@ -571,7 +610,7 @@ def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:
         oos = [c for c in cands if c["entry_date"] > cut]
         if len(oos) < 2:
             continue
-        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        yrs = _span_years(oos)
         eq, real = _portfolio(oos, 0.005)
         m = _metrics(eq, real, yrs)
         ss = paper.stats(real)
@@ -604,7 +643,7 @@ def _voltarget_compare(cands, span, years, target_vol, tpy) -> None:
     print(f"  {'variant':<26}{'CAGR %':>9}{'maxDD %':>10}{'CAGR/DD':>9}")
     cut = min(c["entry_date"] for c in cands) + (span * 0.6)
     oos = [c for c in cands if c["entry_date"] > cut]
-    oos_yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1) if len(oos) > 1 else 1
+    oos_yrs = _span_years(oos) if len(oos) > 1 else 1
     for lbl, tv in [("fixed risk", None), (f"vol-target {target_vol:.0%}", target_vol)]:
         for scope, sub, yrs in [("full", cands, years), ("OOS", oos, oos_yrs)]:
             eq, real = _portfolio(sub, 0.005, target_vol=tv, tpy=tpy)

@@ -301,6 +301,37 @@ def account_id() -> str | None:
     return accts[0] if accts else None
 
 
+def account_summary() -> dict | None:
+    """Paper account balances for the dashboard: NetLiquidation, cash, available
+    funds, buying power, unrealized/realized PnL, gross position value (USD). None
+    if IB down. Read on the loop thread via call() (worker-thread safe)."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+    try:
+        # accountSummaryAsync REQUESTS + waits -- accountValues() is empty right
+        # after connect (populated asynchronously).
+        vals = _run(ib.accountSummaryAsync(), timeout=10)
+    except Exception:                                  # noqa: BLE001
+        return None
+    want = {"NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower",
+            "UnrealizedPnL", "RealizedPnL", "GrossPositionValue", "ExcessLiquidity"}
+    out: dict = {}
+    ccy = None
+    for v in vals:
+        if v.tag in want:                              # accept the account's base ccy
+            try:                                       # (paper acct here is HKD, not USD)
+                out[v.tag] = float(v.value)
+            except (TypeError, ValueError):
+                continue
+            if v.currency:
+                ccy = v.currency
+    if ccy:
+        out["_ccy"] = ccy
+    return out or None
+
+
 def is_paper() -> bool:
     """True only when the connected account is an IB PAPER account (DU prefix) AND
     matches IB_ACCOUNT if set. Non-configurable safety."""

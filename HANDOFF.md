@@ -183,17 +183,19 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
   Ensure `ib_client.shutdown()` on exit; use a distinct IB_CLIENT_ID for ad-hoc probes.
 
 ### ⭐ LOCKED STRATEGY SPEC (2026-06-21) — research closed, do not re-tune
-**Weekly TSMOM on IBKR futures.** Universe `{metal, index, rate}` (BROKER=ib default).
-Config: `MIN_STRENGTH=5`, `OVEREXT_FILTER` 70/30, `RR_DEFAULT=3.0`, `SL_ATR_MULT=1.5`,
-`RISK_PER_TRADE=0.005`, **`HORIZON_DAYS=5` / `HORIZON_CAL=35` (5 weeks, reconciled)**,
-no vol targeting. ~31 trades/yr.
-Final backtest (26.4y, 0.5% risk): full-period **+3.6% CAGR / −9.9% DD**, expR +0.239,
-PF 1.44, win 44%, DSR 100%. IS +7.4%/−9.9%, OOS +7.4%/−6.6%.
-**HONEST P6 EXPECTATION = ~4–6% CAGR / ~−10% DD** (NOT the 7.4% OOS — recent regime was
-trend-friendly; full-period 3.6% is the conservative anchor). Expect 1–2yr flat/drawdown
-stretches (2012–14 took 637d to recover) — that is NORMAL, do not abandon.
+**Weekly TSMOM on IBKR futures, LONG-ONLY.** Universe `{metal, index, rate}` (BROKER=ib
+default). Config: `MIN_STRENGTH=5`, `OVEREXT_FILTER` 70/30, `RR_DEFAULT=3.0`,
+`SL_ATR_MULT=1.5`, `RISK_PER_TRADE=0.005`, **`HORIZON_DAYS=5`/`HORIZON_CAL=35` (5wk)**,
+**`LONG_ONLY=True` under ib** (short side is net-negative on up-drifting index/metal
+futures), no vol targeting. **~25 trades/yr ≈ one every 2–3 weeks** (per market ~2–3/yr).
+Final long-only backtest (26.4y, 0.5%): full **+3.6% CAGR / −9.3% DD**, expR **+0.297**,
+PF **1.57**, win 45%, DSR 100%. IS +0.236 expR /+3.1% CAGR/−9.3%; OOS +0.415/+6.9%/−5.4%.
+(Long-only beats long+short on expR/PF/win/DD; full CAGR same 3.6%; per-trade quality up.)
+**HONEST P6 EXPECTATION = ~4–7% CAGR / ~−9% DD** (full-period 3.6% is the conservative
+anchor; recent OOS ~6.9% was trend-friendly). Expect 1–2yr flat/drawdown stretches — NORMAL.
 Tested & rejected: wider classes (grain/soft/fx/energy dilute), vol-targeting (pure
-leverage), horizons 1–8wk (4–6wk is a flat plateau; 5wk fine, shorter = noise),
+leverage), horizons 1–8wk (4–6wk flat plateau; 5wk fine), **short side (net-negative,
+−0.082 expR — dropped → long-only)**,
 **exit methods on the current config** (`--exit-test`, comprehensive): breakeven, pure
 trailing, arm-gated trailing, VOL-ADAPTIVE trailing (3-4xATR), and STRUCT SL/TP placement
 ALL tested. Fixed ATR-SL+RR3-TP+5wk WINS. STRUCT = catastrophic (OOS expR -0.581, loses
@@ -222,7 +224,48 @@ Ran a 7-combo OOS class battery + vol-targeting test on 26.4y yfinance `=F` hist
 - MT5/spot universe UNCHANGED (`{metal,energy,index}`) — it has no rate futures and
   silently dropping energy there would be an unvalidated live change.
 
-### P6 CUTOVER STATUS 2026-06-21 (attempted; blocked on 2 IB-integration issues)
+### 🔴 CRITICAL — account too small to trade + a currency bug (found 2026-06-22)
+The IBKR paper account is **~1,012,000 HKD ≈ US$130k**. At `RISK_PER_TRADE=0.005` the
+budget is ~**US$650/trade**, but ONE contract risks far more, so **NOTHING sizes → zero IBKR
+orders placed** (`ib_mirror` empty). Examples (1.5×ATR stop): HG (copper) **$6,750**, GC
+**$9,000**, ES **$11,250**, ZN **$1,500** — and even the MICROS exceed the budget (MGC ~$900,
+MES ~$1,125). That's why an HG paper trade shows in the journal (notional sizing off
+ACCOUNT=$10k) but is NOT on IBKR: `choose_contract` returns 0 (HG has no micro at all).
+**Two must-fix-before-first-real-order items:**
+1. **Account size / risk**: either (a) raise the IBKR **paper account to ~US$1M** (free, reset
+   in IBKR account mgmt — and ideally USD-denominated), or (b) raise `RISK_PER_TRADE` so
+   0.5–1% ≥ a micro's risk. On $130k @0.5% the strategy literally can't place a trade. HG is
+   the worst case (no micro; needs ~$1.35M @0.5% for 1 contract) — consider dropping HG.
+2. **🐞 CURRENCY MISMATCH (safety bug)**: `ib_exec._equity` returns NetLiquidation in the
+   account ccy (**HKD**), but `contracts.choose_contract`/`risk_per_contract` compute risk in
+   the contract ccy (**USD**) — no conversion. Currently masked (everything sizes to 0), but if
+   the account is enlarged this **oversizes ~7.8×** (HKD number treated as USD). MUST convert
+   equity→contract-ccy (fetch USD.HKD fx) before sizing, OR refuse when acct ccy≠USD.
+
+### Dashboard instrument count / scope (2026-06-22)
+- Board shows **10** futures (ES/NQ/YM/RTY, GC/SI/HG, ZN/ZB/ZF) — NORMAL: `active_universe()`
+  filters FUTURES_UNIVERSE(21) to the traded `WEEKLY_TREND_CLASSES={metal,index,rate}`. The
+  rejected grain/soft/fx aren't shown. (MT5 mode showed 31 spot instruments — different set.)
+- **Funds / individual stocks: NOT recommended.** The validated edge is weekly TSMOM on
+  *futures* {metal,index,rate}; equity-index exposure is already covered (ES/NQ/YM/RTY).
+  Individual stocks/funds = idiosyncratic risk + a NEW research project (own OOS/DSR). Out of
+  scope; would violate "stop researching, start executing".
+
+### ✅ P6 CUTOVER WORKING 2026-06-21 (corrected) — root cause was MT5, not IB threading
+The dashboard runs LIVE on `BROKER=ib`: board scores the 10 traded futures (ES/NQ/YM/RTY,
+GC/SI/HG, ZN/ZB/ZF) on yfinance, IBKR connects in the refresh worker thread, full cheap
+refresh completes. **The earlier "blank board / stall" was NOT the ib_async↔nicegui issue
+I feared** — the refresh runs via `run.io_bound` (worker threads), where `ib_client.call`
+works fine (standalone-verified). The REAL blocker was a broken MetaTrader5 package: its
+`AttributeError` from `mt5_client.is_available()` (called unguarded at the top of every
+refresh) aborted the whole loop silently → blank board in BOTH modes. Fixed by guarding
+`mt5._ensure_init`. Also: `active_universe()` under ib now filters to WEEKLY_TREND_CLASSES
+(shows exactly the traded 10, not the rejected grain/soft/fx).
+Remaining proof: first REAL order via `ib_exec.mirror_new` (runs in the LLM refresh worker
+thread too) — awaits the next live signal (~weekly cadence). Architecture proven; not yet
+exercised with a real fill. Old "needs background-thread fix" note below is SUPERSEDED.
+
+### P6 CUTOVER STATUS 2026-06-21 (attempted; blocked on 2 IB-integration issues) [SUPERSEDED]
 - ✅ **IBC Gateway auto-login DONE**: IBC 3.24.0 at `C:\IBC` (config.ini → paper, port
   4002, ReadOnlyApi=no; password filled by user, ACL-locked). `StartGateway.bat` set for
   Gateway 1047, `CONFIG=C:\IBC\config.ini`. Startup-folder shortcut auto-starts it at logon.

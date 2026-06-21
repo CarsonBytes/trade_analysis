@@ -106,10 +106,17 @@ def _ib_broker() -> bool:
 
 
 def active_universe() -> list[Instrument]:
-    """The universe the LIVE system trades, per the BROKER env var: the IBKR
-    futures markets under BROKER=ib, else the MT5/yfinance universe. Research
-    scripts keep importing UNIVERSE directly (MT5/yfinance backtests)."""
-    return FUTURES_UNIVERSE if _ib_broker() else UNIVERSE
+    """The universe the LIVE system trades, per the BROKER env var. Under BROKER=ib
+    this is the futures we ACTUALLY TRADE -- FUTURES_UNIVERSE filtered to the
+    validated WEEKLY_TREND_CLASSES (= {metal,index,rate}: GC/SI/HG, ES/NQ/YM/RTY,
+    ZN/ZB/ZF) -- so the dashboard shows exactly the traded set, not the rejected
+    grain/soft/fx markets. Empty whitelist => all futures. MT5 => spot universe.
+    (Research scripts import UNIVERSE directly.)"""
+    if not _ib_broker():
+        return UNIVERSE
+    from dashboard.core import paper          # late import: avoids circular load
+    cls = paper.WEEKLY_TREND_CLASSES
+    return [i for i in FUTURES_UNIVERSE if i.asset_class in cls] if cls else FUTURES_UNIVERSE
 
 
 def active_by_key(key: str) -> Instrument | None:

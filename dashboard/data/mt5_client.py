@@ -52,7 +52,14 @@ def _ensure_init() -> bool:
     # login/server here. Passing credentials forces a re-login that resets the
     # access point (e.g. back to HK-Demo), wiping a manual selection. Explicit
     # login is only done by the --ping/--select CLI when you ask for it.
-    ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
+    # Guard EVERY mt5 call: a broken/partial MetaTrader5 install raises
+    # AttributeError ("module has no attribute 'initialize'"). Unguarded, that
+    # propagated out of is_available() and ABORTED the whole cheap-refresh loop
+    # (blank dashboard). Treat any failure as "not available" -> fall back to yfinance.
+    try:
+        ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
+    except Exception:
+        ok = False
     _S["init"] = bool(ok)
     _S["available"] = bool(ok)
     return _S["init"]

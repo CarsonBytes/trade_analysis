@@ -122,6 +122,11 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["broker_conn"] = None
         log.debug("broker.connection error: %s", e)
+    try:
+        STATE["account"] = broker.account_summary()      # balances for the header
+    except Exception as e:
+        STATE["account"] = None
+        log.debug("account_summary error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
     if STATE["conn"] and STATE["conn"]["ping_ms"] > 300:
         log.warning("MT5 link: %s ping %.0fms (high)", STATE["conn"]["server"],

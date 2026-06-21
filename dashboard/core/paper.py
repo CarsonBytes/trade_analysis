@@ -73,6 +73,14 @@ def _default_trend_classes() -> set[str]:
 
 
 WEEKLY_TREND_CLASSES = _default_trend_classes()
+
+# Direction: under BROKER=ib (futures) the SHORT side is net-negative -- index/metal
+# futures drift up, so shorting fights the drift. Validated 2026-06-21 (--direction-test):
+# long-only OOS expR +0.415 vs long+short +0.282, PF 1.57 vs 1.44, DD -9.3% vs -9.9%,
+# and short-only is -0.082 (a certain bleed) that also crowds out longs via the
+# one-per-instrument/de-correlation gates. MT5/spot keeps both directions.
+import os as _os
+LONG_ONLY = _os.environ.get("BROKER", "mt5").lower() == "ib"
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
                            # regimes (esp. s4-low, +0.018R) are barely-positive
                            # and noisy -- excluded by choice. The objective edge
@@ -384,6 +392,8 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     if action not in ("BUY", "SELL"):
         return False, ["action is WAIT/WATCH"], ""
     direction = "long" if action == "BUY" else "short"
+    if LONG_ONLY and direction == "short":
+        return False, ["long-only: short side disabled (net-negative on futures)"], direction
     det_action = score.signal
     if det_action not in ("BUY", "SELL") or (det_action == "BUY") != (action == "BUY"):
         reasons.append("no confluence: deterministic trend disagrees with action")
@@ -542,7 +552,10 @@ def place_from_state(state: dict) -> list[str]:
             for b in buckets:
                 open_by_bucket.setdefault(b, set()).add(key)
     for line in logs:
-        if "skip" in line:
+        # log only INFORMATIVE skips (a gate actually blocked a candidate). The
+        # WAIT/WATCH "skips" are just idle instruments -- the normal state for a
+        # low-frequency strategy -- and were ~95% of the debug log volume.
+        if "skip" in line and "WAIT/WATCH" not in line:
             log.debug("funnel %s", line)
     # persist the counterfactuals (rejected candidates) for constraint analysis
     try:
