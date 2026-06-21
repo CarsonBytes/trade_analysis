@@ -50,11 +50,14 @@ def _adx(df, n=14):
     return dx.ewm(alpha=1 / n, adjust=False).mean()
 
 
-def _signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
-    """All gate-passing ATR rr3 setups for one instrument (no look-ahead).
+def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
+             resolver=None, sl_method: str = "ATR") -> list[dict]:
+    """All gate-passing setups for one instrument (no look-ahead).
     Returns dicts: entry_i, entry_date, exit_date, direction, r.
-    `horizon` (bars) overrides paper.HORIZON_DAYS -- used by the horizon curve."""
+    `horizon` (bars) overrides paper.HORIZON_DAYS. `resolver` overrides the fixed
+    SL/TP exit (exit-method test). `sl_method` ('ATR'|'STRUCT') sets SL/TP placement."""
     H = horizon if horizon is not None else paper.HORIZON_DAYS
+    resolve = resolver or _resolve_daily
     close = df["close"]; n = len(df); i = 160; out = []
     adx = _adx(df) if MIN_ADX is not None else None
     while i < n - 1:
@@ -77,14 +80,14 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dic
         obj = confidence_model.objective(score)        # s5 passes; included for parity
         if obj and obj[2] >= confidence_model.MIN_SAMPLES and obj[1] < paper.MIN_EDGE_R:
             i += 1; continue
-        res = paper.compute_sltp(facts, direction, "ATR", paper.RR_DEFAULT)
+        res = paper.compute_sltp(facts, direction, sl_method, paper.RR_DEFAULT)
         if res is None:
             i += 1; continue
         entry, sl, tp, rr_act = res
         if rr_act < paper.MIN_RR:
             i += 1; continue
         bars = df.iloc[i + 1: i + 1 + H]
-        outcome = _resolve_daily(direction, entry, sl, tp, bars)
+        outcome = resolve(direction, entry, sl, tp, bars)
         if outcome is None:
             break
         status, exit_px, used = outcome
@@ -280,6 +283,9 @@ def main():
     ap.add_argument("--horizon-curve", action="store_true",
                     help="sweep holding period 1-8 weekly bars (data fetched once), "
                          "OOS, with a pre-registered risk-aware decision rule")
+    ap.add_argument("--exit-test", action="store_true",
+                    help="compare exit methods (fixed/breakeven/trailing) on the "
+                         "current locked config, OOS -- data fetched once")
     args = ap.parse_args()
     if args.all_classes:
         paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
@@ -338,6 +344,9 @@ def main():
     if args.horizon_curve:
         _horizon_curve(data, span, years)
         return
+    if args.exit_test:
+        _exit_test(data, span, years)
+        return
     print(f"{len(data)} instruments | {len(cands)} gate-passing signals | "
           f"{years:.1f}y\n")
     print(f"Config: strength>={paper.MIN_STRENGTH}, overext={paper.OVEREXT_FILTER} "
@@ -390,6 +399,113 @@ def main():
     print("\nNOTE: deterministic backbone only (no LLM veto). Costs = per-trade "
           "half-spread already in R. Past performance != future; the OOS row is "
           "the honest estimate.")
+
+
+def _resolve_trail(direction, entry, sl, tp, bars, arm_r=1.0, dist_r=2.0):
+    """Exit with a TRAILING stop. Once price reaches +arm_r in our favour, trail
+    the stop dist_r (in initial-risk units) behind the best price since entry
+    (chandelier-style). TP still caps the upside; horizon still time-stops.
+    Conservative: trailing only TIGHTENS the stop, armed from bar close levels."""
+    risk = abs(entry - sl)
+    peak = entry
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo = row["high"], row["low"]
+        if direction == "long":
+            if lo <= sl:
+                return "LOSS" if sl <= entry else "WIN", sl, n
+            if hi >= tp:
+                return "WIN", tp, n
+            peak = max(peak, hi)
+            if peak - entry >= arm_r * risk:
+                sl = max(sl, peak - dist_r * risk)
+        else:
+            if hi >= sl:
+                return "LOSS" if sl >= entry else "WIN", sl, n
+            if lo <= tp:
+                return "WIN", tp, n
+            peak = min(peak, lo)
+            if entry - peak >= arm_r * risk:
+                sl = min(sl, peak + dist_r * risk)
+    if len(bars):
+        return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
+    return None
+
+
+def _resolve_voltrail(direction, entry, sl, tp, bars, mult=3.0):
+    """VOLATILITY-based trailing (chandelier): trail the stop `mult x CURRENT ATR`
+    behind the best price, re-adapting ATR each bar (vs _resolve_trail which froze
+    the trail unit at entry). Needs a per-bar 'atr' column on `bars`."""
+    peak = entry
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo, atr = row["high"], row["low"], row.get("atr", 0.0) or 0.0
+        if direction == "long":
+            if lo <= sl:
+                return ("WIN" if sl > entry else "LOSS"), sl, n
+            if hi >= tp:
+                return "WIN", tp, n
+            peak = max(peak, hi)
+            if atr:
+                sl = max(sl, peak - mult * atr)
+        else:
+            if hi >= sl:
+                return ("WIN" if sl < entry else "LOSS"), sl, n
+            if lo <= tp:
+                return "WIN", tp, n
+            peak = min(peak, lo)
+            if atr:
+                sl = min(sl, peak + mult * atr)
+    if len(bars):
+        return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
+    return None
+
+
+def _exit_test(data, span, years) -> None:
+    """Pre-specified EXIT-METHOD comparison on the CURRENT locked config (the prior
+    breakeven test was on the old spot/daily universe -- doesn't transfer). One run,
+    OOS @0.5%, then lock. Fixed SL/TP is the baseline trend-following exit; the rest
+    'lock profit early', which theory says should HURT a trend system -- we verify."""
+    from functools import partial
+    from dashboard.research.ab_meanrev import _atr
+    # per-bar ATR for the volatility-adaptive trail (chandelier needs CURRENT ATR)
+    for df in data.values():
+        if "atr" not in df.columns:
+            df["atr"] = _atr(df, 14)
+    # (label -> (sl_method, resolver)). sl_method sets SL/TP PLACEMENT (ATR vs
+    # STRUCT); resolver sets EXIT MANAGEMENT (None=fixed, breakeven, trailing).
+    methods = {
+        "fixed (baseline)":   ("ATR",    None),
+        "STRUCT SL/TP":       ("STRUCT", None),
+        "breakeven @+1R":     ("ATR",    partial(_resolve_daily, breakeven_at=1.0)),
+        "pure trail 2R arm0": ("ATR",    partial(_resolve_trail, arm_r=0.0, dist_r=2.0)),
+        "vol-trail 3xATR":    ("ATR",    partial(_resolve_voltrail, mult=3.0)),
+        "vol-trail 4xATR":    ("ATR",    partial(_resolve_voltrail, mult=4.0)),
+    }
+    cut = min(min(df.index) for df in data.values()) + (span * 0.6)
+    print("\nEXIT-METHOD TEST (current config: {metal,index,rate}, 5wk, RR3, "
+          "OOS @0.5%). Data fetched once.\n")
+    print(f"  {'exit method':<20}{'OOS expR':>10}{'OOS CAGR%':>11}{'OOS DD%':>9}"
+          f"{'CAGR/DD':>9}{'win%':>7}")
+    base = None
+    for label, (sl_method, resolver) in methods.items():
+        cands = []
+        for key, df in data.items():
+            cands += _signals(df, key, resolver=resolver, sl_method=sl_method)
+        oos = [c for c in cands if c["entry_date"] > cut]
+        if len(oos) < 2:
+            continue
+        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        eq, real = _portfolio(oos, 0.005)
+        m = _metrics(eq, real, yrs); ss = paper.stats(real)
+        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+        row = {"expR": ss["expectancy_R"], "cagr": m["cagr"], "cd": cd}
+        if base is None:
+            base = row
+        tag = "  <- baseline" if label.startswith("fixed") else ""
+        print(f"  {label:<20}{ss['expectancy_R']:>+10.3f}{m['cagr']*100:>11.1f}"
+              f"{m['maxdd']*100:>9.1f}{cd:>9.2f}{ss['win_rate']*100:>7.0f}{tag}")
+    print()
+    print("  RULE: adopt a dynamic exit ONLY if it beats fixed on BOTH OOS expR and "
+          "CAGR/DD. Trend-following theory says cutting winners early should LOSE.")
 
 
 def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:

@@ -15,7 +15,10 @@ import logging
 import logging.handlers
 import pathlib
 
-_LOG_DIR = pathlib.Path(__file__).resolve().parent.parent / "logs"
+# repo-root logs/ (log.py is in dashboard/core/, so parents[2] is the repo root).
+# parent.parent would resolve to dashboard/ after the reorg -- same path bug class
+# as paper._DB / net._QUANT_DIR.
+_LOG_DIR = pathlib.Path(__file__).resolve().parents[2] / "logs"
 
 
 def get_logger() -> logging.Logger:

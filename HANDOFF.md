@@ -193,7 +193,14 @@ PF 1.44, win 44%, DSR 100%. IS +7.4%/−9.9%, OOS +7.4%/−6.6%.
 trend-friendly; full-period 3.6% is the conservative anchor). Expect 1–2yr flat/drawdown
 stretches (2012–14 took 637d to recover) — that is NORMAL, do not abandon.
 Tested & rejected: wider classes (grain/soft/fx/energy dilute), vol-targeting (pure
-leverage), horizons 1–8wk (4–6wk is a flat plateau; 5wk fine, shorter = noise).
+leverage), horizons 1–8wk (4–6wk is a flat plateau; 5wk fine, shorter = noise),
+**exit methods on the current config** (`--exit-test`, comprehensive): breakeven, pure
+trailing, arm-gated trailing, VOL-ADAPTIVE trailing (3-4xATR), and STRUCT SL/TP placement
+ALL tested. Fixed ATR-SL+RR3-TP+5wk WINS. STRUCT = catastrophic (OOS expR -0.581, loses
+money). Vol-trail @3-4xATR = IDENTICAL to fixed (never binds on a 5wk hold); tighten it to
+bind and it cuts winners (pure trail 2R → +0.236). No trail width helps. breakeven@1R is a
+lower-DD/lower-return lever (only if DD-control ever outranks CAGR), not adopted. Exits fully
+closed — no dynamic exit beats fixed on this universe.
 
 ### Futures research CONCLUDED 2026-06-21 (universe + sizing locked)
 Ran a 7-combo OOS class battery + vol-targeting test on 26.4y yfinance `=F` history

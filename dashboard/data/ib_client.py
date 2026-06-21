@@ -82,7 +82,10 @@ def _ensure_conn():
     for client_id in range(base_id, base_id + 4):
         try:
             ib = ib_async.IB()
-            ib.connect(host, port, clientId=client_id, readonly=True, timeout=8)
+            # readonly=False so ib_exec can place PAPER orders -- the real safety is
+            # the DU-paper-account + paper-port guard in ib_exec._guard(), not a
+            # read-only socket (which would silently reject every order).
+            ib.connect(host, port, clientId=client_id, readonly=False, timeout=8)
         except Exception as e:
             last_err = e
             msg = str(e).lower()
