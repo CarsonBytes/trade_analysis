@@ -11,14 +11,15 @@ Refresh model (two tiers, to respect the daily API cap):
 """
 from __future__ import annotations
 
-from . import net  # noqa: F401  -- TLS bootstrap first
+from dashboard.core import net  # noqa: F401  -- TLS bootstrap first
 
 import datetime as dt
 from nicegui import ui, run
 
-from . import service, store
-from .instruments import BY_KEY
-from .scoring import rank
+from dashboard.web import service
+from dashboard.core import store
+from dashboard.instruments import BY_KEY
+from dashboard.core.scoring import rank
 
 # ---- settings (live, editable from the UI) --------------------------------
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
@@ -134,7 +135,7 @@ def header_status() -> None:
                 "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
             conn = service.STATE.get("conn")
             if conn:
-                from . import link_monitor
+                from dashboard.execution import link_monitor
                 lk = link_monitor.status()
                 ap = lk.get("access_point") or conn["server"]
                 ping = lk.get("ping_ms") or conn["ping_ms"]
@@ -206,7 +207,7 @@ def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260
             ui.label(f"{inst.name}").classes("text-base font-bold")
             with ui.row().classes("items-center gap-1"):
                 if score:
-                    from . import paper
+                    from dashboard.core import paper
                     scol = ("positive" if score.strength >= paper.MIN_STRENGTH
                             else ("orange" if score.strength == paper.MIN_STRENGTH - 1
                                   else "grey"))
@@ -278,7 +279,7 @@ def grid() -> None:
 @ui.refreshable
 def gate_panel() -> None:
     """Per-instrument gate breakdown: why each signal does or doesn't trade."""
-    from . import paper
+    from dashboard.core import paper
     rows_data = paper.gate_report(service.STATE)
     ui.label("Signal gate status — why a trade does / doesn't fire")\
         .classes("text-lg font-bold")
@@ -345,7 +346,7 @@ def _open_detail(key: str) -> None:
 
 @ui.refreshable
 def paper_panel() -> None:
-    from . import paper
+    from dashboard.core import paper
     trades = paper.all_trades()
     closed = [t for t in trades if t["status"] != "OPEN"]
     open_t = [t for t in trades if t["status"] == "OPEN"]
@@ -411,7 +412,7 @@ def paper_panel() -> None:
 @ui.refreshable
 def active_panel() -> None:
     """Open positions shown on the Board with live unrealized P&L in R."""
-    from . import paper
+    from dashboard.core import paper
     open_t = paper.open_trades()
     ui.label(f"Active Trades ({len(open_t)})").classes("text-lg font-bold")
     if not open_t:
@@ -451,8 +452,9 @@ def active_panel() -> None:
 @ui.refreshable
 def retrospective_panel() -> None:
     """Live equity curve + constraint scorecard for the forward test."""
-    from . import paper, journal
-    from .retrospective import equity_curve, _demo_executed_ids
+    from dashboard.core import paper
+    from dashboard.core import journal
+    from dashboard.web.retrospective import equity_curve, _demo_executed_ids
 
     trades = paper.all_trades()
     # broker truth: KPIs/equity from trades the demo ACTUALLY executed (have an
@@ -584,7 +586,7 @@ async def _manual_refresh() -> None:
 
 async def _log_trades_now() -> None:
     """Manually turn the current signals into paper trades (no LLM call needed)."""
-    from . import paper
+    from dashboard.core import paper
     logs = await run.io_bound(paper.place_from_state, service.STATE)
     placed = [l for l in logs if "PLACED" in l]
     paper_panel.refresh(); active_panel.refresh()
@@ -596,7 +598,7 @@ def _restart_server() -> None:
     relaunches it fresh with the latest code, ~10s later."""
     import os
     import threading
-    from .log import log
+    from dashboard.core.log import log
     ui.notify("Restarting — the watchdog relaunches in ~10s. Reload the page shortly.",
               type="warning", timeout=9000)
     log.info("restart requested from UI; exiting for watchdog relaunch")
@@ -605,7 +607,7 @@ def _restart_server() -> None:
 
 async def _archive_records(table) -> None:
     """Archive the rows ticked in a paper-trades table (specific records)."""
-    from . import paper
+    from dashboard.core import paper
     ids = [r["id"] for r in table.selected]
     if not ids:
         ui.notify("Select one or more rows first."); return
@@ -615,7 +617,7 @@ async def _archive_records(table) -> None:
 
 
 async def _export_results() -> None:
-    from . import report
+    from dashboard.web import report
     csvp, repp = await run.io_bound(report.export)
     rep = report.build_report()
     with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
@@ -629,7 +631,7 @@ async def _export_results() -> None:
 
 
 async def _export_retrospective() -> None:
-    from . import retrospective
+    from dashboard.web import retrospective
     path = await run.io_bound(retrospective.export)
     rep = retrospective.build()
     with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
@@ -642,7 +644,7 @@ async def _export_retrospective() -> None:
 
 
 def _open_archive() -> None:
-    from . import paper
+    from dashboard.core import paper
     raw = paper.archived_trades()
     rows = [{"rowid": t["rowid"], "batch": _fmt_ts(t["archive_batch"]),
              "instrument": t["instrument"], "dir": t["direction"], "method": t["method"],
@@ -676,7 +678,7 @@ def _open_archive() -> None:
 
 
 async def _archive_reset() -> None:
-    from . import paper
+    from dashboard.core import paper
     with ui.dialog() as dlg, ui.card():
         ui.label("Archive & reset journal?").classes("text-lg font-bold")
         ui.label("Saves a snapshot (CSV + report) and copies all trades to the "
@@ -721,7 +723,7 @@ def main_page() -> None:
             ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
                       value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
 
-            from . import paper as _paper
+            from dashboard.core import paper as _paper
 
             def _set_overext(e) -> None:
                 _paper.OVEREXT_FILTER = bool(e.value)
@@ -779,7 +781,7 @@ def main_page() -> None:
 
 # MT5 link monitor: tracks access-point ping, re-rolls to the fastest on
 # sustained degradation (needs MT5_LOGIN/PASSWORD in .env; else monitor-only).
-from . import link_monitor  # noqa: E402
+from dashboard.execution import link_monitor  # noqa: E402
 link_monitor.start()
 
 ui.run(title="Trade Analysis", port=8080, reload=False, show=False)

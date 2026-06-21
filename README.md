@@ -97,7 +97,7 @@ manual refresh, and a daily API-call budget guard (default cap 200).
 ### Paper trading — historical replay (bootstrap a track record now)
 
 ```powershell
-uv run python -m dashboard.replay --period 5y
+uv run python -m dashboard.research.replay --period 5y
 ```
 Replays deterministic signals over history, resolves SL/TP against real prices, and
 reports expectancy-in-R / win rate per method. (LLM signals are not replayed — that
@@ -106,7 +106,7 @@ would be look-ahead; they are validated only by live forward testing in the dash
 ### MT5 setup helper (discover broker symbols)
 
 ```powershell
-uv run python -m dashboard.mt5_client   # prints availability + matching symbol names
+uv run python -m dashboard.data.mt5_client   # prints availability + matching symbol names
 ```
 Put your broker's exact Gold/Oil names into `dashboard/instruments.py` (the `mt5` field).
 With a terminal running, prices become near-tick and SL/TP resolution becomes tick-exact.

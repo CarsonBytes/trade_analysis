@@ -86,7 +86,7 @@ _FUT_NAME = {
 
 
 def _build_futures_universe() -> list[Instrument]:
-    from .contracts import SPECS  # local import: contracts has no dep on us
+    from dashboard.data.contracts import SPECS  # local import: contracts has no dep on us
     out = []
     for spec in SPECS.values():
         if spec.micro_of is not None:        # skip micros -- not separate signals

@@ -61,14 +61,23 @@ move to IBKR futures** (see "Next phase" below) — that's the user's stated dir
   (this is correct — the edge is low-frequency; frequent trading = the no-edge daily game).
 - **LLM:** light veto only (top-10 instruments, every 30min). Confidence NOT used to gate.
 
-## Key files
-- `paper.py` — signals→trades, gates, sizing, resolution, journal, archive.
-- `providers.py` / `mt5_client.py` — data (weekly W1) + MT5 client.
-- `confidence_model.py` / `win_model.py` — objective gate models (weekly-trained).
-- `backtest.py` — portfolio backtest (`--weekly`, `--longweekly`, `--adx N`). The real one.
-- `ab_overext.py`, `ab_regime.py`, `ab_meanrev.py`, `ab_breadth.py`, `ab_fx_validate.py` — A/B harnesses.
-- `structure.py` — price-based swing/zone/FVG-proxy features (informational).
-- `retrospective.py` — KPI report (broker-truth + all-paper views). `executor.py`, `link_monitor.py`.
+## Repository layout (REORGANISED 2026-06-21 into concern-based subpackages)
+The package was refactored from a flat `dashboard/` into subpackages. Imports are
+absolute (`dashboard.<subpkg>.<module>`). **Entrypoint UNCHANGED:** the scheduled task
+still runs `python -m dashboard.app` (`app.py` deliberately kept at the package root).
+- `dashboard/core/` — paper, scoring, journal, store, log, net
+- `dashboard/data/` — providers, mt5_client, ib_client, contracts
+- `dashboard/execution/` — executor, ib_exec, broker, link_monitor
+- `dashboard/models/` — confidence_model, win_model (+ their trained `.json`, kept here
+  in VC — NOT moved to artifacts/, since they're committed trained models)
+- `dashboard/research/` — backtest, optimize, replay, wide_search, structure, ab_*
+- `dashboard/web/` — service, report, board_scan, news_sources, retrospective
+- `dashboard/` (root) — app.py (entrypoint), instruments.py
+- `dashboard/tests/` — test_contracts
+- `artifacts/` (repo root, gitignored) — generated `*.pkl` datasets (replay caches)
+Moved-CLI paths: `python -m dashboard.data.ib_client` (diagnose),
+`dashboard.execution.ib_exec`, `dashboard.research.backtest|replay|optimize`,
+`dashboard.models.confidence_model --build`, `dashboard.tests.test_contracts`.
 
 ## Research findings table (all OOS + deflated-Sharpe)
 | strategy | verdict |
@@ -136,7 +145,7 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
   `get_rates` (dated front month, for resolution), `get_tick`, `front_future`,
   paper guard data (`is_paper`/`account_id`, DU-prefix), `contract_check`, `diagnose()` CLI.
 - ✅ `dashboard/test_contracts.py` — pure-math unit tests, **all pass**
-  (`uv run python -m dashboard.test_contracts`).
+  (`uv run python -m dashboard.tests.test_contracts`).
 - ✅ `pyproject.toml` — added `ib` extra (`uv sync --extra ib`).
 - ✅ `providers.py` (step 4) — BROKER dispatch. `BROKER=ib` routes get_history →
   CONTINUOUS weekly (signals), get_ohlc → DATED FRONT MONTH (resolution), get_live_price
@@ -148,7 +157,7 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
 - ✅ `ib_exec.py` (step 5) — paper execution mirroring executor.py's surface: paper guard
   (DU-prefix + paper port, refuses otherwise), `mirror_new` (front month + size-by-specs +
   bracket order), `sync_closures` (broker-truth resolve + roll-on-expiry), `live_positions`,
-  `reconcile`. Own `ib_mirror` sqlite table. CLI: `uv run python -m dashboard.ib_exec`.
+  `reconcile`. Own `ib_mirror` sqlite table. CLI: `uv run python -m dashboard.execution.ib_exec`.
 - ✅ `broker.py` (step 6) — BROKER dispatch shim (executor | ib_exec); `service.py` calls
   `broker.mirror_new/sync_closures/live_positions`. `paper.py` SL/TP rounding + instrument
   lookups + resolution made broker-aware (futures round to contract tick, not MT5 digits).
@@ -165,6 +174,9 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
   as "60 W" → IB Error 366; must be expressed in YEARS. Also ContFuture now `qualifyContracts`
   first (bare ContFuture has no conId → 366). Install ib_async with `uv pip install ib_async`
   (a full `uv sync --extra ib` fails while the live dashboard locks MetaTrader5's .pyd).
+  **IMPORTANT: run IB commands with `uv run --no-sync ...`** — a plain `uv run` re-syncs
+  the env to the default deps and STRIPS the pip-installed ib_async (the `ib` extra can't be
+  synced while MT5 is locked). e.g. `IB_CLIENT_ID=9 uv run --no-sync python -m dashboard.data.ib_client`.
 - ⚠️ IB ContFuture history is SHALLOW for newer contracts (ZN ~132wk < the 200-bar signal
   threshold) → those fall back to yfinance for signals. Fine, but uneven; revisit if it matters.
 - ⚠️ clientId collisions are real: a lingering prior connection holds clientId 7 (Error 326).
