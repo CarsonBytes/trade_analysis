@@ -19,7 +19,7 @@ __pycache__/
 # generated CA bundle (machine-specific) — regenerated next to net.py
 winca.pem
 # local SQLite state (paper trades, api-usage counter) — not for version control
-dashboard/dashboard.db
+dashboard.db
 # exported reports/CSVs
 exports/
 # debug logs

@@ -164,6 +164,57 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     return eq, realized
 
 
+def _drawdown_episodes(eq: pd.Series) -> list[dict]:
+    """Every distinct drawdown episode in the equity curve: depth, peak/trough
+    dates, duration and recovery time. An episode runs from a new all-time-high
+    peak, down to the trough, until equity reclaims that peak (or end-of-data)."""
+    peak = eq.iloc[0]; peak_dt = eq.index[0]
+    trough = eq.iloc[0]; trough_dt = eq.index[0]
+    in_dd = False
+    eps: list[dict] = []
+    for dt_, v in eq.items():
+        if v >= peak:
+            if in_dd:                       # recovered -> close the episode
+                eps.append({"depth": trough / peak - 1, "peak_dt": peak_dt,
+                            "trough_dt": trough_dt, "recover_dt": dt_,
+                            "dd_days": (trough_dt - peak_dt).days,
+                            "rec_days": (dt_ - trough_dt).days})
+                in_dd = False
+            peak = v; peak_dt = dt_
+        else:
+            if not in_dd or v < trough:
+                if not in_dd:
+                    trough = v; trough_dt = dt_; in_dd = True
+                if v < trough:
+                    trough = v; trough_dt = dt_
+    if in_dd:                               # still underwater at end of data
+        eps.append({"depth": trough / peak - 1, "peak_dt": peak_dt,
+                    "trough_dt": trough_dt, "recover_dt": None,
+                    "dd_days": (trough_dt - peak_dt).days, "rec_days": None})
+    return sorted(eps, key=lambda e: e["depth"])
+
+
+def _dd_report(cands, years, risks=(0.005, 0.01, 0.015)) -> None:
+    """REAL drawdown-frequency analysis (replaces hand-waved frequency tables):
+    actual episode counts by depth bucket, and the worst episodes with dates."""
+    print(f"\nDRAWDOWN REALITY CHECK ({years:.1f}y of data -- NOT 98y):")
+    for risk in risks:
+        eq, _ = _portfolio(cands, risk)
+        eps = _drawdown_episodes(eq)
+        buckets = [(0.02, 0.05), (0.05, 0.10), (0.10, 0.15), (0.15, 1.0)]
+        print(f"\n  risk {risk:.2%}  (maxDD {min(e['depth'] for e in eps)*100:.1f}%):")
+        print(f"    {'depth band':<14}{'episodes':>9}{'~once per':>12}")
+        for lo, hi in buckets:
+            n = sum(1 for e in eps if lo <= -e["depth"] < hi)
+            freq = f"{years/n:.1f}y" if n else "never"
+            print(f"    {-hi*100:.0f}%..{-lo*100:.0f}%{'':<6}{n:>9}{freq:>12}")
+        worst = eps[:3]
+        print(f"    worst 3: " + " | ".join(
+            f"{e['depth']*100:.1f}% ({e['trough_dt'].date()}, "
+            f"{'recovered '+str(e['rec_days'])+'d' if e['rec_days'] is not None else 'UNDERWATER'})"
+            for e in worst))
+
+
 def _metrics(eq: pd.Series, realized: list[float], years: float) -> dict:
     ret = (eq.iloc[-1] / eq.iloc[0]) - 1
     cagr = (eq.iloc[-1] / eq.iloc[0]) ** (1 / years) - 1 if years > 0 else 0
@@ -221,6 +272,9 @@ def main():
     ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
                     help="annualised portfolio vol target (e.g. 0.12); adds a "
                          "vol-targeted vs fixed-risk comparison at 0.5%% risk")
+    ap.add_argument("--ddreport", action="store_true",
+                    help="REAL drawdown-frequency analysis (episodes by depth) at "
+                         "0.5/1.0/1.5%% risk -- the honest 'how often / how deep'")
     args = ap.parse_args()
     if args.all_classes:
         paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
@@ -322,6 +376,8 @@ def main():
               f"maxDD {m['maxdd']*100:.1f}%")
     if args.voltarget is not None:
         _voltarget_compare(cands, span, years, args.voltarget, per_year or 33.0)
+    if args.ddreport:
+        _dd_report(cands, years)
 
     print("\nNOTE: deterministic backbone only (no LLM veto). Costs = per-trade "
           "half-spread already in R. Past performance != future; the OOS row is "

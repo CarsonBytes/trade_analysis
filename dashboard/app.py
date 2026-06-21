@@ -82,8 +82,16 @@ def _fmt_age(secs: float) -> str:
 
 
 def _data_source_text() -> tuple[str, str]:
-    """Return (label, css) describing the live price source / MT5 connection."""
+    """Return (label, css) describing the live price source / broker connection."""
+    from dashboard.execution import broker
     live = service.STATE.get("live", {})
+    if broker.is_ib():
+        ib_live = {k: v for k, v in live.items() if v.get("src") == "ib-tick"}
+        n = len(ib_live)
+        if n:
+            return (f"Data: IBKR ● {n}/{len(live)} live ticks", "text-green font-bold")
+        return ("Data: yfinance ○ delayed  (IBKR: no real-time mkt-data sub — "
+                "weekly signals run fine on delayed/historical)", "text-grey-6")
     mt5_live = {k: v for k, v in live.items() if v.get("src") == "mt5-tick"}
     if mt5_live:
         ages = [v["age"] for v in mt5_live.values() if v.get("age") is not None]
@@ -108,10 +116,13 @@ def clock_row() -> None:
     loc = now_utc.astimezone()
     loc_off = loc.utcoffset().total_seconds() / 3600
     parts = [f"Local {loc:%H:%M:%S} (UTC{loc_off:+.0f})", f"UTC {now_utc:%H:%M:%S}"]
+    from dashboard.execution import broker as _bk
     off = service.STATE.get("mt5_offset_sec", 0) or 0
-    if service.STATE.get("mt5_available") and off:
-        broker = now_utc + dt.timedelta(seconds=off)
-        parts.append(f"Broker {broker:%H:%M:%S} (UTC{off/3600:+.0f})")
+    if _bk.is_ib():
+        parts.append("Broker UTC (IBKR)")          # IB timestamps are UTC, no offset
+    elif service.STATE.get("mt5_available") and off:
+        bkt = now_utc + dt.timedelta(seconds=off)
+        parts.append(f"Broker {bkt:%H:%M:%S} (UTC{off/3600:+.0f})")
     else:
         parts.append("Broker — (MT5 offset not detected)")
     with ui.row().classes("items-center gap-4"):
@@ -133,6 +144,20 @@ def header_status() -> None:
             ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
             ui.label(f"API calls today: {used}/{cap}").classes(
                 "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
+            from dashboard.execution import broker as _broker
+            if _broker.is_ib():
+                bc = service.STATE.get("broker_conn") or {}
+                up = bc.get("available")
+                ok = bc.get("ok")
+                dot = "●" if up else "○"
+                css = ("text-green" if up and ok else "text-orange" if up
+                       else "text-red")
+                ui.label(f"IBKR Paper: {bc.get('detail', 'gateway down')} {dot}")\
+                    .classes(f"text-sm {css}")\
+                    .tooltip("BROKER=ib — orders go to the IBKR paper account; "
+                             "guard requires a DU… paper account on a paper port")
+                ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
+                return
             conn = service.STATE.get("conn")
             if conn:
                 from dashboard.execution import link_monitor
@@ -441,10 +466,12 @@ def active_panel() -> None:
                 ui.label(f"{price:,.4f}").classes("text-base")
                 pnl = f"  (${pos['profit']:+,.2f})" if pos else ""
                 ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
-                src = "MT5 fill" if pos else "paper"
+                from dashboard.execution import broker as _bk
+                src = f"{_bk.name()} fill" if pos else "paper"
                 ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
                     .classes("text-xs text-grey-7")
-                tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos else " (not on demo)")
+                tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
+                                          else f" (not on {_bk.name()})")
                 ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
                     .classes("text-xs text-grey-6")
 
@@ -469,8 +496,9 @@ def retrospective_panel() -> None:
         ui.label("Retrospective — KPIs & Constraints").classes("text-lg font-bold")
         ui.button("Export full report", icon="download",
                   on_click=_export_retrospective).props("flat dense")
-    ui.label("KPIs/equity are over DEMO-EXECUTED trades only (real MT5 fills) — "
-             "signals the demo never placed are excluded. Constraint scorecard "
+    from dashboard.execution import broker as _bk
+    ui.label(f"KPIs/equity are over {_bk.name()}-EXECUTED trades only (real broker "
+             "fills) — signals never placed are excluded. Constraint scorecard "
              "counts how often each gate blocked a candidate.")\
         .classes("text-xs text-grey-6")
 

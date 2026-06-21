@@ -114,6 +114,14 @@ def refresh_cheap() -> None:
         STATE["positions"] = broker.live_positions()   # paper_id -> real fill/P&L
     except Exception as e:
         log.debug("live_positions error: %s", e)
+    # broker-agnostic status for the header (computed here so the UI thread never
+    # blocks on a broker call). Under BROKER=ib this is the IBKR gateway/account.
+    STATE["broker_name"] = broker.name()
+    try:
+        STATE["broker_conn"] = broker.connection()
+    except Exception as e:
+        STATE["broker_conn"] = None
+        log.debug("broker.connection error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
     if STATE["conn"] and STATE["conn"]["ping_ms"] > 300:
         log.warning("MT5 link: %s ping %.0fms (high)", STATE["conn"]["server"],

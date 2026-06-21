@@ -58,17 +58,10 @@ def equity_curve(closed: list[dict]) -> tuple[list[float], float]:
 
 
 def _demo_executed_ids() -> set[int]:
-    """paper_ids that were actually sent to the broker (have an mt5_mirror row).
-    Trades the demo never executed -- e.g. ones the offset bug stopped before
-    mirroring -- are absent, so they fall out of the broker-truth view."""
-    import sqlite3
-    try:
-        c = sqlite3.connect(paper._DB)
-        ids = {r[0] for r in c.execute("SELECT paper_id FROM mt5_mirror").fetchall()}
-        c.close()
-        return ids
-    except Exception:
-        return set()
+    """paper_ids the active broker actually placed (have a mirror row) -- the
+    broker-truth set. Broker-aware: mt5_mirror under MT5, ib_mirror under IBKR."""
+    from dashboard.execution import broker
+    return broker.executed_ids()
 
 
 def _kpi_block(L: list[str], closed: list[dict]) -> None:
@@ -95,14 +88,15 @@ def build() -> str:
     L.append(f"Trades: {len(allt)} total | {len(opent)} open | {len(closed)} closed "
              f"| {len(demo_closed)} closed & demo-executed")
     L.append("")
-    # PRIMARY: broker truth -- only trades MT5 actually executed
-    L.append("## KPIs — demo-executed only (broker truth)")
-    L.append("Only trades with a real MT5 order/fill. Signals the demo never "
-             "placed (e.g. stopped by a bug before mirroring) are excluded here.")
+    # PRIMARY: broker truth -- only trades the active broker actually executed
+    from dashboard.execution import broker
+    L.append(f"## KPIs — {broker.name()}-executed only (broker truth)")
+    L.append(f"Only trades with a real {broker.name()} order/fill. Signals never "
+             "placed are excluded here.")
     if demo_closed:
         _kpi_block(L, demo_closed)
     else:
-        L.append("(no closed demo-executed trades yet)")
+        L.append(f"(no closed {broker.name()}-executed trades yet)")
     L.append("")
     # SECONDARY: full signal-logic record (paper, may exceed what the demo took)
     L.append("## KPIs — all paper signals (signal-logic record)")
@@ -203,11 +197,11 @@ def build() -> str:
         L.append(f"- {m['ts'][:16]}  {m['macro_note']}")
     L.append("")
 
-    # ---- demo reconciliation -----------------------------------------------
-    L.append("## Demo fills vs paper (real broker execution)")
+    # ---- broker reconciliation ---------------------------------------------
+    from dashboard.execution import broker
+    L.append(f"## {broker.name()} fills vs paper (real broker execution)")
     try:
-        from dashboard.execution import executor
-        rows = executor.reconcile()
+        rows = broker.reconcile()
         if rows:
             L.append("| paper_id | instrument | ticket | closed | paperR | demoR | pnl |")
             L.append("|---|---|---|---|---|---|---|")

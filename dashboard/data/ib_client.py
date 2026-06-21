@@ -52,14 +52,26 @@ def _mod():
     return _S["import"] or None
 
 
+_RECONNECT_THROTTLE_SEC = 30   # after a failed connect, don't retry for this long
+
+
 def _ensure_conn():
-    """Connect once and reuse. Returns the connected IB handle, or None."""
+    """Connect once and reuse. Returns the connected IB handle, or None.
+
+    THROTTLED: after a failed connect (gateway down), don't reattempt for
+    _RECONNECT_THROTTLE_SEC -- otherwise every dashboard refresh eats an 8s
+    connect timeout and the whole UI stalls while IBKR is offline."""
+    import time
     ib_async = _mod()
     if ib_async is None:
         return None
     ib = _S["ib"]
     if ib is not None and getattr(ib, "isConnected", lambda: False)():
         return ib
+    last_try = _S.get("last_attempt", 0.0)
+    if time.time() - last_try < _RECONNECT_THROTTLE_SEC:
+        return None                 # recently failed; stay down, don't block
+    _S["last_attempt"] = time.time()
     host = os.environ.get("IB_HOST", "127.0.0.1")
     port = int(os.environ.get("IB_PORT", "7497"))
     base_id = int(os.environ.get("IB_CLIENT_ID", "7"))

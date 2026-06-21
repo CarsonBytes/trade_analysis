@@ -84,7 +84,11 @@ HALF_SPREAD = 0.00005      # per-side cost as fraction of price (~0.5 bp)
 COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
                            # of its last close (prevents churning one instrument)
 
-_DB = pathlib.Path(__file__).resolve().parent / "dashboard.db"
+# STABLE location at the dashboard/ package root -- NOT relative to this file's
+# subpackage. paper.py lives in dashboard/core/, so parents[1] == dashboard/.
+# (Keeps the live journal at dashboard/dashboard.db across the reorg; tying it to
+# parent/ would have silently pointed at a new empty dashboard/core/dashboard.db.)
+_DB = pathlib.Path(__file__).resolve().parents[1] / "dashboard.db"
 _LOCK = threading.Lock()
 
 

@@ -11,7 +11,8 @@ import datetime as dt
 import pathlib
 import threading
 
-_DB = pathlib.Path(__file__).resolve().parent / "dashboard.db"
+# stable dashboard/ root (store.py is in dashboard/core/) -- same db as paper._DB
+_DB = pathlib.Path(__file__).resolve().parents[1] / "dashboard.db"
 _LOCK = threading.Lock()
 
 

@@ -23,13 +23,17 @@ dependencies = [
     # data + news
     "yfinance>=0.2.40",
     "feedparser>=6.0",
+    # brokers (first-class so `uv run` never tries to REMOVE them -- removing the
+    # locked MetaTrader5 .pyd fails while the live app holds it, which used to force
+    # `uv run --no-sync`). ib_async = IBKR futures (paper exec); MetaTrader5 = MT5.
+    "ib_async>=1.0",
+    "MetaTrader5; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
-# Live broker prices from a running MetaTrader 5 terminal (Windows only).
+# Kept as aliases for back-compat with older docs (`uv sync --extra ib/mt5`);
+# both are now first-class deps above, so these are effectively no-ops.
 mt5 = ["MetaTrader5; sys_platform == 'win32'"]
-# Interactive Brokers futures (data + paper execution) via a running TWS / IB Gateway.
-# ib_async is the maintained fork of the archived ib_insync.
 ib = ["ib_async>=1.0"]
 
 [tool.uv]
