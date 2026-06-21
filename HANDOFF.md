@@ -222,7 +222,50 @@ Ran a 7-combo OOS class battery + vol-targeting test on 26.4y yfinance `=F` hist
 - MT5/spot universe UNCHANGED (`{metal,energy,index}`) — it has no rate futures and
   silently dropping energy there would be an unvalidated live change.
 
-**Still to do — P6 (the only remaining step): PAPER TRADE.**
+### P6 CUTOVER STATUS 2026-06-21 (attempted; blocked on 2 IB-integration issues)
+- ✅ **IBC Gateway auto-login DONE**: IBC 3.24.0 at `C:\IBC` (config.ini → paper, port
+  4002, ReadOnlyApi=no; password filled by user, ACL-locked). `StartGateway.bat` set for
+  Gateway 1047, `CONFIG=C:\IBC\config.ini`. Startup-folder shortcut auto-starts it at logon.
+  Verified: auto-logs-in, 4002 opens, diagnose sees DUK968178 paper=True.
+- ✅ **ib_async threading rewrite** (`ib_client.py`): dedicated event-loop thread (`_ensure_loop`,
+  `_run` for async methods, `call()` for sync ops); `ib_exec` routed through `call()`. **Verified
+  STANDALONE** from a worker thread (data + exec reads + broker.connection all complete, no hang).
+  Also fixed: `readonly=False` (orders were being rejected), `log.py` path (parents[2]), and a
+  `set_event_loop()` in the loop thread (for the nicegui case).
+- ❌ **Live cutover blocked**: under `BROKER=ib` inside the nicegui process the cheap refresh
+  still stalls / shows "gateway down" (ib_async↔nicegui asyncio interaction — works standalone,
+  not in-process). Rolled back to mt5 (`BROKER` commented) to keep the dashboard unstuck.
+- ⚠️ **Refresh too slow even when it works**: scores all 21 futures via IB `reqHistoricalData`
+  (~9s each) + `get_tick` timeouts (~6s, no mkt-data sub) ⇒ ~5min/refresh.
+- ⚠️ **MT5 package regressed** ("module has no attribute initialize") → mt5 mode runs on
+  yfinance, no MT5 execution. So NEITHER broker is trading right now (safe, but not live).
+
+**DONE 2026-06-21 (kept, correct):**
+- ✅ **Data-source split**: under `BROKER=ib`, `providers` SCORES on yfinance (=F weekly,
+  fast, = backtest data) + yfinance for ohlc/live-price; IB is execution-only. Verified
+  fast (get_history 1.4s, no IB in the data path). This removed the ~5min refresh.
+- ✅ `ib_client` dedicated event-loop thread + `call()`/`_run`; `ib_exec` routed through it.
+  Works from a PLAIN worker thread (standalone test passed).
+
+**THE remaining blocker (precise):** the cheap refresh ALSO calls `broker.live_positions()`
+and `broker.connection()` (IB status), and these run inside **nicegui's ui.timer callback =
+nicegui's event-loop thread**, where the dedicated-loop marshalling stalls (ib_async binds to
+nicegui's loop, not ours). The standalone test passed because it ran from a PLAIN thread, not
+nicegui's loop. So the dashboard refresh under `BROKER=ib` still stalls / shows "gateway down".
+
+**NEXT SESSION — the one fix that lands the cutover:**
+1. **Move IB status/execution OFF the nicegui refresh onto a dedicated background thread**
+   (mirror `link_monitor`, which is PROVEN to work from a plain thread): a thread that
+   periodically calls `broker.live_positions()`/`broker.connection()`/`sync_closures()` and
+   writes results into `service.STATE`; the nicegui refresh + UI only READ STATE. `mirror_new`
+   already runs in the (threaded) LLM cycle — confirm it's a plain thread too, not the loop.
+2. Restart `BROKER=ib`, confirm a completed "cheap refresh" + header shows acct DUK968178.
+3. Then place ONE live signal end-to-end (the order path's first real proof).
+4. (Optional) repair MetaTrader5 ("no initialize") if an MT5 fallback is wanted.
+Alternative if (1) is insufficient: bind ib_async to nicegui's OWN loop (capture it at startup,
+`run_coroutine_threadsafe` to it) or isolate IB in a subprocess.
+
+**Then — P6 (the trading phase):**
 1. Flip `BROKER=ib` in analyst/.env (currently commented). Place ONE live signal
    end-to-end on paper; confirm bracket + fill + reconcile. (CME real-time data NOT yet
    activated → live ticks unavailable; weekly runs on delayed/historical — acceptable.)

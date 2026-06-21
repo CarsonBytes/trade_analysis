@@ -71,11 +71,16 @@ def get_history(inst: Instrument) -> tuple[pd.Series | None, str]:
     """Return (close_series, source_label) of WEEKLY closes for signal scoring.
     Weekly time-series momentum is the validated edge (daily is arbitraged away);
     the scorer's MA/RSI/ATR periods are in BARS, so feeding weekly bars makes
-    them weekly signals. ~320 weekly bars (~6y) covers the 150-bar long MA."""
+    them weekly signals. ~320 weekly bars (~6y) covers the 150-bar long MA.
+
+    DATA-SOURCE SPLIT: under BROKER=ib we SCORE on yfinance (=F continuous weekly --
+    exactly the data the strategy was validated on, and fast), and use IBKR for
+    EXECUTION ONLY (ib_exec). IB's reqHistoricalData for 21 instruments is ~9s each
+    (~min/refresh) and calling ib_async from the dashboard's worker/nicegui threads
+    stalls -- so the frequent scoring loop must NOT touch IB."""
     if _broker() == "ib":
-        s = _ib_close(inst, "W1", 320)   # CONTINUOUS (back-adjusted) for signals
-        if s is not None and len(s) > 200:
-            return s, "ib"
+        s = _from_yf(inst, period="8y", interval="1wk")
+        return (s, "yfinance") if (s is not None and len(s) > 50) else (None, "none")
     s = _from_mt5(inst, "W1", 320)
     if s is not None and len(s) > 200:
         return s, "mt5"
@@ -89,12 +94,13 @@ def get_live_price(inst: Instrument) -> tuple[float | None, str, float | None]:
     """Return (price, source, spread). Near-tick from MT5 if available, else the
     last yfinance bar close (delayed). spread is None when unknown."""
     if _broker() == "ib":
-        spec = _ib_spec(inst)
-        if spec is not None:
-            from dashboard.data import ib_client
-            tick = ib_client.get_tick(spec)
-            if tick is not None:
-                return tick["mid"], "ib-tick", tick["spread"]
+        # No IB tick: needs a paid real-time mkt-data sub (we have none), and the
+        # request eats a ~6s timeout per instrument every refresh. Use the delayed
+        # yfinance bar -- fine for a weekly system. (IB is execution-only.)
+        s = _from_yf(inst)
+        if s is not None and len(s):
+            return float(s.iloc[-1]), "yfinance-bar", None
+        return None, "none", None
     tick = mt5_client.get_tick(inst.mt5)
     if tick is not None:
         return tick["mid"], "mt5-tick", tick["spread"]
@@ -111,20 +117,24 @@ def get_ohlc(inst: Instrument, period: str = "90d", interval: str = "1h") -> pd.
     (MT5 M1 bars would silently turn a '5y daily' backtest into ~5 weeks of
     minute data with a 5-bar = 5-minute horizon).
 
-    IB path: resolution must use the DATED FRONT MONTH (the contract actually
-    traded), NOT the continuous series -- otherwise SL/TP touch detection runs
-    against back-adjusted prices that never existed on the live contract."""
+    IB path: resolution uses yfinance =F daily (fast, consistent with the yfinance
+    scoring under BROKER=ib). The authoritative close for a mirrored IBKR position
+    is the broker's own fill anyway (ib_exec._resolve_from_broker); this bar-based
+    path is just the fallback resolver -- no need to pull dated-contract bars from IB."""
     if _broker() == "ib":
-        spec = _ib_spec(inst)
-        if spec is not None:
-            from dashboard.data import ib_client
-            tf = "D1" if interval == "1d" else "M1"
-            years = int(period[:-1]) if (interval == "1d" and period.endswith("y")) else 2
-            nbar = years * 262 if interval == "1d" else 50_000
-            df = ib_client.get_rates(spec, timeframe=tf, n=nbar)
-            if df is not None and len(df) > 100:
-                return df
-            # fall through to yfinance below if IB has no bars
+        import yfinance as yf
+        try:
+            df = yf.download(inst.yf, period=period, interval=interval,
+                             progress=False, auto_adjust=True)
+            if df is not None and len(df):
+                if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+                    df.columns = df.columns.get_level_values(0)
+                out = df[["Open", "High", "Low", "Close"]].copy()
+                out.columns = ["open", "high", "low", "close"]
+                return out.dropna().astype(float)
+        except Exception:
+            pass
+        return None
     if interval == "1d":
         years = int(period[:-1]) if period.endswith("y") else 2
         df = mt5_client.get_rates(inst.mt5, "D1", years * 262)

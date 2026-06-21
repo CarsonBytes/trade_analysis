@@ -34,6 +34,7 @@ from dashboard.research.replay import _resolve_daily
 RISK_LEVELS = [0.0025, 0.005, 0.01]   # 0.25% / 0.5% / 1%
 START_EQUITY = 100.0
 MIN_ADX: float | None = None          # set via --adx to add the trend-regime filter
+_DIRECTIONS: tuple = ("long", "short")  # set by --direction-test to long-only/short-only
 
 
 def _adx(df, n=14):
@@ -58,6 +59,7 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
     SL/TP exit (exit-method test). `sl_method` ('ATR'|'STRUCT') sets SL/TP placement."""
     H = horizon if horizon is not None else paper.HORIZON_DAYS
     resolve = resolver or _resolve_daily
+    directions = _DIRECTIONS
     close = df["close"]; n = len(df); i = 160; out = []
     adx = _adx(df) if MIN_ADX is not None else None
     while i < n - 1:
@@ -72,6 +74,8 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
             if not (a == a) or a < MIN_ADX:
                 i += 1; continue
         direction = "long" if score.signal == "BUY" else "short"
+        if direction not in directions:           # direction-asymmetry test
+            i += 1; continue
         rsi = facts.get("rsi14") or 50.0
         if paper.OVEREXT_FILTER and (
                 (direction == "long" and rsi > paper.OVEREXT_HI) or
@@ -283,10 +287,19 @@ def main():
     ap.add_argument("--horizon-curve", action="store_true",
                     help="sweep holding period 1-8 weekly bars (data fetched once), "
                          "OOS, with a pre-registered risk-aware decision rule")
+    ap.add_argument("--direction-test", action="store_true",
+                    help="long+short vs long-only vs short-only (regime/asymmetry), OOS")
+    ap.add_argument("--direction", choices=["both", "long", "short"], default="both",
+                    help="restrict trade direction for a full IS/OOS run")
     ap.add_argument("--exit-test", action="store_true",
                     help="compare exit methods (fixed/breakeven/trailing) on the "
                          "current locked config, OOS -- data fetched once")
     args = ap.parse_args()
+    global _DIRECTIONS
+    _DIRECTIONS = {"both": ("long", "short"), "long": ("long",),
+                   "short": ("short",)}[args.direction]
+    if args.direction != "both":
+        print(f"[DIRECTION: {args.direction}-only]")
     if args.all_classes:
         paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
         print("[ALL CLASSES: WEEKLY_TREND_CLASSES whitelist disabled]")
@@ -346,6 +359,9 @@ def main():
         return
     if args.exit_test:
         _exit_test(data, span, years)
+        return
+    if args.direction_test:
+        _direction_test(data, span, years)
         return
     print(f"{len(data)} instruments | {len(cands)} gate-passing signals | "
           f"{years:.1f}y\n")
@@ -457,6 +473,34 @@ def _resolve_voltrail(direction, entry, sl, tp, bars, mult=3.0):
     if len(bars):
         return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
     return None
+
+
+def _direction_test(data, span, years) -> None:
+    """REGIME/ASYMMETRY test (the testable core of regime-dependent allocation):
+    does the SHORT side earn its keep, or is long-only / asymmetric better? Futures
+    TSMOM shorts are often weak. OOS @0.5% on the locked config. One run."""
+    global _DIRECTIONS
+    cut = min(min(df.index) for df in data.values()) + (span * 0.6)
+    print("\nDIRECTION / ASYMMETRY TEST ({metal,index,rate}, 5wk, OOS @0.5%):\n")
+    print(f"  {'side':<14}{'OOS expR':>10}{'OOS CAGR%':>11}{'OOS DD%':>9}{'CAGR/DD':>9}{'trades/yr':>11}")
+    for label, dirs in [("long+short", ("long", "short")),
+                        ("long-only", ("long",)), ("short-only", ("short",))]:
+        _DIRECTIONS = dirs
+        cands = []
+        for key, df in data.items():
+            cands += _signals(df, key)
+        _DIRECTIONS = ("long", "short")
+        oos = [c for c in cands if c["entry_date"] > cut]
+        if len(oos) < 2:
+            print(f"  {label:<14}(no OOS trades)"); continue
+        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        eq, real = _portfolio(oos, 0.005)
+        m = _metrics(eq, real, yrs); ss = paper.stats(real)
+        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+        print(f"  {label:<14}{ss['expectancy_R']:>+10.3f}{m['cagr']*100:>11.1f}"
+              f"{m['maxdd']*100:>9.1f}{cd:>9.2f}{len(real)/yrs:>11.0f}")
+    print("\n  RULE: drop the short side only if long-only beats long+short on BOTH "
+          "OOS CAGR and CAGR/DD (a real asymmetry, not noise).")
 
 
 def _exit_test(data, span, years) -> None:

@@ -104,13 +104,17 @@ def mirror_new() -> list[str]:
 
 def _equity(ib) -> float:
     """Net liquidation value of the paper account (account ccy, USD)."""
-    with ib_client._LOCK:
-        try:
-            for v in ib.accountValues():
-                if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
-                    return float(v.value)
-        except Exception:
-            pass
+    def read():
+        for v in ib.accountValues():
+            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
+                return float(v.value)
+        return None
+    try:
+        v = ib_client.call(read)               # on the IB loop thread
+        if v is not None:
+            return v
+    except Exception:                          # noqa: BLE001
+        pass
     return paper.ACCOUNT  # fallback to the configured notional
 
 
@@ -132,20 +136,20 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> st
     ib_async = ib_client._mod()
     action = "BUY" if t["direction"] == "long" else "SELL"
     risk_money = equity * paper.RISK_PER_TRADE
+    def send():
+        bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
+                                  takeProfitPrice=float(t["tp"]),
+                                  stopLossPrice=float(t["sl"]))
+        # parent as MARKET (bracketOrder makes a LMT parent by default)
+        bracket.parent.orderType = "MKT"
+        bracket.parent.lmtPrice = 0.0
+        for o in bracket:
+            o.tif = "GTC"
+            o.orderRef = f"quant#{t['id']}"
+        return [ib.placeOrder(contract, o) for o in bracket]   # non-blocking; loop transmits
     try:
-        with ib_client._LOCK:
-            bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
-                                      takeProfitPrice=float(t["tp"]),
-                                      stopLossPrice=float(t["sl"]))
-            # parent as MARKET (bracketOrder makes a LMT parent by default)
-            bracket.parent.orderType = "MKT"
-            bracket.parent.lmtPrice = 0.0
-            for o in bracket:
-                o.tif = "GTC"
-                o.orderRef = f"quant#{t['id']}"
-            trades = [ib.placeOrder(contract, o) for o in bracket]
-            ib.sleep(0.5)
-    except Exception as e:
+        trades = ib_client.call(send, timeout=15)
+    except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
     parent = trades[0].order
     perm_id = getattr(parent, "permId", 0)
@@ -172,8 +176,7 @@ def sync_closures() -> list[str]:
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, local_symbol, qty, expiry, "
                          "status FROM ib_mirror").fetchall()
-    with ib_client._LOCK:
-        positions = {p.contract.conId: p for p in (ib.positions() or [])}
+    positions = ib_client.call(lambda: {p.contract.conId: p for p in (ib.positions() or [])})
     for paper_id, con_id, local_symbol, qty, expiry, mstatus in rows:
         pt = journal.get(paper_id)
         if pt is None or mstatus == "CLOSED":
@@ -223,9 +226,8 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
 
 def _last_exit_price(ib, con_id: int) -> float | None:
     """Average price of the most recent closing fill for con_id, or None."""
-    with ib_client._LOCK:
-        fills = [f for f in (ib.fills() or [])
-                 if getattr(f.contract, "conId", None) == con_id]
+    fills = ib_client.call(lambda: [f for f in (ib.fills() or [])
+                                    if getattr(f.contract, "conId", None) == con_id])
     if not fills:
         return None
     return float(fills[-1].execution.avgPrice or fills[-1].execution.price)
@@ -242,24 +244,22 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
     ib_async = ib_client._mod()
     close_act = "SELL" if trade["direction"] == "long" else "BUY"
     open_act = "BUY" if trade["direction"] == "long" else "SELL"
+    def do_roll():
+        old = next((p.contract for p in (ib.positions() or [])
+                    if p.contract.conId == old_con_id), None)
+        if old is not None:
+            ib.placeOrder(old, ib_async.MarketOrder(close_act, qty))
+        parent = ib_async.MarketOrder(open_act, qty)
+        sl = ib_async.StopOrder(close_act, qty, float(trade["sl"]))
+        tp = ib_async.LimitOrder(close_act, qty, float(trade["tp"]))
+        for o in (parent, sl, tp):
+            o.orderRef = f"quant#{trade['id']}"; o.tif = "GTC"
+        ib.placeOrder(new_contract, parent)
+        ib.placeOrder(new_contract, sl)
+        ib.placeOrder(new_contract, tp)
     try:
-        with ib_client._LOCK:
-            old = next((p.contract for p in (ib.positions() or [])
-                        if p.contract.conId == old_con_id), None)
-            if old is not None:
-                ib.placeOrder(old, ib_async.MarketOrder(close_act, qty))
-            parent = ib_async.MarketOrder(open_act, qty)
-            parent.orderRef = f"quant#{trade['id']}"
-            parent.tif = "GTC"
-            sl = ib_async.StopOrder(close_act, qty, float(trade["sl"]))
-            tp = ib_async.LimitOrder(close_act, qty, float(trade["tp"]))
-            for o in (parent, sl, tp):
-                o.orderRef = f"quant#{trade['id']}"; o.tif = "GTC"
-            ib.placeOrder(new_contract, parent)
-            ib.placeOrder(new_contract, sl)
-            ib.placeOrder(new_contract, tp)
-            ib.sleep(0.5)
-    except Exception as e:
+        ib_client.call(do_roll, timeout=15)
+    except Exception as e:                     # noqa: BLE001
         return f"#{trade['id']} {trade['instrument']}: ROLL FAILED ({e}), retry"
     with paper._LOCK, _conn() as c:
         c.execute("UPDATE ib_mirror SET con_id=?, local_symbol=?, expiry=?, "
@@ -283,9 +283,9 @@ def live_positions() -> dict:
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, qty FROM ib_mirror "
                          "WHERE status='OPEN'").fetchall()
-    with ib_client._LOCK:
-        positions = {p.contract.conId: p for p in (ib.positions() or [])}
-        portfolio = {i.contract.conId: i for i in (ib.portfolio() or [])}
+    positions, portfolio = ib_client.call(lambda: (
+        {p.contract.conId: p for p in (ib.positions() or [])},
+        {i.contract.conId: i for i in (ib.portfolio() or [])}))
     out: dict[int, dict] = {}
     for paper_id, con_id, qty in rows:
         p = positions.get(con_id)
@@ -310,8 +310,7 @@ def reconcile() -> list[dict]:
         rows = c.execute("SELECT paper_id, con_id, qty, risk_money, status "
                          "FROM ib_mirror").fetchall()
     journal = {t["id"]: t for t in paper.all_trades()}
-    with ib_client._LOCK:
-        fills = ib.fills() or []
+    fills = ib_client.call(lambda: list(ib.fills() or []))
     out = []
     for paper_id, con_id, qty, risk_money, status in rows:
         net = sum((f.commissionReport.realizedPNL or 0.0)
