@@ -36,7 +36,10 @@ RR_DEFAULT = 3.0           # take-profit reward:risk (needs only ~25% win rate)
 RR_SWEEP = [2.0, 3.0, 4.0]  # ATR variants we compare in replay
 MIN_RR = 1.5               # reject setups whose geometry is worse than this
 HORIZON_DAYS = 5           # trade validity in BARS (weekly now -> ~5 weeks);
-HORIZON_CAL = 49           # live horizon window in calendar days (~7 weeks)
+HORIZON_CAL = 35           # live horizon window in calendar days (5 weeks) -- matches
+                           # HORIZON_DAYS=5 weekly bars. Reconciled 2026-06-21: was 49
+                           # (7wk), which the horizon curve showed is OUTSIDE the robust
+                           # 4-6wk plateau (CAGR/DD 0.76 vs ~1.0). Live now == backtest.
 RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
 ACCOUNT = 10_000.0
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded

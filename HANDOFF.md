@@ -182,6 +182,19 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
 - ⚠️ clientId collisions are real: a lingering prior connection holds clientId 7 (Error 326).
   Ensure `ib_client.shutdown()` on exit; use a distinct IB_CLIENT_ID for ad-hoc probes.
 
+### ⭐ LOCKED STRATEGY SPEC (2026-06-21) — research closed, do not re-tune
+**Weekly TSMOM on IBKR futures.** Universe `{metal, index, rate}` (BROKER=ib default).
+Config: `MIN_STRENGTH=5`, `OVEREXT_FILTER` 70/30, `RR_DEFAULT=3.0`, `SL_ATR_MULT=1.5`,
+`RISK_PER_TRADE=0.005`, **`HORIZON_DAYS=5` / `HORIZON_CAL=35` (5 weeks, reconciled)**,
+no vol targeting. ~31 trades/yr.
+Final backtest (26.4y, 0.5% risk): full-period **+3.6% CAGR / −9.9% DD**, expR +0.239,
+PF 1.44, win 44%, DSR 100%. IS +7.4%/−9.9%, OOS +7.4%/−6.6%.
+**HONEST P6 EXPECTATION = ~4–6% CAGR / ~−10% DD** (NOT the 7.4% OOS — recent regime was
+trend-friendly; full-period 3.6% is the conservative anchor). Expect 1–2yr flat/drawdown
+stretches (2012–14 took 637d to recover) — that is NORMAL, do not abandon.
+Tested & rejected: wider classes (grain/soft/fx/energy dilute), vol-targeting (pure
+leverage), horizons 1–8wk (4–6wk is a flat plateau; 5wk fine, shorter = noise).
+
 ### Futures research CONCLUDED 2026-06-21 (universe + sizing locked)
 Ran a 7-combo OOS class battery + vol-targeting test on 26.4y yfinance `=F` history
 (`backtest.py --longweekly --classes ... [--voltarget]`). Findings:

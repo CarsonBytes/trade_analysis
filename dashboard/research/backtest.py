@@ -50,9 +50,11 @@ def _adx(df, n=14):
     return dx.ewm(alpha=1 / n, adjust=False).mean()
 
 
-def _signals(df: pd.DataFrame, key: str) -> list[dict]:
+def _signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
     """All gate-passing ATR rr3 setups for one instrument (no look-ahead).
-    Returns dicts: entry_i, entry_date, exit_date, direction, r."""
+    Returns dicts: entry_i, entry_date, exit_date, direction, r.
+    `horizon` (bars) overrides paper.HORIZON_DAYS -- used by the horizon curve."""
+    H = horizon if horizon is not None else paper.HORIZON_DAYS
     close = df["close"]; n = len(df); i = 160; out = []
     adx = _adx(df) if MIN_ADX is not None else None
     while i < n - 1:
@@ -81,7 +83,7 @@ def _signals(df: pd.DataFrame, key: str) -> list[dict]:
         entry, sl, tp, rr_act = res
         if rr_act < paper.MIN_RR:
             i += 1; continue
-        bars = df.iloc[i + 1: i + 1 + paper.HORIZON_DAYS]
+        bars = df.iloc[i + 1: i + 1 + H]
         outcome = _resolve_daily(direction, entry, sl, tp, bars)
         if outcome is None:
             break
@@ -275,6 +277,9 @@ def main():
     ap.add_argument("--ddreport", action="store_true",
                     help="REAL drawdown-frequency analysis (episodes by depth) at "
                          "0.5/1.0/1.5%% risk -- the honest 'how often / how deep'")
+    ap.add_argument("--horizon-curve", action="store_true",
+                    help="sweep holding period 1-8 weekly bars (data fetched once), "
+                         "OOS, with a pre-registered risk-aware decision rule")
     args = ap.parse_args()
     if args.all_classes:
         paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
@@ -330,6 +335,9 @@ def main():
         cands += _signals(df, inst.key)
     span = max(df.index[-1] for df in data.values()) - min(df.index[0] for df in data.values())
     years = span.days / 365.25
+    if args.horizon_curve:
+        _horizon_curve(data, span, years)
+        return
     print(f"{len(data)} instruments | {len(cands)} gate-passing signals | "
           f"{years:.1f}y\n")
     print(f"Config: strength>={paper.MIN_STRENGTH}, overext={paper.OVEREXT_FILTER} "
@@ -382,6 +390,51 @@ def main():
     print("\nNOTE: deterministic backbone only (no LLM veto). Costs = per-trade "
           "half-spread already in R. Past performance != future; the OOS row is "
           "the honest estimate.")
+
+
+def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:
+    """Holding-period response curve (1-8 weekly bars), judged OOS at 0.5% risk.
+    Data is fetched ONCE and reused per horizon. Reports OOS CAGR/DD/ExpR/trades
+    plus CAGR/DD (risk-adjusted) so a higher-CAGR-but-deeper-DD horizon can't be
+    mistaken for an improvement. Baseline = current paper.HORIZON_DAYS."""
+    cut = min(min(df.index) for df in data.values()) + (span * 0.6)
+    print(f"\nHORIZON CURVE (weekly bars, OOS @0.5% risk; baseline = "
+          f"{paper.HORIZON_DAYS}wk). Data fetched once, reused per horizon.\n")
+    print(f"  {'horizon':<9}{'OOS expR':>10}{'OOS CAGR%':>11}{'OOS DD%':>9}"
+          f"{'CAGR/DD':>9}{'trades/yr':>11}")
+    base = None
+    rows = []
+    for H in horizons:
+        cands = []
+        for key, df in data.items():
+            cands += _signals(df, key, horizon=H)
+        oos = [c for c in cands if c["entry_date"] > cut]
+        if len(oos) < 2:
+            continue
+        yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1)
+        eq, real = _portfolio(oos, 0.005)
+        m = _metrics(eq, real, yrs)
+        ss = paper.stats(real)
+        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+        tag = "  <- baseline" if H == paper.HORIZON_DAYS else ""
+        rows.append({"H": H, "expR": ss["expectancy_R"], "cagr": m["cagr"],
+                     "dd": m["maxdd"], "cd": cd, "tpy": len(real) / yrs})
+        if H == paper.HORIZON_DAYS:
+            base = rows[-1]
+        print(f"  {str(H)+'wk':<9}{ss['expectancy_R']:>+10.3f}{m['cagr']*100:>11.1f}"
+              f"{m['maxdd']*100:>9.1f}{cd:>9.2f}{len(real)/yrs:>11.0f}{tag}")
+    # pre-registered decision rule (risk-aware): higher CAGR AND CAGR/DD not worse
+    if base:
+        better = [r for r in rows if r["cagr"] > base["cagr"] and r["cd"] >= base["cd"]]
+        print()
+        if better:
+            win = max(better, key=lambda r: r["cagr"])
+            print(f"  RULE: {win['H']}wk beats {base['H']}wk baseline "
+                  f"(CAGR {win['cagr']*100:.1f}% vs {base['cagr']*100:.1f}%, "
+                  f"CAGR/DD {win['cd']:.2f} vs {base['cd']:.2f}) -> switch + lock.")
+        else:
+            print(f"  RULE: no horizon beats {base['H']}wk on CAGR without worsening "
+                  f"CAGR/DD -> KEEP {base['H']}wk. Research over.")
 
 
 def _voltarget_compare(cands, span, years, target_vol, tpy) -> None:
