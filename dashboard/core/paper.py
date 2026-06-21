@@ -55,7 +55,21 @@ OVEREXT_LO = 30.0          # block shorts with RSI below this
 # FX (mean-reverting) -- confirmed by the breadth test and the TSMOM literature
 # (Moskowitz/Ooi/Pedersen). Restrict the trend strategy to those classes.
 # Empty set = trade all classes.
-WEEKLY_TREND_CLASSES = {"metal", "energy", "index"}
+#
+# BROKER-aware default. The FUTURES universe (BROKER=ib) was re-tested in a 7-combo
+# OOS class battery (backtest.py --classes): {metal,index,rate} won -- best
+# risk-adjusted (OOS +7.4% CAGR at -6.6% DD vs the spot whitelist's +6.1%/-6.5%).
+# ENERGY was dead weight (drops OOS expR), grains/softs/fx are net-negative. The
+# MT5/spot universe keeps its original whitelist (it has no rate futures, and
+# silently dropping energy there would be an unvalidated live change).
+def _default_trend_classes() -> set[str]:
+    import os
+    if os.environ.get("BROKER", "mt5").lower() == "ib":
+        return {"metal", "index", "rate"}      # evidence-based futures universe
+    return {"metal", "energy", "index"}        # original spot/MT5 whitelist
+
+
+WEEKLY_TREND_CLASSES = _default_trend_classes()
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
                            # regimes (esp. s4-low, +0.018R) are barely-positive
                            # and noisy -- excluded by choice. The objective edge
@@ -169,8 +183,11 @@ def _mt5_to_utc(x, offset_sec: float) -> pd.Timestamp:
 
 
 def r_multiple(direction: str, entry: float, sl: float, exit_price: float,
-               half_spread: float = HALF_SPREAD) -> float:
-    cost = entry * half_spread * 2  # entry + exit
+               half_spread: float = HALF_SPREAD, cost_abs: float | None = None) -> float:
+    # cost_abs (price points, round-turn) overrides the CFD half-spread fraction
+    # when given -- this is the futures path (contracts.cost_points): commission +
+    # tick slippage, which is per-contract not a fraction of price.
+    cost = cost_abs if cost_abs is not None else entry * half_spread * 2  # entry + exit
     if direction == "long":
         risk, pnl = entry - sl, exit_price - entry - cost
     else:

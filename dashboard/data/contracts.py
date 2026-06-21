@@ -96,6 +96,31 @@ SPECS: dict[str, FutureSpec] = {s.key: s for s in [
 ]}
 
 
+# IBKR futures round-turn cost ~ commission (incl. exchange+regulatory fees) plus
+# 1 tick of slippage per side. The backtest runs on FULL-SIZE continuous series,
+# so this models the full-size commission (~$2.50 round-turn, IBKR tiered ballpark;
+# micros are cheaper but the backtest doesn't use them). Override per call if you
+# have a better number for a specific product.
+DEFAULT_COMMISSION_RT = 2.50    # USD per contract, round-turn
+
+
+def cost_points(spec: FutureSpec, commission_rt: float = DEFAULT_COMMISSION_RT,
+                slippage_ticks: float = 1.0) -> float:
+    """Realistic round-turn transaction cost for ONE contract, expressed in PRICE
+    POINTS (so it slots straight into r_multiple alongside entry/sl/exit).
+
+        cost_points = commission_rt / multiplier   +   2 * slippage_ticks * tick_size
+
+    Commission converts to points via $/point (the multiplier); slippage is one
+    tick on entry AND exit. Per-contract-invariant in R terms (both pnl and cost
+    scale with size), so contract count doesn't enter. NOTE: for a weekly hold
+    these costs are tiny (~0.002 R) -- materially smaller than the CFD half-spread
+    they replace -- but this makes the futures backtest cost-honest rather than
+    borrowing a fraction-of-price model that doesn't apply to futures.
+    """
+    return commission_rt / spec.multiplier + 2.0 * slippage_ticks * spec.tick_size
+
+
 # ---- risk-based sizing (PURE -- shared by ib_exec and backtest.py) ---------
 
 def risk_per_contract(spec: FutureSpec, stop_points: float,
@@ -185,6 +210,41 @@ def needs_roll(expiry: dt.date, spec: FutureSpec, asof: dt.date | None = None) -
     return _business_days_between(asof, expiry) <= spec.roll_offset_days
 
 
+# Futures month codes (CME standard): F=Jan G=Feb H=Mar J=Apr K=May M=Jun
+# N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec.
+_MONTH_CODE = {1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+               7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"}
+
+
+def front_month(spec: FutureSpec, asof: dt.date | None = None) -> tuple[int, str, dt.date]:
+    """PURE planning answer to "which contract month should I hold on `asof`?".
+
+    Returns (year, month_code, approx_last_trade). Walks `spec.months` forward and
+    picks the nearest delivery month whose APPROXIMATE last-trade date is more than
+    `roll_offset_days` business days ahead (roll early). The last-trade date is
+    APPROXIMATED as the 15th of the delivery month -- good enough for planning,
+    sanity-checking and backtest roll scheduling, but NOT exact (real expiries vary
+    by product: equity index = 3rd Friday, many commodities expire the month
+    BEFORE delivery). For live orders, ib_client.front_future uses the broker's
+    actual lastTradeDate and OVERRIDES this. Use this to cross-check that choice.
+    """
+    asof = asof or dt.date.today()
+    months = sorted(_MONTH_CODE_NUM(c) for c in spec.months)
+    for year in (asof.year, asof.year + 1, asof.year + 2):
+        for m in months:
+            approx_last = dt.date(year, m, 15)
+            if _business_days_between(asof, approx_last) > spec.roll_offset_days:
+                return year, _MONTH_CODE[m], approx_last
+    raise ValueError(f"no front month resolvable for {spec.key} at {asof}")
+
+
+def _MONTH_CODE_NUM(code: str) -> int:
+    for num, c in _MONTH_CODE.items():
+        if c == code:
+            return num
+    raise ValueError(f"bad month code {code!r}")
+
+
 def _business_days_between(a: dt.date, b: dt.date) -> int:
     """Mon-Fri days from a (exclusive) to b (inclusive). Negative if b < a.
     Coarse (ignores exchange holidays) -- roll_offset_days carries slack."""
@@ -197,3 +257,34 @@ def _business_days_between(a: dt.date, b: dt.date) -> int:
         if d.weekday() < 5:
             days += 1
     return days
+
+
+def _main() -> None:
+    """CLI: which front month should each contract hold on a given date?
+        uv run python -m dashboard.data.contracts 2026-07-01
+    Cross-checks the PURE approximation against IB's real lastTradeDate when a
+    Gateway is reachable (the broker value is ground truth)."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("date", nargs="?", help="YYYY-MM-DD (default: today)")
+    ap.add_argument("--key", help="only this contract (e.g. GC)")
+    args = ap.parse_args()
+    asof = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
+    specs = [SPECS[args.key]] if args.key else [s for s in SPECS.values() if s.micro_of is None]
+    print(f"front month as of {asof}  (approx = pure 15th-of-month rule; "
+          f"broker = IB lastTradeDate if reachable)\n")
+    print(f"  {'key':<5} {'approx':<10} {'roll~':<12} {'broker':<10}")
+    for spec in specs:
+        y, code, last = front_month(spec, asof)
+        broker = "-"
+        try:
+            from dashboard.data import ib_client
+            c = ib_client.front_future(spec, asof)
+            broker = getattr(c, "localSymbol", "-") if c is not None else "(IB down)"
+        except Exception:
+            broker = "(IB down)"
+        print(f"  {spec.key:<5} {code}{str(y)[2:]:<9} {str(last):<12} {broker:<10}")
+
+
+if __name__ == "__main__":
+    _main()

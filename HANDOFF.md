@@ -182,17 +182,34 @@ following its §5 order; **steps 1–6 done offline, MT5 untouched and still the
 - ⚠️ clientId collisions are real: a lingering prior connection holds clientId 7 (Error 326).
   Ensure `ib_client.shutdown()` on exit; use a distinct IB_CLIENT_ID for ad-hoc probes.
 
-**Still to do:**
-1. Flip `BROKER=ib` in analyst/.env (currently commented) and place ONE live signal
+### Futures research CONCLUDED 2026-06-21 (universe + sizing locked)
+Ran a 7-combo OOS class battery + vol-targeting test on 26.4y yfinance `=F` history
+(`backtest.py --longweekly --classes ... [--voltarget]`). Findings:
+- **Universe = `{metal, index, rate}`** (now the `BROKER=ib` default in
+  `paper._default_trend_classes`). OOS **+7.4% CAGR @ −6.6% DD** — best risk-adjusted.
+  Per-class OOS expR: metal +0.391, index +0.166, **rate +0.085** (the one genuine
+  diversifier — uncorrelated, lifts CAGR at flat DD). **ENERGY is dead weight**
+  (drops OOS expR +0.345→+0.281; metal,index alone beats metal,energy,index).
+  **REJECTED: grain (−0.133, ZC −0.253), fx (−0.086), soft as a class** (KC +0.243
+  is good but the class drags in CT/SB; can't cherry-pick KC without snooping).
+  Naive "wide/all" HALVES the edge (expR +0.099) — diversification ≠ "add everything".
+- **Vol targeting @12% = FAIL** (pre-registered criteria). Tripled CAGR AND DD
+  (full 3.6%/−9.9% → 9.2%/−27.2%); CAGR/DD ratio FLAT (0.36→0.34). It's just ~2.7x
+  leverage, no risk-adjusted gain → ABANDONED. Strategy is already as smooth as the
+  edge allows; run fixed 0.5% risk. (`--voltarget` flag kept as a tool, off by default.)
+- DSR shows 100% for every combo because `deflated_sharpe_ratio(..., n_trials=1)` is
+  hardcoded — it's NON-discriminating here; judge on OOS expR + DD, not DSR.
+- MT5/spot universe UNCHANGED (`{metal,energy,index}`) — it has no rate futures and
+  silently dropping energy there would be an unvalidated live change.
+
+**Still to do — P6 (the only remaining step): PAPER TRADE.**
+1. Flip `BROKER=ib` in analyst/.env (currently commented). Place ONE live signal
    end-to-end on paper; confirm bracket + fill + reconcile. (CME real-time data NOT yet
    activated → live ticks unavailable; weekly runs on delayed/historical — acceptable.)
-2. **Strategy decision (not code):** `WEEKLY_TREND_CLASSES={metal,energy,index}` currently
-   EXCLUDES the new rate/grain/soft/fx futures. On futures, diversification is the whole
-   edge — to trade ZN/ZB/ZF etc. set `WEEKLY_TREND_CLASSES=set()` (all) or add the classes.
-   Deliberate user call; left as-is so nothing changes silently.
-3. Run the weekly backtest on IB continuous futures to re-confirm the edge before scaling.
-4. **Folder reorg** (filed task) now UNBLOCKED — IBKR layer is live-verified. Do it as one
-   atomic, test-covered commit AFTER the verification bugfix is committed.
+2. Run `BROKER=ib` paper for 3–6 months; confirm fills + auto-roll + that the live
+   equity-curve vol matches the backtest. THEN judge via the broker-truth retrospective.
+3. **STOP researching.** 7 combos + vol-target tested; further tinkering = overfitting.
+4. **Folder reorg** (filed task) — done this session; keep entrypoint `dashboard.app`.
 
 ## How a NEW context window should continue
 

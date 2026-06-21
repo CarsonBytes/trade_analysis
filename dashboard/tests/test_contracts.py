@@ -1,14 +1,15 @@
 """Unit tests for the PURE parts of contracts.py -- sizing + roll math.
 
 No IB needed (the broker-touching front_contract/continuous_history are not
-exercised here). Run:  uv run python -m dashboard.test_contracts
+exercised here). Run:  uv run python -m dashboard.tests.test_contracts
 """
 from __future__ import annotations
 
 import datetime as dt
 
 from dashboard.data.contracts import (SPECS, FutureSpec, size_contracts, risk_per_contract,
-                        choose_contract, needs_roll, _business_days_between)
+                        choose_contract, needs_roll, _business_days_between, front_month,
+                        cost_points)
 
 _fails = []
 
@@ -93,9 +94,40 @@ def test_spec_integrity():
     approx("ES tick_value", SPECS["ES"].tick_value, 12.5)  # 0.25 * 50
 
 
+def test_front_month():
+    print("front_month (pure roll calendar):")
+    es = SPECS["ES"]   # quarterly HMUZ, roll_offset 5
+    # early June 2026: Jun(M) expiry ~15th is < 5 bdays off -> roll to Sep(U)
+    y, code, last = front_month(es, dt.date(2026, 6, 12))
+    check("ES Jun->Sep roll", (code, y), ("U", 2026))
+    # early March: hold Mar(H) still (15th far enough ahead)
+    y, code, _ = front_month(es, dt.date(2026, 3, 1))
+    check("ES holds Mar", (code, y), ("H", 2026))
+    # year wrap: mid-Dec -> next March
+    y, code, _ = front_month(es, dt.date(2026, 12, 20))
+    check("ES wraps to next H", (code, y), ("H", 2027))
+    # monthly contract (CL) on Jan 2: the PURE 15th-rule still holds Jan(F)
+    # (approx). NOTE: real CL expires the month BEFORE delivery (~Dec 20), so IB's
+    # front_future would already be on Feb(G); the broker value overrides this.
+    y, code, _ = front_month(SPECS["CL"], dt.date(2026, 1, 2))
+    check("CL approx holds F (broker overrides)", code, "F")
+
+
+def test_cost_points():
+    print("cost_points (futures transaction cost in price points):")
+    es = SPECS["ES"]   # mult 50, tick 0.25; $2.50 RT
+    # 2.50/50 + 2*1*0.25 = 0.05 + 0.5 = 0.55 points
+    approx("ES cost pts", cost_points(es), 0.55)
+    gc = SPECS["GC"]   # mult 100, tick 0.10
+    # 2.50/100 + 2*0.10 = 0.025 + 0.2 = 0.225
+    approx("GC cost pts", cost_points(gc), 0.225)
+    # override commission + slippage
+    approx("ES 0 cost", cost_points(es, commission_rt=0.0, slippage_ticks=0.0), 0.0)
+
+
 if __name__ == "__main__":
     for t in (test_risk_per_contract, test_size_contracts, test_choose_contract,
-              test_roll, test_spec_integrity):
+              test_roll, test_front_month, test_cost_points, test_spec_integrity):
         t()
     print()
     if _fails:

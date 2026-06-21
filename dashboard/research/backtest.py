@@ -23,10 +23,11 @@ import pandas as pd
 
 from analyst.features import compute_facts
 from metrics import deflated_sharpe_ratio
-from dashboard.instruments import UNIVERSE
+from dashboard.instruments import active_universe, active_by_key
 from dashboard.data.providers import get_ohlc
 from dashboard.core.scoring import score_from_facts
 from dashboard.core import paper
+from dashboard.data import contracts
 from dashboard.models import confidence_model
 from dashboard.research.replay import _resolve_daily
 
@@ -59,8 +60,7 @@ def _signals(df: pd.DataFrame, key: str) -> list[dict]:
         score = score_from_facts(key, facts, "")
         if score.signal not in ("BUY", "SELL") or score.strength < paper.MIN_STRENGTH:
             i += 1; continue
-        from dashboard.instruments import BY_KEY
-        if paper.WEEKLY_TREND_CLASSES and BY_KEY[key].asset_class not in paper.WEEKLY_TREND_CLASSES:
+        if paper.WEEKLY_TREND_CLASSES and active_by_key(key).asset_class not in paper.WEEKLY_TREND_CLASSES:
             i += 1; continue
         if MIN_ADX is not None:
             a = adx.iloc[i]
@@ -86,7 +86,11 @@ def _signals(df: pd.DataFrame, key: str) -> list[dict]:
         if outcome is None:
             break
         status, exit_px, used = outcome
-        r = paper.r_multiple(direction, entry, sl, exit_px)
+        # futures (key in SPECS) use the realistic commission+slippage cost in
+        # price points; spot/CFD keys (spec is None) keep the half-spread fraction.
+        spec = contracts.SPECS.get(key)
+        cost_abs = contracts.cost_points(spec) if spec else None
+        r = paper.r_multiple(direction, entry, sl, exit_px, cost_abs=cost_abs)
         out.append({"key": key, "entry_i": i, "entry_date": df.index[i],
                     "exit_date": df.index[min(i + used, n - 1)],
                     "direction": direction, "r": r})
@@ -94,9 +98,22 @@ def _signals(df: pd.DataFrame, key: str) -> list[dict]:
     return out
 
 
-def _portfolio(cands: list[dict], risk: float) -> tuple[pd.Series, list[float]]:
+VOLTARGET_WINDOW = 20         # trailing CLOSED trades used to estimate vol
+VOLTARGET_FACTOR_CAP = 3.0    # max leverage multiple in calm regimes
+VOLTARGET_FACTOR_FLOOR = 0.25 # min multiple in turbulent regimes
+
+
+def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
+               tpy: float = 33.0) -> tuple[pd.Series, list[float]]:
     """Chronological book walk with de-correlation + one-per-instrument; size each
-    trade at `risk` of current equity. Returns (equity-by-date, realized-R list)."""
+    trade at `risk` of current equity. Returns (equity-by-date, realized-R list).
+
+    If `target_vol` is set (annualised, e.g. 0.12), apply VOL TARGETING: scale each
+    new trade's risk by clip(target_vol / trailing_vol, FLOOR, CAP), where
+    trailing_vol is the annualised vol implied by the last VOLTARGET_WINDOW CLOSED
+    trades at the base risk (std(R)*risk*sqrt(tpy)). Uses only already-closed trades
+    -> no look-ahead. `tpy` = trades per year (for annualising). Bigger size in calm
+    regimes, smaller in turbulent ones, to hold portfolio vol near target."""
     cands = sorted(cands, key=lambda c: c["entry_date"])
     equity = START_EQUITY
     open_pos: dict[int, dict] = {}      # id -> {exit_date, key, buckets, pnl}
@@ -105,6 +122,16 @@ def _portfolio(cands: list[dict], risk: float) -> tuple[pd.Series, list[float]]:
     eq_points: list[tuple] = [(cands[0]["entry_date"], equity)] if cands else []
     realized: list[float] = []
     nid = 0
+
+    def _vol_factor() -> float:
+        if target_vol is None or len(realized) < VOLTARGET_WINDOW:
+            return 1.0                              # off, or warming up
+        sd = float(np.std(realized[-VOLTARGET_WINDOW:], ddof=1))
+        ann_vol = sd * risk * (tpy ** 0.5)          # vol if sized at base risk
+        if ann_vol <= 0:
+            return VOLTARGET_FACTOR_CAP
+        return float(min(VOLTARGET_FACTOR_CAP,
+                         max(VOLTARGET_FACTOR_FLOOR, target_vol / ann_vol)))
 
     def _close_due(upto):
         nonlocal equity
@@ -125,7 +152,7 @@ def _portfolio(cands: list[dict], risk: float) -> tuple[pd.Series, list[float]]:
         if any(b in open_buckets for b in buckets):
             continue                                    # de-correlation
         nid += 1
-        risk_money = equity * risk
+        risk_money = equity * risk * _vol_factor()
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"],
                          "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"]}
         open_keys.add(c["key"])
@@ -151,6 +178,33 @@ def _metrics(eq: pd.Series, realized: list[float], years: float) -> dict:
             "n_months": len(monthly)}
 
 
+def _attribution(cands: list[dict]) -> None:
+    """Per-class and per-market edge breakdown -- WHICH markets carry or kill the
+    edge. Decides whether to add a class wholesale (bundle reject is lazy) or cherry
+    -pick the few markets that individually clear the bar. Uses raw gate-passing
+    signals (pre-de-correlation), which is the per-market edge before portfolio caps."""
+    from collections import defaultdict
+    by_cls: dict[str, list[float]] = defaultdict(list)
+    by_key: dict[str, list[float]] = defaultdict(list)
+    for c in cands:
+        cls = active_by_key(c["key"]).asset_class
+        by_cls[cls].append(c["r"]); by_key[c["key"]].append(c["r"])
+    print("PER-CLASS edge (raw signals, expR = the honest per-trade number):")
+    print(f"  {'class':<8}{'n':>6}{'expR':>9}{'totalR':>9}")
+    for cls in sorted(by_cls, key=lambda k: -sum(by_cls[k])):
+        rs = by_cls[cls]
+        print(f"  {cls:<8}{len(rs):>6}{sum(rs)/len(rs):>+9.3f}{sum(rs):>+9.0f}")
+    ranked = sorted(by_key.items(), key=lambda kv: sum(kv[1]) / len(kv[1]))
+    def _row(k, rs): return f"  {k:<8}{len(rs):>6}{sum(rs)/len(rs):>+9.3f}{sum(rs):>+9.0f}"
+    print("PER-MARKET worst 5 / best 5 (expR):")
+    for k, rs in ranked[:5]:
+        print(_row(k, rs))
+    print("  " + "-" * 30)
+    for k, rs in ranked[-5:]:
+        print(_row(k, rs))
+    print()
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -158,7 +212,33 @@ def main():
     ap.add_argument("--weekly", action="store_true", help="resample to weekly bars")
     ap.add_argument("--longweekly", action="store_true",
                     help="fetch max-history WEEKLY bars from yfinance (for real OOS)")
+    ap.add_argument("--all-classes", action="store_true",
+                    help="ignore WEEKLY_TREND_CLASSES whitelist -- trade ALL asset "
+                         "classes (the diversification test: rates/grains/etc.)")
+    ap.add_argument("--classes", type=str, default=None,
+                    help="comma-separated asset classes to trade, e.g. "
+                         "'metal,index,rate' (pre-specify a hypothesis; tests OOS)")
+    ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
+                    help="annualised portfolio vol target (e.g. 0.12); adds a "
+                         "vol-targeted vs fixed-risk comparison at 0.5%% risk")
     args = ap.parse_args()
+    if args.all_classes:
+        paper.WEEKLY_TREND_CLASSES = set()   # set() = no whitelist = trade everything
+        print("[ALL CLASSES: WEEKLY_TREND_CLASSES whitelist disabled]")
+    elif args.classes:
+        want = {c.strip() for c in args.classes.split(",") if c.strip()}
+        # GUARD: a typo'd/plural class name (e.g. "rates" vs "rate") would silently
+        # match nothing and quietly degrade the universe -> a wrong conclusion you'd
+        # trust. Validate against the classes that actually exist in the universe.
+        known = {active_by_key(i.key).asset_class for i in active_universe()}
+        unknown = want - known
+        if unknown:
+            raise SystemExit(
+                f"--classes: unknown asset class(es) {sorted(unknown)}. "
+                f"Valid classes in this universe: {sorted(known)}. "
+                f"(note: SINGULAR -- 'rate' not 'rates', 'soft' not 'softs'.)")
+        paper.WEEKLY_TREND_CLASSES = want
+        print(f"[CLASSES: {sorted(paper.WEEKLY_TREND_CLASSES)}]")
     global MIN_ADX
     MIN_ADX = args.adx
     if MIN_ADX is not None:
@@ -169,7 +249,7 @@ def main():
     print("Collecting signals across the universe...")
     data, cands = {}, []
     min_bars = 220 if args.longweekly else (120 if weekly else 300)
-    for inst in UNIVERSE:
+    for inst in active_universe():
         if args.longweekly:
             import yfinance as yf
             raw = yf.download(inst.yf, period="max", interval="1wk",
@@ -214,6 +294,8 @@ def main():
     print(f"  FREQUENCY: ~{per_year:.0f} trades/year | ~{per_year/52:.1f}/week | "
           f"~{per_year/252:.2f}/trading-day\n")
 
+    _attribution(cands)
+
     print(f"{'risk/trade':<12}{'total %':>10}{'CAGR %':>9}{'max DD %':>10}"
           f"{'avg mo %':>10}{'mo std %':>9}{'worst mo':>10}{'+months':>9}")
     for risk in RISK_LEVELS:
@@ -238,9 +320,29 @@ def main():
         print(f"  {lbl:<22} n={len(real):<4} win {ss['win_rate']:.0%} "
               f"expR {ss['expectancy_R']:+.3f} | CAGR {m['cagr']*100:+.1f}% "
               f"maxDD {m['maxdd']*100:.1f}%")
+    if args.voltarget is not None:
+        _voltarget_compare(cands, span, years, args.voltarget, per_year or 33.0)
+
     print("\nNOTE: deterministic backbone only (no LLM veto). Costs = per-trade "
           "half-spread already in R. Past performance != future; the OOS row is "
           "the honest estimate.")
+
+
+def _voltarget_compare(cands, span, years, target_vol, tpy) -> None:
+    """P5: fixed-risk vs vol-targeted, full + OOS, at 0.5% base risk."""
+    print(f"\nVOL TARGETING @ {target_vol:.0%} annual (base 0.5% risk, factor "
+          f"{VOLTARGET_FACTOR_FLOOR}-{VOLTARGET_FACTOR_CAP}x, {VOLTARGET_WINDOW}-trade window):")
+    print(f"  {'variant':<26}{'CAGR %':>9}{'maxDD %':>10}{'CAGR/DD':>9}")
+    cut = min(c["entry_date"] for c in cands) + (span * 0.6)
+    oos = [c for c in cands if c["entry_date"] > cut]
+    oos_yrs = max((oos[-1]["entry_date"] - oos[0]["entry_date"]).days / 365.25, 0.1) if len(oos) > 1 else 1
+    for lbl, tv in [("fixed risk", None), (f"vol-target {target_vol:.0%}", target_vol)]:
+        for scope, sub, yrs in [("full", cands, years), ("OOS", oos, oos_yrs)]:
+            eq, real = _portfolio(sub, 0.005, target_vol=tv, tpy=tpy)
+            m = _metrics(eq, real, yrs)
+            cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+            print(f"  {lbl+' ('+scope+')':<26}{m['cagr']*100:>9.1f}"
+                  f"{m['maxdd']*100:>10.1f}{cd:>9.2f}")
 
 
 if __name__ == "__main__":

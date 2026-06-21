@@ -206,8 +206,13 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
     exit_price = _last_exit_price(ib, con_id)
     if exit_price is None:
         return None
+    # futures cost: real commission + tick slippage (price points), not the CFD
+    # half-spread fraction.
+    spec = contracts.SPECS.get(trade["instrument"])
+    cost_abs = contracts.cost_points(spec) if spec else None
     r = paper.r_multiple(trade["direction"], trade["entry"], trade["sl"], exit_price,
-                         half_spread=trade.get("half_spread") or paper.HALF_SPREAD)
+                         half_spread=trade.get("half_spread") or paper.HALF_SPREAD,
+                         cost_abs=cost_abs)
     status = "WIN" if r > 0 else "LOSS"
     exit_ts = pd.Timestamp.now(tz="UTC")
     paper._update_resolution(trade["id"], status, str(exit_ts), exit_price,
