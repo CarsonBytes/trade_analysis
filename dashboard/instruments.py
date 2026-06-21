@@ -60,3 +60,60 @@ UNIVERSE: list[Instrument] = [
 ]
 
 BY_KEY = {i.key: i for i in UNIVERSE}
+
+
+# --- IBKR futures universe ---------------------------------------------------
+# One Instrument per full-size futures MARKET (micros are execution vehicles
+# picked at sizing time by contracts.choose_contract, NOT separate signals).
+# `key` matches contracts.SPECS so the spec/roll/sizing layer joins by key, and
+# `asset_class` matches the spec so WEEKLY_TREND_CLASSES / DECORRELATE keep
+# working. `yf` is the continuous-future fallback ticker; `mt5` is unused here.
+_FUT_YF = {
+    "ES": "ES=F", "NQ": "NQ=F", "YM": "YM=F", "RTY": "RTY=F",
+    "GC": "GC=F", "SI": "SI=F", "HG": "HG=F", "CL": "CL=F", "NG": "NG=F",
+    "ZN": "ZN=F", "ZB": "ZB=F", "ZF": "ZF=F", "ZC": "ZC=F", "ZW": "ZW=F",
+    "ZS": "ZS=F", "KC": "KC=F", "SB": "SB=F", "CT": "CT=F",
+    "6E": "6E=F", "6J": "6J=F", "6A": "6A=F",
+}
+_FUT_NAME = {
+    "ES": "E-mini S&P 500", "NQ": "E-mini Nasdaq 100", "YM": "E-mini Dow",
+    "RTY": "E-mini Russell 2000", "GC": "Gold", "SI": "Silver", "HG": "Copper",
+    "CL": "Crude Oil (WTI)", "NG": "Natural Gas", "ZN": "10Y T-Note",
+    "ZB": "30Y T-Bond", "ZF": "5Y T-Note", "ZC": "Corn", "ZW": "Wheat",
+    "ZS": "Soybeans", "KC": "Coffee", "SB": "Sugar", "CT": "Cotton",
+    "6E": "Euro FX", "6J": "Japanese Yen", "6A": "Australian Dollar",
+}
+
+
+def _build_futures_universe() -> list[Instrument]:
+    from .contracts import SPECS  # local import: contracts has no dep on us
+    out = []
+    for spec in SPECS.values():
+        if spec.micro_of is not None:        # skip micros -- not separate signals
+            continue
+        out.append(Instrument(spec.key, _FUT_NAME.get(spec.key, spec.key),
+                              _FUT_YF.get(spec.key, ""), "", spec.asset_class))
+    return out
+
+
+FUTURES_UNIVERSE: list[Instrument] = _build_futures_universe()
+FUT_BY_KEY = {i.key: i for i in FUTURES_UNIVERSE}
+
+
+def _ib_broker() -> bool:
+    import os
+    return os.environ.get("BROKER", "mt5").lower() == "ib"
+
+
+def active_universe() -> list[Instrument]:
+    """The universe the LIVE system trades, per the BROKER env var: the IBKR
+    futures markets under BROKER=ib, else the MT5/yfinance universe. Research
+    scripts keep importing UNIVERSE directly (MT5/yfinance backtests)."""
+    return FUTURES_UNIVERSE if _ib_broker() else UNIVERSE
+
+
+def active_by_key(key: str) -> Instrument | None:
+    """Look up an instrument by key in the ACTIVE universe, with a fallback to
+    the other (so a journal row written under one broker still resolves)."""
+    return (FUT_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
+        else (BY_KEY.get(key) or FUT_BY_KEY.get(key))

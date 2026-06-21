@@ -28,6 +28,9 @@ dependencies = [
 [project.optional-dependencies]
 # Live broker prices from a running MetaTrader 5 terminal (Windows only).
 mt5 = ["MetaTrader5; sys_platform == 'win32'"]
+# Interactive Brokers futures (data + paper execution) via a running TWS / IB Gateway.
+# ib_async is the maintained fork of the archived ib_insync.
+ib = ["ib_async>=1.0"]
 
 [tool.uv]
 # Flat collection of scripts/packages, not an installable distribution.

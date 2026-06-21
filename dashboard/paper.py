@@ -375,8 +375,8 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     if score.strength < MIN_STRENGTH:
         reasons.append(f"trend strength {score.strength} < {MIN_STRENGTH}")
     if WEEKLY_TREND_CLASSES:
-        from .instruments import BY_KEY
-        cls = BY_KEY[key].asset_class
+        from .instruments import active_by_key
+        cls = active_by_key(key).asset_class
         if cls not in WEEKLY_TREND_CLASSES:
             reasons.append(f"off-strategy: {cls} (weekly trend = commodities/indices)")
     if OVEREXT_FILTER:
@@ -465,9 +465,19 @@ def place_from_state(state: dict) -> list[str]:
             # the demo order use the SAME levels -- otherwise the broker stops out
             # at its rounded level while the paper resolver waits for an unrounded
             # one the market never quite reaches (leaving the trade stuck open).
-            digits = mt5_client.symbol_digits(BY_KEY[key].mt5)
-            if digits:
-                entry, sl, tp = round(entry, digits), round(sl, digits), round(tp, digits)
+            # round SL/TP to the broker's tradable precision so paper and live
+            # use the SAME levels. MT5: symbol digits. IB futures: contract tick.
+            from .instruments import _ib_broker
+            if _ib_broker():
+                from .contracts import SPECS
+                spec = SPECS.get(key)
+                if spec:
+                    tick = spec.tick_size
+                    entry, sl, tp = (round(round(x / tick) * tick, 10) for x in (entry, sl, tp))
+            else:
+                digits = mt5_client.symbol_digits(BY_KEY[key].mt5)
+                if digits:
+                    entry, sl, tp = round(entry, digits), round(sl, digits), round(tp, digits)
             mlabel = f"ATR rr{rr:.1f}" if method == "ATR" else "STRUCT"
             if _has_open(key, mlabel):
                 logs.append(f"{key} {mlabel}: skip (already open)")
@@ -598,9 +608,9 @@ def gate_report(state: dict) -> list[dict]:
 def _outcome_for(t: dict, get_ohlc_fn):
     """Resolve one open trade. Prefers exact MT5 tick resolution; falls back to
     (conservative) OHLC-bar resolution. Returns outcome tuple, "OPEN", or None."""
-    from .instruments import BY_KEY
+    from .instruments import active_by_key
     from . import mt5_client
-    inst = BY_KEY[t["instrument"]]
+    inst = active_by_key(t["instrument"])
     # everything in true UTC; MT5 source times get the broker offset removed
     entry_ts = _as_utc(t["ts"])
     end_ts = _as_utc(t["horizon_end"])

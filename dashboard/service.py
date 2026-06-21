@@ -13,7 +13,7 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 
 from analyst.features import compute_facts  # quant/
-from .instruments import UNIVERSE
+from .instruments import active_universe
 from .providers import get_history
 from .scoring import score_from_facts, rank, Score
 from .news_sources import fetch_headlines
@@ -23,6 +23,7 @@ from . import store
 from . import paper
 from . import journal
 from . import executor
+from . import broker          # BROKER-aware dispatch (mt5 executor | ib_exec)
 from . import mt5_client
 from .log import log
 
@@ -99,7 +100,7 @@ def _score_one(inst):
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for key, score, source, live_px, live_src, spread, age, spark in ex.map(_score_one, UNIVERSE):
+        for key, score, source, live_px, live_src, spread, age, spark in ex.map(_score_one, active_universe()):
             STATE["sources"][key] = source
             if score is not None:
                 STATE["scores"][key] = score
@@ -110,7 +111,7 @@ def refresh_cheap() -> None:
                 STATE["spark"][key] = spark
     STATE["mt5_available"] = mt5_client.is_available()
     try:
-        STATE["positions"] = executor.live_positions()   # paper_id -> real fill/P&L
+        STATE["positions"] = broker.live_positions()   # paper_id -> real fill/P&L
     except Exception as e:
         log.debug("live_positions error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
@@ -138,7 +139,7 @@ def refresh_cheap() -> None:
         log.exception("paper resolution error: %s", e)
     # keep the demo account in step (close positions whose paper trade resolved)
     try:
-        executor.sync_closures()
+        broker.sync_closures()
     except Exception as e:
         log.exception("executor closure sync error: %s", e)
 
@@ -178,7 +179,7 @@ def refresh_llm(cap: int | None = None) -> str:
         # mirror new live-variant trades to the MT5 DEMO account (real fills);
         # executor refuses to act unless the account is broker-flagged demo
         try:
-            STATE["executor_logs"] = executor.mirror_new()
+            STATE["executor_logs"] = broker.mirror_new()
         except Exception as e:
             STATE["executor_logs"] = [f"executor error: {e}"]
             log.exception("executor mirror error: %s", e)
