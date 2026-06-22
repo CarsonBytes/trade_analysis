@@ -68,6 +68,11 @@ OVEREXT_LO = 30.0          # block shorts with RSI below this
 def _default_trend_classes() -> set[str]:
     import os
     if os.environ.get("BROKER", "mt5").lower() == "ib":
+        if os.environ.get("UNIVERSE", "futures").lower() == "etf":
+            # validated 16-ETF set (core + screened diversifiers): credit/inflation/
+            # commodity/intl all earned a place (lifted CAGR/DD; see instruments.py).
+            return {"metal", "index", "rate", "credit", "inflation", "intl_eq",
+                    "commodity", "reit", "em_bond", "preferred"}
         return {"metal", "index", "rate"}      # evidence-based futures universe
     return {"metal", "energy", "index"}        # original spot/MT5 whitelist
 

@@ -89,33 +89,34 @@ def mirror_new() -> list[str]:
         return []
     done = _mirrored_ids()
     logs: list[str] = []
-    equity = _equity(ib)
+    equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
+    from dashboard.instruments import ETF_TRADED_BY_KEY
     for t in paper.open_trades():
         if t["method"] != MIRROR_METHOD or t["id"] in done:
             continue
         spec = contracts.SPECS.get(t["instrument"])
-        if spec is None:
-            continue  # not a futures market we trade
-        msg = _place_bracket(ib, t, spec, equity)
+        if spec is not None:
+            msg = _place_bracket(ib, t, spec, equity)                  # futures
+        elif t["instrument"] in ETF_TRADED_BY_KEY:
+            msg = _place_etf_bracket(ib, t, equity)                    # ETF (shares)
+        else:
+            continue
         if msg:
             logs.append(msg); log.info("ib_exec: %s", msg)
     return logs
 
 
-def _equity(ib) -> float:
-    """Net liquidation value of the paper account (account ccy, USD)."""
-    def read():
-        for v in ib.accountValues():
-            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
-                return float(v.value)
-        return None
-    try:
-        v = ib_client.call(read)               # on the IB loop thread
-        if v is not None:
-            return v
-    except Exception:                          # noqa: BLE001
-        pass
-    return paper.ACCOUNT  # fallback to the configured notional
+def _equity_usd(ib) -> float:
+    """Net liquidation value in USD. The paper account base may be non-USD (HKD here);
+    US futures/ETFs price in USD, so we convert -- WITHOUT this, sizing compared an HKD
+    budget to USD risk and would oversize ~8x. Falls back to the configured notional."""
+    summ = ib_client.account_summary()
+    if summ and summ.get("NetLiquidation") is not None:
+        nl = summ["NetLiquidation"]
+        rate = ib_client.fx_to_usd(summ.get("_ccy", "USD"))
+        if rate:
+            return nl * rate
+    return paper.ACCOUNT
 
 
 def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> str | None:
@@ -162,6 +163,45 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> st
                    "OPEN", ""))
     return (f"{t['instrument']}: paper bracket placed {action} {qty}x "
             f"{getattr(contract, 'localSymbol', chosen.symbol)} "
+            f"SL {t['sl']} TP {t['tp']}")
+
+
+def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
+    """ETF order: SHARE-based sizing (shares = floor(risk_$ / stop_per_share)) and a
+    SMART stock bracket. No contract specs/rolls -- ETFs are simpler than futures and
+    divide finely, so any account size works."""
+    contract = ib_client.stock_contract(t["instrument"])      # symbol == key (GLD, SPY…)
+    if contract is None:
+        return f"{t['instrument']}: no stock contract (market data?), retry"
+    stop_per_share = abs(float(t["entry"]) - float(t["sl"]))
+    qty = contracts.size_shares(equity_usd, stop_per_share, paper.RISK_PER_TRADE)
+    if qty < 1:
+        return f"{t['instrument']}: <1 share at the risk budget, SKIP"
+    action = "BUY" if t["direction"] == "long" else "SELL"
+    risk_money = equity_usd * paper.RISK_PER_TRADE
+
+    def send():
+        bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
+                                  takeProfitPrice=float(t["tp"]),
+                                  stopLossPrice=float(t["sl"]))
+        bracket.parent.orderType = "MKT"
+        bracket.parent.lmtPrice = 0.0
+        for o in bracket:
+            o.tif = "GTC"
+            o.orderRef = f"quant#{t['id']}"
+        return [ib.placeOrder(contract, o) for o in bracket]
+    try:
+        trades = ib_client.call(send, timeout=15)
+    except Exception as e:                     # noqa: BLE001
+        return f"{t['instrument']}: order send failed ({e}), retry"
+    perm_id = getattr(trades[0].order, "permId", 0)
+    with paper._LOCK, _conn() as c:
+        c.execute("INSERT OR IGNORE INTO ib_mirror VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (t["id"], perm_id, getattr(contract, "conId", 0), t["instrument"],
+                   qty, risk_money, "",
+                   dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "OPEN", "etf"))
+    return (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
             f"SL {t['sl']} TP {t['tp']}")
 
 

@@ -153,6 +153,16 @@ def size_contracts(spec: FutureSpec, equity: float, stop_points: float,
     return int(math.floor(risk_money / per))
 
 
+def size_shares(equity: float, stop_per_share: float, risk_pct: float) -> int:
+    """Whole shares of an ETF such that an SL hit loses ~risk_pct of equity.
+    `equity` and `stop_per_share` MUST be the same currency (USD for US ETFs --
+    convert a non-USD account first). shares = floor(equity*risk_pct / stop_per_share).
+    ETFs divide finely, so this is expressible on any account size (unlike futures)."""
+    if stop_per_share <= 0 or equity <= 0 or risk_pct <= 0:
+        return 0
+    return int(math.floor((equity * risk_pct) / stop_per_share))
+
+
 def choose_contract(spec: FutureSpec, equity: float, stop_points: float,
                     risk_pct: float, fx_to_usd: float = 1.0,
                     ) -> tuple[FutureSpec, int]:

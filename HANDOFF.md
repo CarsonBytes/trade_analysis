@@ -1,7 +1,55 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-06-20.
+Last updated 2026-06-22.
+
+---
+
+## ⭐⭐ CURRENT STATE 2026-06-22 — READ THIS FIRST (supersedes older sections below)
+
+**The platform PIVOTED from MT5 spot → IBKR futures → ETFs.** Why ETFs: the IBKR paper
+account is ~US$130k, and at 0.5% risk NO futures contract sizes (even micros risk
+$900-1125 > $650 budget; copper has no micro). ETFs trade in SHARES → 0.5% is expressible
+on any account. Set **`UNIVERSE=etf`** (in addition to `BROKER=ib`) to trade ETFs.
+
+**RECOMMENDED STRATEGY = 18-ETF long-only weekly TSMOM** (validated 33.4y):
+GLD/SLV/CPER · SPY/QQQ/DIA/IWM · IEF/TLT/SHY · HYG · TIP · EFA/EEM · DBC · VNQ · EMB · PFF.
+5-week hold (`HORIZON_DAYS=5`/`HORIZON_CAL=35`), 0.5% risk, fixed ATR-SL+RR3-TP, equal-RISK
+sizing (= risk parity), no vol-targeting. Backtest: full **+4.7% CAGR / −11% DD**, **OOS
++10.3% / −7.0%**, expR +0.277, PF 1.54, DSR 100%, **~32 trades/yr, avg hold 3.3wk**.
+Honest forward ≈ **4–7% CAGR / ~−11% DD** (full-period is the anchor; OOS is bull-flattered).
+
+**Research is SATURATED.** ~13 dimensions tested; the ONLY thing that ever improved the
+strategy is **adding uncorrelated positive-edge markets** (the ETF universe expansion:
+10→16 was +2.8% OOS, 16→18 was +0.6%/flat). ALL rejected (with data): wider futures classes,
+vol-targeting (pure leverage), dynamic exits (breakeven/trailing/STRUCT < fixed), shorter
+horizons (4–6wk plateau), shorts (net-negative→long-only), concentrated (no-op — de-corr
+buckets empty for futures+ETF), tail-risk circuit breaker (kills CAGR, no DD help),
+class-weighting (worse OOS DD), SPY-regime overlay (hurts diversified book), ADX (halves
+return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kept only
+EMB+PFF). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
+class-momentum; needs 100+ names = idiosyncratic risk we reject). Score on yfinance
+(=F/ETF tickers, fast, = backtest data); IBKR for EXECUTION only.
+
+**ETF execution path BUILT + live-verified** (except an actual fill, which awaits a signal):
+`contracts.size_shares`, `ib_exec._place_etf_bracket` (SMART Stock bracket), routes ETF vs
+futures, `ib_client.stock_contract`/`fx_to_usd`. **Currency bug FIXED** — `_equity_usd`
+converts NetLiq HKD→USD (delayed FX + HKD-peg 7.8 fallback; verified equity_usd=$129,777),
+used by both paths.
+
+**Ops:** Gateway auto-starts+auto-logs-in via IBC (`C:\IBC`, port 4002, password in
+`C:\IBC\config.ini`, NOT in repo); `C:\Scripts\dashboard.ps1` (DashboardApp task) runs a
+background monitor that relaunches it HIDDEN (`C:\IBC\start_hidden.vbs`) if 4002 dies.
+`ib_async`+`MetaTrader5` are first-class deps. CME real-time data NOT activated (delayed
+data is fine for a weekly system).
+
+**NEXT (user prefers continued research — don't push "stop"):**
+1. **Go live on ETFs**: set `UNIVERSE=etf` in `analyst/.env`, restart `DashboardApp` →
+   dashboard trades the 18 ETFs (now sizeable). Then paper-trade months = highest-value step.
+2. OR **test XSMOM** to confirm/refute the prediction it fails on this universe.
+3. **UNCOMMITTED** since commit `bf7e45e` (user commits/pushes themselves): instruments.py,
+   paper.py, backtest.py, contracts.py, ib_client.py, ib_exec.py — the ETF research+exec.
+   Live `.env` is still `BROKER=ib` (futures, 10 mkts); NOT yet `UNIVERSE=etf`.
 
 ---
 

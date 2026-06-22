@@ -200,6 +200,50 @@ def front_future(spec: FutureSpec, asof: dt.date):
         return _qualify_front(ib, spec, asof)
 
 
+def stock_contract(symbol: str, currency: str = "USD"):
+    """Qualified SMART-routed Stock/ETF contract to TRADE (orders). None if IB down."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+        ib_async = _mod()
+        c = ib_async.Stock(symbol, "SMART", currency)
+        try:
+            _run(ib.qualifyContractsAsync(c))
+        except Exception as e:                         # noqa: BLE001
+            log.info("ib_client: qualify Stock(%s) failed: %s", symbol, e)
+            return None
+        return c if getattr(c, "conId", 0) else None
+
+
+# HKD is PEGGED to USD (7.75-7.85 band) -> a constant is accurate to <1% and is the
+# robust fallback when no FX market-data subscription is available.
+_PEG_USD_PER = {"HKD": 1.0 / 7.80}
+
+
+def fx_to_usd(ccy: str) -> float | None:
+    """USD per 1 unit of `ccy` (1.0 for USD). For converting a non-USD account's
+    equity into USD before sizing US ETFs. Uses DELAYED historical FX (works without a
+    real-time sub); falls back to a pegged constant (e.g. HKD). None if all fail."""
+    ccy = (ccy or "USD").upper()
+    if ccy == "USD":
+        return 1.0
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is not None:
+            ib_async = _mod()
+            pair = ib_async.Forex(f"{ccy}USD")         # e.g. HKDUSD -> USD per HKD
+            try:
+                bars = _run(ib.reqHistoricalDataAsync(
+                    pair, endDateTime="", durationStr="5 D", barSizeSetting="1 day",
+                    whatToShow="MIDPOINT", useRTH=False, formatDate=2), timeout=8)
+                if bars and bars[-1].close and bars[-1].close > 0:
+                    return float(bars[-1].close)
+            except Exception:                          # noqa: BLE001
+                pass
+    return _PEG_USD_PER.get(ccy)                        # pegged fallback (HKD), else None
+
+
 # ---- bars ------------------------------------------------------------------
 
 def _bars_to_df(bars) -> pd.DataFrame | None:

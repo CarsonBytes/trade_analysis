@@ -100,27 +100,97 @@ FUTURES_UNIVERSE: list[Instrument] = _build_futures_universe()
 FUT_BY_KEY = {i.key: i for i in FUTURES_UNIVERSE}
 
 
+# --- ETF universe (for SMALL accounts) --------------------------------------
+# Share-priced equivalents of the {metal,index,rate} futures: shares divide
+# finely, so 0.5% risk is expressible on any account size (futures can't — even
+# micros risk > a small account's budget). Same underlyings/classes; the weekly
+# TSMOM strategy ports unchanged. Tagged with the SAME asset_class so
+# WEEKLY_TREND_CLASSES / LONG_ONLY apply identically.
+ETF_UNIVERSE: list[Instrument] = [
+    Instrument("GLD",  "SPDR Gold",          "GLD",  "", "metal"),
+    Instrument("SLV",  "iShares Silver",     "SLV",  "", "metal"),
+    Instrument("CPER", "US Copper",          "CPER", "", "metal"),
+    Instrument("SPY",  "S&P 500 ETF",        "SPY",  "", "index"),
+    Instrument("QQQ",  "Nasdaq 100 ETF",     "QQQ",  "", "index"),
+    Instrument("DIA",  "Dow 30 ETF",         "DIA",  "", "index"),
+    Instrument("IWM",  "Russell 2000 ETF",   "IWM",  "", "index"),
+    Instrument("IEF",  "7-10y Treasury ETF", "IEF",  "", "rate"),
+    Instrument("TLT",  "20+y Treasury ETF",  "TLT",  "", "rate"),
+    Instrument("SHY",  "1-3y Treasury ETF",  "SHY",  "", "rate"),
+]
+ETF_BY_KEY = {i.key: i for i in ETF_UNIVERSE}
+
+# Diversifiers that PASSED the screen (positive full-sample expR, genuinely different
+# exposure). Screened 2026-06-22 via --etf-screen on 33.4y:
+#   KEEP: HYG credit +0.52, TIP inflation +0.49, EFA/EEM intl_eq +0.30, DBC commodity
+#         +0.25, VNQ reit +0.12.  REJECT: USO energy -0.51, UUP fx -0.31, GDX miner -0.27.
+# Adding the keepers lifted full CAGR 2.6%->3.6%, OOS 6.9%->8.4% (real diversification,
+# unlike the futures grains/softs/fx that failed). Their classes must be in
+# WEEKLY_TREND_CLASSES to trade live.
+ETF_CANDIDATES: list[Instrument] = [
+    Instrument("HYG",  "High-Yield Bonds",  "HYG",  "", "credit"),
+    Instrument("TIP",  "TIPS",              "TIP",  "", "inflation"),
+    Instrument("EFA",  "Developed Intl Eq", "EFA",  "", "intl_eq"),
+    Instrument("EEM",  "Emerging Mkt Eq",   "EEM",  "", "intl_eq"),
+    Instrument("DBC",  "Broad Commodities", "DBC",  "", "commodity"),
+    Instrument("VNQ",  "US REITs",          "VNQ",  "", "reit"),
+    # batch-2 keepers (screened 2026-06-22): distinct, positive, not equity-cluster.
+    Instrument("EMB",  "EM Bonds",          "EMB",  "", "em_bond"),
+    Instrument("PFF",  "Preferred Stock",   "PFF",  "", "preferred"),
+]
+ETF_CANDIDATE_BY_KEY = {i.key: i for i in ETF_CANDIDATES}
+
+# Batch 2 to SCREEN (--etf-screen2). NOT traded unless they clear OOS + add real
+# diversification (most are redundant subsets/correlates of the held set).
+ETF_SCREEN_BATCH: list[Instrument] = [
+    Instrument("XLK", "Tech Sector",       "XLK", "", "us_sector"),
+    Instrument("XLF", "Financials Sector", "XLF", "", "us_sector"),
+    Instrument("XLE", "Energy Sector",     "XLE", "", "us_sector"),
+    Instrument("VGK", "Europe Eq",         "VGK", "", "intl_eq2"),
+    Instrument("EWJ", "Japan Eq",          "EWJ", "", "intl_eq2"),
+    Instrument("INDA","India Eq",          "INDA","", "intl_eq2"),
+    Instrument("GSG", "GSCI Commodity",    "GSG", "", "commodity2"),
+    Instrument("DBA", "Agriculture",       "DBA", "", "commodity2"),
+    Instrument("LQD", "IG Corp Bonds",     "LQD", "", "ig_credit"),
+    Instrument("MUB", "Municipal Bonds",   "MUB", "", "muni"),
+]
+ETF_SCREEN_BATCH_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH}
+
+# The validated ETF trading universe = core {metal,index,rate} + screened diversifiers
+# (credit/inflation/intl_eq/commodity/reit). 16 ETFs. Best risk-adjusted result found:
+# full +4.2% CAGR / -10.7% DD (vs core-10 2.6%/-13.4%). Use for small accounts.
+ETF_TRADED: list[Instrument] = ETF_UNIVERSE + ETF_CANDIDATES
+ETF_TRADED_BY_KEY = {i.key: i for i in ETF_TRADED}
+
+
 def _ib_broker() -> bool:
     import os
     return os.environ.get("BROKER", "mt5").lower() == "ib"
 
 
+def _etf_mode() -> bool:
+    """Trade ETFs (shares) instead of futures -- for accounts too small to size even
+    micro futures. Set UNIVERSE=etf in the env."""
+    import os
+    return os.environ.get("UNIVERSE", "futures").lower() == "etf"
+
+
 def active_universe() -> list[Instrument]:
-    """The universe the LIVE system trades, per the BROKER env var. Under BROKER=ib
-    this is the futures we ACTUALLY TRADE -- FUTURES_UNIVERSE filtered to the
-    validated WEEKLY_TREND_CLASSES (= {metal,index,rate}: GC/SI/HG, ES/NQ/YM/RTY,
-    ZN/ZB/ZF) -- so the dashboard shows exactly the traded set, not the rejected
-    grain/soft/fx markets. Empty whitelist => all futures. MT5 => spot universe.
-    (Research scripts import UNIVERSE directly.)"""
+    """The LIVE traded universe, per env. BROKER=ib + UNIVERSE=etf -> the 16 validated
+    ETFs (share-priced, for small accounts); else BROKER=ib -> futures {metal,index,rate};
+    MT5 -> spot. Filtered to WEEKLY_TREND_CLASSES (empty => no filter)."""
     if not _ib_broker():
         return UNIVERSE
     from dashboard.core import paper          # late import: avoids circular load
     cls = paper.WEEKLY_TREND_CLASSES
-    return [i for i in FUTURES_UNIVERSE if i.asset_class in cls] if cls else FUTURES_UNIVERSE
+    base = ETF_TRADED if _etf_mode() else FUTURES_UNIVERSE
+    return [i for i in base if i.asset_class in cls] if cls else base
 
 
 def active_by_key(key: str) -> Instrument | None:
     """Look up an instrument by key in the ACTIVE universe, with a fallback to
     the other (so a journal row written under one broker still resolves)."""
-    return (FUT_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
-        else (BY_KEY.get(key) or FUT_BY_KEY.get(key))
+    return (FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key) or ETF_CANDIDATE_BY_KEY.get(key)
+            or ETF_SCREEN_BATCH_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
+        else (BY_KEY.get(key) or FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key)
+              or ETF_CANDIDATE_BY_KEY.get(key) or ETF_SCREEN_BATCH_BY_KEY.get(key))

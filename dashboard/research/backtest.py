@@ -23,7 +23,8 @@ import pandas as pd
 
 from analyst.features import compute_facts
 from metrics import deflated_sharpe_ratio
-from dashboard.instruments import active_universe, active_by_key
+from dashboard.instruments import (active_universe, active_by_key, ETF_UNIVERSE,
+                                   ETF_CANDIDATES, ETF_TRADED, ETF_SCREEN_BATCH)
 from dashboard.data.providers import get_ohlc
 from dashboard.core.scoring import score_from_facts
 from dashboard.core import paper
@@ -40,6 +41,13 @@ _DIRECTIONS: tuple = ("long",) if paper.LONG_ONLY else ("long", "short")
 CONCENTRATED: bool = False    # --concentrated: drop one-per-instrument + de-correlation caps
 CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): pause new
                                  # entries when portfolio DD >= stop, resume when DD <= resume
+REGIME: object = None            # --regime: SPY 40wk-MA bull/bear Series; scale size in bears
+REGIME_BEAR_SIZE = 0.40          # position size in a SPY-bear regime (vs 1.0 in bull)
+CLASS_WEIGHT: bool = False       # --class-weight: scale risk by a class's trailing-12mo
+                                 # realized expR (walk-forward; tilt toward recent winners)
+CLUSTER: bool = False            # --cluster: de-correlate by ASSET CLASS (one open
+                                 # position per metal/index/rate) -- caps correlated risk
+                                 # (the legacy _risk_buckets is empty for futures/ETF keys)
 
 
 def _adx(df, n=14):
@@ -135,7 +143,30 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     open_buckets: set = set()           # (bucket, sign) currently held
     eq_points: list[tuple] = [(cands[0]["entry_date"], equity)] if cands else []
     realized: list[float] = []
+    class_hist: dict = {}               # asset_class -> [(exit_date, r)] CLOSED trades
     nid = 0
+
+    def _class_factor(cls, asof) -> float:
+        """Walk-forward class tilt: scale risk by the class's TRAILING-12mo realized
+        expR (closed trades only -> no look-ahead), relative to a 0.25R baseline.
+        Strong-lately classes get up to 2x, weak/negative get floored at 0.25x."""
+        if not CLASS_WEIGHT:
+            return 1.0
+        hist = [r for (d, r) in class_hist.get(cls, []) if (asof - d).days <= 365]
+        if len(hist) < 5:               # warm up at neutral
+            return 1.0
+        te = sum(hist) / len(hist)
+        return float(min(2.0, max(0.25, te / 0.25)))
+
+    def _regime_factor(asof) -> float:
+        """SPY 40wk-MA regime overlay: full size in bull, REGIME_BEAR_SIZE in bear.
+        Uses only data up to `asof` (the MA is computed on prior closes -> no look-ahead)."""
+        if REGIME is None:
+            return 1.0
+        sub = REGIME[REGIME.index <= asof]
+        if len(sub) == 0:
+            return 1.0
+        return 1.0 if bool(sub.iloc[-1]) else REGIME_BEAR_SIZE
 
     def _vol_factor() -> float:
         if target_vol is None or len(realized) < VOLTARGET_WINDOW:
@@ -157,6 +188,7 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
                 open_buckets.discard(b)
             eq_points.append((v["exit_date"], equity))
             realized.append(v["r"])
+            class_hist.setdefault(v["cls"], []).append((v["exit_date"], v["r"]))
 
     peak_eq = START_EQUITY
     paused = False
@@ -172,15 +204,21 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
                 paused = False
             if paused:
                 continue                                # no new entries while halted
-        buckets = paper._risk_buckets(c["key"], c["direction"])
+        if CLUSTER:                                     # de-correlate by ASSET CLASS
+            sign = 1 if c["direction"] == "long" else -1
+            buckets = [(active_by_key(c["key"]).asset_class, sign)]
+        else:
+            buckets = paper._risk_buckets(c["key"], c["direction"])
         if not CONCENTRATED:                            # risk caps (off in concentrated mode)
             if c["key"] in open_keys:
                 continue                                # already in this instrument
             if any(b in open_buckets for b in buckets):
                 continue                                # de-correlation
         nid += 1
-        risk_money = equity * risk * _vol_factor()
-        open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"],
+        cls = active_by_key(c["key"]).asset_class
+        risk_money = (equity * risk * _vol_factor() * _class_factor(cls, c["entry_date"])
+                      * _regime_factor(c["entry_date"]))
+        open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"], "cls": cls,
                          "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"]}
         open_keys.add(c["key"])
         for b in buckets:
@@ -322,13 +360,38 @@ def main():
                     help="compare exit methods (fixed/breakeven/trailing) on the "
                          "current locked config, OOS -- data fetched once")
     ap.add_argument("--concentrated", action="store_true",
-                    help="drop one-per-instrument + de-correlation caps (concentrate "
-                         "on strong trends -- higher return, much higher DD)")
+                    help="[DEPRECATED for futures/ETF -- NO-OP: their keys have empty "
+                         "_risk_buckets, so there are no caps to drop. MT5-spot only.] "
+                         "drop one-per-instrument + de-correlation caps.")
     ap.add_argument("--circuit", action="store_true",
                     help="tail-risk circuit breaker: pause new entries when DD>=15%%, "
                          "resume when DD<=10%% (tests if it helps or just locks out the recovery)")
+    ap.add_argument("--etf", action="store_true",
+                    help="trade the ETF universe (GLD/SLV/CPER, SPY/QQQ/DIA/IWM, "
+                         "IEF/TLT/SHY) instead of futures -- for small accounts (precise "
+                         "share sizing). Same strategy/classes.")
+    ap.add_argument("--etf-screen", action="store_true",
+                    help="screen core + CANDIDATE ETFs (EFA/EEM/VNQ/DBC/USO/GDX/HYG/"
+                         "TIP/UUP) with per-market attribution -- which diversifiers earn a place?")
+    ap.add_argument("--etf-screen2", action="store_true",
+                    help="screen validated-16 + BATCH-2 candidates (XLK/XLF/XLE/VGK/EWJ/"
+                         "INDA/GSG/DBA/LQD/MUB/EMB/PFF) -- per-market attribution")
+    ap.add_argument("--cluster", action="store_true",
+                    help="de-correlate by ASSET CLASS (max one open position per "
+                         "metal/index/rate) -- caps correlated-cluster drawdown")
+    ap.add_argument("--regime", action="store_true",
+                    help="regime overlay: scale ALL position sizes to 40%% when SPY is "
+                         "below its 40wk MA (equity bear) -- tests if it helps a diversified book")
+    ap.add_argument("--class-weight", action="store_true",
+                    help="walk-forward: scale risk by each class's trailing-12mo expR")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT
+    if args.class_weight:
+        CLASS_WEIGHT = True
+        print("[CLASS-WEIGHT: risk scaled by trailing-12mo class expR (0.25-2.0x)]")
+    if args.cluster:
+        CLUSTER = True
+        print("[CLUSTER: de-correlate by asset class (1 per metal/index/rate)]")
     if args.concentrated:
         CONCENTRATED = True
         print("[CONCENTRATED: risk caps OFF -- one-per-instrument + de-correlation disabled]")
@@ -363,10 +426,21 @@ def main():
     weekly = args.weekly or args.longweekly
     if weekly:
         print("[LONG-HISTORY WEEKLY (yfinance max)]" if args.longweekly else "[WEEKLY bars]")
-    print("Collecting signals across the universe...")
+    if args.etf_screen2:                              # validated 16 + NEW batch-2 candidates
+        universe = ETF_TRADED + ETF_SCREEN_BATCH
+        paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen:                             # core + candidate ETFs, no class filter
+        universe = ETF_UNIVERSE + ETF_CANDIDATES
+        paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf:
+        universe = ETF_UNIVERSE
+    else:
+        universe = active_universe()
+    print(f"Collecting signals across {'ETF' if (args.etf or args.etf_screen) else 'the'} "
+          f"universe ({len(universe)} instruments)...")
     data, cands = {}, []
     min_bars = 220 if args.longweekly else (120 if weekly else 300)
-    for inst in active_universe():
+    for inst in universe:
         if args.longweekly:
             import yfinance as yf
             raw = yf.download(inst.yf, period="max", interval="1wk",
@@ -391,6 +465,11 @@ def main():
             continue
         data[inst.key] = df
         cands += _signals(df, inst.key)
+    if args.regime and "SPY" in data:                 # SPY 40wk-MA bull/bear overlay
+        global REGIME
+        spy = data["SPY"]["close"]
+        REGIME = (spy > spy.rolling(40).mean())        # True = bull (above 40wk MA)
+        print(f"[REGIME: SPY 40wk-MA -- size {REGIME_BEAR_SIZE:.0%} in bear, 100% in bull]")
     span = max(df.index[-1] for df in data.values()) - min(df.index[0] for df in data.values())
     years = span.days / 365.25
     if args.horizon_curve:
