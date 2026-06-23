@@ -51,7 +51,24 @@ class names are SINGULAR/exact — `intl_eq`, `em_bond`, `preferred`.)
 are added; 18-both has the WORST OOS CAGR/DD (1.47) yet the best full-sample expR/PF/totalR.
 At n≈1100 trades all four differ within sampling noise (expR 0.355–0.366; the DD gap = one
 drawdown event). **Route 1 is saturated even at single-ETF granularity — 16/17/18 is a
-noise-level choice.** Use 18-both (most robust full-sample). DSR non-discriminating (n_trials=1).
+noise-level choice.** DSR non-discriminating (n_trials=1, correct for a single-config tool).
+
+**FINAL DECISION 2026-06-23 — adopt 17 ETFs (16 + PFF, drop EMB)** (supersedes the earlier
+"use 18-both" line above). Reasoning, not a noise-chase: EMB (em_bond) is mechanically
+redundant — ≈ HYG credit + TLT duration, both already held — and it is the only candidate that
+drags the risk-adjusted ratio in BOTH windows (recent 3.44→3.28; full-history adds it onto
+16+PFF as 1.55→1.47 via DD −6.5→−7.0). PFF (preferred) is a more distinct exposure and holds
+the best CAGR/DD ratio in both windows. The 16/17/18 *return* gap is sampling noise; the call
+is made on redundancy + consistent risk-adjusted direction, so 17 is the **cleanest reasonable**
+universe, NOT a claim it is statistically optimal. Fully reversible: EMB still defined in
+instruments.py; live drop is one line in `paper._default_trend_classes()` (removed `em_bond`).
+Re-test if a major EM-credit dislocation plausibly gives EMB a distinct (non-redundant) edge.
+
+**Honest live expectation (size to the downside, not the OOS):** OOS (favorable regime) ≈
++10% CAGR / −6.5% DD; but full-history IS (unfavorable regime) ≈ **+2% CAGR / −10.7% DD** at
+0.5% risk — and OOS>IS means the strategy is NOT overfit, so the +2%/−11% case is a real
+multi-year scenario, not a tail. If a −10–11% drawdown is unacceptable, run **0.25% risk**
+(≈ −5–6% DD, ~half the CAGR). Pick the risk % against the IS downside before cutover.
 
 ### Paper-trading monitoring — judge on n, NOT a 3-month CAGR ratio
 A "3-month live CAGR > 80% of backtest → continue / < 50% → stop" rule is statistically

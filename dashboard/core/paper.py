@@ -69,10 +69,13 @@ def _default_trend_classes() -> set[str]:
     import os
     if os.environ.get("BROKER", "mt5").lower() == "ib":
         if os.environ.get("UNIVERSE", "futures").lower() == "etf":
-            # validated 16-ETF set (core + screened diversifiers): credit/inflation/
-            # commodity/intl all earned a place (lifted CAGR/DD; see instruments.py).
+            # 17-ETF set (16 core/screened + PFF). em_bond (EMB) dropped 2026-06-23:
+            # redundant vs HYG credit + TLT duration, and a drag on risk-adjusted return
+            # across BOTH the recent and full-history (--longweekly) windows. PFF kept --
+            # best CAGR/DD ratio in both. EMB still defined in instruments.py for research;
+            # re-test if a major EM-credit dislocation gives it a distinct edge.
             return {"metal", "index", "rate", "credit", "inflation", "intl_eq",
-                    "commodity", "reit", "em_bond", "preferred"}
+                    "commodity", "reit", "preferred"}
         return {"metal", "index", "rate"}      # evidence-based futures universe
     return {"metal", "energy", "index"}        # original spot/MT5 whitelist
 
