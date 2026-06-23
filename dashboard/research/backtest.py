@@ -410,7 +410,15 @@ def main():
         # GUARD: a typo'd/plural class name (e.g. "rates" vs "rate") would silently
         # match nothing and quietly degrade the universe -> a wrong conclusion you'd
         # trust. Validate against the classes that actually exist in the universe.
-        known = {active_by_key(i.key).asset_class for i in active_universe()}
+        if args.etf_screen2:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH
+        elif args.etf_screen:
+            _uni = ETF_UNIVERSE + ETF_CANDIDATES
+        elif args.etf:
+            _uni = ETF_UNIVERSE
+        else:
+            _uni = active_universe()
+        known = {active_by_key(i.key).asset_class for i in _uni}
         unknown = want - known
         if unknown:
             raise SystemExit(
@@ -429,9 +437,10 @@ def main():
     if args.etf_screen2:                              # validated 16 + NEW batch-2 candidates
         universe = ETF_TRADED + ETF_SCREEN_BATCH
         paper.WEEKLY_TREND_CLASSES = set()
-    elif args.etf_screen:                             # core + candidate ETFs, no class filter
+    elif args.etf_screen:                             # core + candidate ETFs
         universe = ETF_UNIVERSE + ETF_CANDIDATES
-        paper.WEEKLY_TREND_CLASSES = set()
+        if not args.classes:                          # --classes can sub-select (isolate an ETF)
+            paper.WEEKLY_TREND_CLASSES = set()
     elif args.etf:
         universe = ETF_UNIVERSE
     else:

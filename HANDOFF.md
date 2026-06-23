@@ -21,7 +21,7 @@ Honest forward ≈ **4–7% CAGR / ~−11% DD** (full-period is the anchor; OOS 
 
 **Research is SATURATED.** ~13 dimensions tested; the ONLY thing that ever improved the
 strategy is **adding uncorrelated positive-edge markets** (the ETF universe expansion:
-10→16 was +2.8% OOS, 16→18 was +0.6%/flat). ALL rejected (with data): wider futures classes,
+10→16 was +2.8% OOS, 16→18 was +0.6%/flat — see EMB/PFF isolation table below). ALL rejected (with data): wider futures classes,
 vol-targeting (pure leverage), dynamic exits (breakeven/trailing/STRUCT < fixed), shorter
 horizons (4–6wk plateau), shorts (net-negative→long-only), concentrated (no-op — de-corr
 buckets empty for futures+ETF), tail-risk circuit breaker (kills CAGR, no DD help),
@@ -30,6 +30,36 @@ return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kep
 EMB+PFF). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
 class-momentum; needs 100+ names = idiosyncratic risk we reject). Score on yfinance
 (=F/ETF tickers, fast, = backtest data); IBKR for EXECUTION only.
+
+### EMB/PFF single-ETF isolation — Route 1 saturation CONFIRMED at fine granularity (2026-06-23)
+Tested the open question "is it EMB or PFF that adds value, or does one drag?" by running
+each alone vs the 16-base and 18-both. 33.4y longweekly, OOS = last 40%:
+`BROKER=ib UNIVERSE=etf uv run --no-sync python -m dashboard.research.backtest --etf-screen --longweekly --classes metal,index,rate,credit,inflation,intl_eq,commodity,reit[,em_bond][,preferred]`
+(NB: must be `--etf-screen` + `UNIVERSE=etf` so the class guard knows the candidate classes;
+class names are SINGULAR/exact — `intl_eq`, `em_bond`, `preferred`.)
+
+| config | OOS CAGR | OOS maxDD | CAGR/DD | OOS expR | full PF |
+|---|---|---|---|---|---|
+| 16-base | +9.8% | −6.5% | 1.51 | +0.366 | 1.52 |
+| 16 + EMB | +10.0% | −6.5% | 1.54 | +0.357 | 1.53 |
+| 16 + PFF | +10.1% | −6.5% | 1.55 | +0.363 | 1.53 |
+| 18 (both) | +10.3% | −7.0% | 1.47 | +0.355 | 1.54 |
+
+**Conclusion:** EMB and PFF EACH add only ~+0.2–0.3% OOS CAGR alone (CAGR/DD 1.51→1.54/1.55,
+~2% relative — nowhere near a ≥10% bar). Neither clears the threshold individually → the
+"maybe EMB alone is worth it" hypothesis is REFUTED. DD only worsens (−6.5→−7.0) when BOTH
+are added; 18-both has the WORST OOS CAGR/DD (1.47) yet the best full-sample expR/PF/totalR.
+At n≈1100 trades all four differ within sampling noise (expR 0.355–0.366; the DD gap = one
+drawdown event). **Route 1 is saturated even at single-ETF granularity — 16/17/18 is a
+noise-level choice.** Use 18-both (most robust full-sample). DSR non-discriminating (n_trials=1).
+
+### Paper-trading monitoring — judge on n, NOT a 3-month CAGR ratio
+A "3-month live CAGR > 80% of backtest → continue / < 50% → stop" rule is statistically
+invalid here: 3 months ≈ 8 trades (~1 trade/2wk, 46% win) — far too few to distinguish a
+working strategy from bad luck; it would tempt killing a fine strategy or trusting noise.
+First months: monitor OPERATIONAL only (fills / auto-roll / sizing execute correctly;
+realized per-trade R distribution + equity vol consistent with backtest). Verdict on edge
+needs **n≥30 trades ≈ 1yr+** via the broker-truth retrospective (as elsewhere in this doc).
 
 **ETF execution path BUILT + live-verified** (except an actual fill, which awaits a signal):
 `contracts.size_shares`, `ib_exec._place_etf_bracket` (SMART Stock bracket), routes ETF vs
