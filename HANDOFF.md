@@ -114,10 +114,15 @@ if a fresh isolation run clears the bar. Checkable once a year, no live data fee
 ### Research status — THIS strategy is closed; the search space is not
 Weekly long-only TSMOM on this ETF universe is **saturated** (every overlay + the universe
 sweep tested; only universe-expansion ever helped, now exhausted at single-ETF granularity).
-That is a verdict on *this strategy*, not on all strategies. Parked future directions (revisit
-only after paper-trading yields broker-truth data — do NOT pre-emptively re-open):
+More precisely: the **price-technical** search is closed (everything derivable from OHLC + TA
+on this universe). Parked future directions (revisit only after paper-trading yields broker-truth
+data — do NOT pre-emptively re-open):
 - **Cross-sectional momentum** — needs a much larger, less-clustered universe (18 correlated
   ETFs collapse it to the already-rejected class-rotation; predicted to fail here).
+- **External / alt-data** (UNTESTED — a different data infrastructure, not a price overlay): macro
+  surprise (CPI/GDP/NFP vs consensus), sentiment (Put/Call, AAII), ETF fund-flows. Genuinely
+  low-correlation in principle, but each needs a new data source + carries high overfit risk on a
+  small event count. Out of scope for the current price-only system; a separate research project.
 - **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
   one is untested but high overfit risk on this sample.
 - **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
