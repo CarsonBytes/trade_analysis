@@ -220,12 +220,24 @@ def sync_closures() -> list[str]:
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, local_symbol, qty, expiry, "
                          "status FROM ib_mirror").fetchall()
-    positions = ib_client.call(lambda: {p.contract.conId: p for p in (ib.positions() or [])})
+    def _snapshot():
+        ib.reqAllOpenOrders()                      # populate orders from any session
+        working = {t.contract.conId for t in (ib.openTrades() or [])
+                   if t.orderStatus.status in
+                   ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
+        return {p.contract.conId: p for p in (ib.positions() or [])}, working
+    positions, working_conids = ib_client.call(_snapshot)
     for paper_id, con_id, local_symbol, qty, expiry, mstatus in rows:
         pt = journal.get(paper_id)
         if pt is None or mstatus == "CLOSED":
             continue
         open_pos = positions.get(con_id)
+        # GUARD: "no position" can mean NOT-YET-FILLED (parent order still working,
+        # e.g. placed while the market was closed), NOT just exited. Only treat it as
+        # closed when there is ALSO no working order for this contract -- otherwise the
+        # trade is pending and would be wrongly closed before it ever fills.
+        if (open_pos is None or open_pos.position == 0) and con_id in working_conids:
+            continue
         # (a) position closed at broker (SL/TP filled) while paper still OPEN ->
         #     resolve the paper trade from the broker's actual exit.
         if open_pos is None or open_pos.position == 0:
