@@ -128,9 +128,14 @@ only after paper-trading yields broker-truth data — do NOT pre-emptively re-op
   DD MORE → ratio falls. Matched-risk kill-test: scaling trend to −8.2% DD (×1.26) gives ≈12.5%
   CAGR > the blend's 11.7% — i.e. **just sizing the core up dominates adding MR.** Cause: MR buys
   dips = adds long exposure during stress, stacking on the trend book; both long → tail-correlated,
-  so MR's low standalone Sharpe (OOS 0.27) can't diversify a higher-Sharpe book. REJECTED as a
-  risk-adjusted improvement. (Open: a risk-BUDGETED blend — hold total risk constant, size MR down
-  — is the only untried variant; low prior given the tail correlation, but it's the one stone left.)
+  so MR's low standalone Sharpe (OOS 0.27) can't diversify a higher-Sharpe book at full size.
+  RISK-BUDGETED blend (--meanrev-budget, size MR down) TESTED 2026-06-23: ratio climbs monotonically
+  as MR shrinks — full 1.43, 0.5x 1.52, 0.33x **1.54** (just above trend-alone 1.52; matched-DD the
+  0.33x blend ~ties/edges trend scaled to -6.8% DD). So a SMALL MR sleeve is frontier-neutral-to-
+  marginally-positive — it stops hurting and adds a sliver of diversification. BUT +1.4% relative
+  ratio / +0.6pp CAGR is an order of magnitude under the ≥10% adoption bar, inside noise, with mild
+  budget-selection risk. VERDICT: not adopted — sub-threshold, and not worth a second counter-trend
+  order type in live execution for ~half a point of CAGR. The 17-ETF trend book remains the answer.
 
 **ETF execution path BUILT + live-verified** (except an actual fill, which awaits a signal):
 `contracts.size_shares`, `ib_exec._place_etf_bracket` (SMART Stock bracket), routes ETF vs

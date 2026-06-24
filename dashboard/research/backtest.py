@@ -150,6 +150,7 @@ MR_ADX_MAX = 20.0     # only act in chop
 MR_Z_ENTRY = -2.0     # long when price <= 2 SD below the 20-bar MA (oversold)
 MR_Z_STOP = -3.0      # stop if it falls to 3 SD (reversion thesis broken)
 MR_WIN = 20           # MA / SD lookback (bars). On --weekly bars this is ~20 weeks.
+MR_RISK_MULT = 1.0    # --meanrev-budget: size the MR sleeve at this fraction of base risk
 
 def _mr_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
     """Long-only oversold mean-reversion, gated to ADX<20. Entry when z<=MR_Z_ENTRY,
@@ -187,7 +188,7 @@ def _mr_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[
         r = paper.r_multiple("long", entry, sl, exit_px, cost_abs=cost_abs)
         out.append({"key": key, "entry_i": i, "entry_date": df.index[i],
                     "exit_date": df.index[min(i + used, n - 1)],
-                    "direction": "long", "r": r})
+                    "direction": "long", "r": r, "risk_mult": MR_RISK_MULT})
         i += used + 1
     return out
 
@@ -294,7 +295,7 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         nid += 1
         cls = active_by_key(c["key"]).asset_class
         risk_money = (equity * risk * _vol_factor() * _class_factor(cls, c["entry_date"])
-                      * _regime_factor(c["entry_date"]))
+                      * _regime_factor(c["entry_date"]) * c.get("risk_mult", 1.0))
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"], "cls": cls,
                          "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"]}
         open_keys.add(c["key"])
@@ -427,6 +428,9 @@ def main():
                          "ADX<20 chop -- tests whether the MR sleeve has any standalone edge")
     ap.add_argument("--meanrev-blend", action="store_true",
                     help="trend book + MR sleeve together (only worth it if --meanrev shows edge)")
+    ap.add_argument("--meanrev-budget", type=float, default=None, metavar="FRAC",
+                    help="risk-budgeted blend: size the MR sleeve at FRAC of base risk (e.g. 0.5) "
+                         "to bound its DD contribution; implies --meanrev-blend")
     ap.add_argument("--pullback", action="store_true",
                     help="enter on a retrace to within 2%% of the 20wk MA (<=2 bars after the "
                          "breakout) instead of on the breakout bar; skip signal if no pullback")
@@ -476,7 +480,11 @@ def main():
     ap.add_argument("--class-weight", action="store_true",
                     help="walk-forward: scale risk by each class's trailing-12mo expR")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, VOLTARGET_FACTOR_CAP, PULLBACK
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT
+    if args.meanrev_budget is not None:
+        MR_RISK_MULT = args.meanrev_budget
+        args.meanrev_blend = True
+        print(f"[MEANREV BUDGET: MR sleeve sized at {MR_RISK_MULT:.0%} of base risk]")
     if args.pullback:
         PULLBACK = True
         print(f"[PULLBACK ENTRY: retrace to <={PULLBACK_BAND:.0%} of 20wk MA within "
