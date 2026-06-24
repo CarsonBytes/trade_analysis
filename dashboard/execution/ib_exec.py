@@ -179,11 +179,15 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
         return f"{t['instrument']}: <1 share at the risk budget, SKIP"
     action = "BUY" if t["direction"] == "long" else "SELL"
     risk_money = equity_usd * paper.RISK_PER_TRADE
+    # US ETFs trade on a $0.01 tick; IB rejects (Error 110) child legs whose price
+    # carries sub-penny precision, leaving the position UNPROTECTED. Round to cents.
+    tp_px = round(float(t["tp"]), 2)
+    sl_px = round(float(t["sl"]), 2)
 
     def send():
         bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
-                                  takeProfitPrice=float(t["tp"]),
-                                  stopLossPrice=float(t["sl"]))
+                                  takeProfitPrice=tp_px,
+                                  stopLossPrice=sl_px)
         bracket.parent.orderType = "MKT"
         bracket.parent.lmtPrice = 0.0
         for o in bracket:
@@ -202,7 +206,7 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
                    dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                    "OPEN", "etf"))
     return (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
-            f"SL {t['sl']} TP {t['tp']}")
+            f"SL {sl_px} TP {tp_px}")
 
 
 def sync_closures() -> list[str]:
