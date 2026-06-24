@@ -193,6 +193,57 @@ def _mr_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[
     return out
 
 
+# --- VIX "sentiment" buy-the-fear entry (external-data test #2) ---------------
+# Hypothesis: a VIX fear spike is a contrarian long signal. Long index ETFs the
+# week AFTER ^VIX closes above VIX_FEAR. Pre-committed params, no tuning. NOTE this
+# is structurally close to the MR dip-buy sleeve (VIX spikes when equities drop),
+# so expect high tail-correlation with both MR and the trend book.
+_VIX_CACHE = None
+VIX_FEAR = 28.0       # elevated-fear threshold (~top decile of weekly VIX history)
+
+def _vix_weekly():
+    global _VIX_CACHE
+    if _VIX_CACHE is None:
+        import yfinance as yf
+        v = yf.download("^VIX", period="max", interval="1wk", progress=False, auto_adjust=True)
+        if hasattr(v.columns, "nlevels") and v.columns.nlevels > 1:
+            v.columns = v.columns.get_level_values(0)
+        s = v["Close"].dropna()
+        if s.index.tz is None:
+            s.index = s.index.tz_localize("UTC")
+        _VIX_CACHE = s
+    return _VIX_CACHE
+
+def _vix_entry_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
+    """Long index ETFs the week after ^VIX closes >= VIX_FEAR (buy the fear). Fixed
+    ATR-SL + RR3-TP via the normal engine. As-of VIX lookup -> no look-ahead."""
+    if "long" not in _DIRECTIONS or active_by_key(key).asset_class != "index":
+        return []
+    H = horizon if horizon is not None else paper.HORIZON_DAYS
+    vix = _vix_weekly()
+    close = df["close"]; n = len(df); out = []; i = 160
+    while i < n - 1:
+        vsub = vix[vix.index <= df.index[i]]
+        if len(vsub) == 0 or float(vsub.iloc[-1]) < VIX_FEAR:
+            i += 1; continue
+        facts, _ = compute_facts(close.iloc[: i + 1], key)
+        res = paper.compute_sltp(facts, "long", "ATR", paper.RR_DEFAULT)
+        if res is None:
+            i += 1; continue
+        entry, sl, tp, _ = res
+        outcome = _resolve_daily("long", entry, sl, tp, df.iloc[i + 1: i + 1 + H])
+        if outcome is None:
+            break
+        status, exit_px, used = outcome
+        spec = contracts.SPECS.get(key)
+        cost_abs = contracts.cost_points(spec) if spec else None
+        r = paper.r_multiple("long", entry, sl, exit_px, cost_abs=cost_abs)
+        out.append({"key": key, "entry_i": i, "entry_date": df.index[i],
+                    "exit_date": df.index[min(i + used, n - 1)], "direction": "long", "r": r})
+        i += used + 1
+    return out
+
+
 VOLTARGET_WINDOW = 20         # trailing CLOSED trades used to estimate vol
 VOLTARGET_FACTOR_CAP = 3.0    # max leverage multiple in calm regimes
 VOLTARGET_FACTOR_FLOOR = 0.25 # min multiple in turbulent regimes
@@ -423,6 +474,8 @@ def main():
     ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
                     help="annualised portfolio vol target (e.g. 0.12); adds a "
                          "vol-targeted vs fixed-risk comparison at 0.5%% risk")
+    ap.add_argument("--vix-entry", action="store_true",
+                    help="VIX sentiment test: long index ETFs the week after ^VIX>=28 (buy fear)")
     ap.add_argument("--meanrev", action="store_true",
                     help="MEAN-REVERSION ONLY (no trend): long-only oversold reversion in "
                          "ADX<20 chop -- tests whether the MR sleeve has any standalone edge")
@@ -579,7 +632,9 @@ def main():
         if len(df) < min_bars:
             continue
         data[inst.key] = df
-        if args.meanrev:                              # MR-only: standalone edge test
+        if args.vix_entry:                            # VIX buy-the-fear: standalone edge test
+            cands += _vix_entry_signals(df, inst.key)
+        elif args.meanrev:                            # MR-only: standalone edge test
             cands += _mr_signals(df, inst.key)
         else:
             cands += _signals(df, inst.key)           # trend (+ MR sleeve if --meanrev-blend)

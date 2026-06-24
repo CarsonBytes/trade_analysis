@@ -119,10 +119,16 @@ on this universe). Parked future directions (revisit only after paper-trading yi
 data — do NOT pre-emptively re-open):
 - **Cross-sectional momentum** — needs a much larger, less-clustered universe (18 correlated
   ETFs collapse it to the already-rejected class-rotation; predicted to fail here).
-- **External / alt-data** (UNTESTED — a different data infrastructure, not a price overlay): macro
-  surprise (CPI/GDP/NFP vs consensus), sentiment (Put/Call, AAII), ETF fund-flows. Genuinely
-  low-correlation in principle, but each needs a new data source + carries high overfit risk on a
-  small event count. Out of scope for the current price-only system; a separate research project.
+- **External / alt-data** — a different data infrastructure, not a price overlay:
+  - **VIX sentiment "buy the fear"** — TESTED 2026-06-24 (`--vix-entry`: long index ETFs the week
+    after ^VIX≥28). REJECTED — classic IS/OOS instability: expR **−0.013 IS** (no edge in the first
+    ~20y) vs +0.544 OOS. The OOS win is QE-era recency luck (2020/2022 V-recoveries), NOT a stable
+    signal; worse than the MR sleeve (which was +edge in BOTH halves). (Also note --vix-regime size
+    overlay was already rejected.) DSR 97% is misleading — it pools the sample, can't see the split.
+  - **Macro surprise** (CPI/GDP/NFP actual-vs-consensus), **ETF fund-flows** — UNTESTED, and NOT
+    testable in the current stack: both need a new external data feed (economic-calendar surprises;
+    issuer creation/redemption data) we don't have. A separate data-acquisition project, not a quick
+    backtest. Cited "macro Sharpe 1.6" etc. are cherry-picked from unrelated universes — not evidence.
 - **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
   one is untested but high overfit risk on this sample.
 - **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
