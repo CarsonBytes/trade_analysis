@@ -449,6 +449,96 @@ def paper_panel() -> None:
 
 
 @ui.refreshable
+def portfolio_panel() -> None:
+    """IBKR portfolio overview in the account base currency (HKD): total value,
+    overall P&L (realized + unrealized), equity line chart, and allocation pie."""
+    from dashboard.core import paper, store
+    from dashboard.data import ib_client
+    from dashboard.execution import broker as _bk
+    if not _bk.is_ib():
+        return
+    acct = service.STATE.get("account") or {}
+    ccy = acct.get("_ccy", "")
+    nl = acct.get("NetLiquidation")
+    cash = acct.get("TotalCashValue")
+    gpv = acct.get("GrossPositionValue")
+    if nl is None:
+        ui.label("Portfolio").classes("text-lg font-bold")
+        ui.label("IBKR account data unavailable (gateway down?).").classes("text-sm text-grey")
+        return
+    positions = service.STATE.get("positions", {})
+    usd_to_base = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)   # USD position vals -> base ccy
+    upnl = sum(p.get("profit", 0.0) for p in positions.values()) * usd_to_base
+    hist, _ts = store.cache_get("equity_history")
+    hist = hist or []
+    base0 = hist[0][1] if hist else nl                        # value when tracking started
+    total_pl = nl - base0
+    pct = (total_pl / base0 * 100.0) if base0 else 0.0
+
+    def _money(x):
+        return f"{ccy} {x:,.0f}"
+
+    def _stat(label, value, color="text-grey-9", tip=""):
+        with ui.column().classes("items-start gap-0"):
+            ui.label(label).classes("text-xs text-grey-6 uppercase")
+            lbl = ui.label(value).classes(f"text-xl font-bold {color}")
+            if tip:
+                lbl.tooltip(tip)
+
+    ui.label("Portfolio").classes("text-lg font-bold")
+    with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
+        _stat("Total value", _money(nl), "text-grey-9",
+              "Net liquidation value of the IBKR paper account")
+        _stat("Total P&L", f"{_money(total_pl)}  ({pct:+.2f}%)",
+              "text-green" if total_pl >= 0 else "text-red",
+              "Account value now minus when tracking began (realized + unrealized)")
+        _stat("Unrealized (open)", _money(upnl),
+              "text-green" if upnl >= 0 else "text-red",
+              "P&L of currently open positions (USD converted at the HKD peg)")
+        if gpv is not None:
+            _stat("Invested", _money(gpv))
+        if cash is not None:
+            _stat("Cash", _money(cash))
+
+    # equity line chart (account value over time, base ccy)
+    if len(hist) >= 2:
+        xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in hist]
+        ys = [h[1] for h in hist]
+        ui.echart({
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
+            "yAxis": {"type": "value", "name": ccy, "scale": True},
+            "series": [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
+                        "lineStyle": {"width": 2},
+                        "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"}}],
+            "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
+        }).classes("w-full h-56").tooltip("Account value (NetLiq) over time")
+    else:
+        ui.label("Equity curve builds as snapshots accrue (~one point / 10 min).")\
+            .classes("text-sm text-grey mt-1")
+
+    # allocation pie (base ccy): each position's market value + idle cash
+    if positions:
+        id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
+        slices = []
+        for pid, p in positions.items():
+            mv_base = (p["volume"] * p["open"] + p.get("profit", 0.0)) * usd_to_base
+            slices.append({"value": round(mv_base, 2), "name": id_to_sym.get(pid, str(pid))})
+        if cash is not None and cash > 0:
+            slices.append({"value": round(cash, 2), "name": "Cash"})
+        if slices:
+            ui.echart({
+                "tooltip": {"trigger": "item",
+                            "formatter": "{b}: " + ccy + " {c} ({d}%)"},
+                "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 10}},
+                "series": [{"type": "pie", "radius": ["40%", "65%"],
+                            "center": ["50%", "45%"], "data": slices,
+                            "label": {"formatter": "{b} {d}%", "fontSize": 10}}],
+            }).classes("w-full h-72").tooltip(
+                f"Allocation by position market value + idle cash ({ccy})")
+
+
+@ui.refreshable
 def active_panel() -> None:
     """Open positions shown on the Board with live unrealized P&L in R."""
     from dashboard.core import paper
@@ -459,36 +549,6 @@ def active_panel() -> None:
                  "qualifying signals.").classes("text-sm text-grey")
         return
     positions = service.STATE.get("positions", {})
-    # portfolio allocation pie: live position market values (USD) + idle cash
-    if positions:
-        slices, deployed = [], 0.0
-        for t in open_t:
-            pos = positions.get(t["id"])
-            if not pos:
-                continue
-            key = t["instrument"]
-            live = service.STATE.get("live", {}).get(key)
-            px = live["price"] if live else pos["open"]
-            val = pos["volume"] * px
-            deployed += val
-            slices.append({"value": round(val, 2), "name": key})
-        acct = service.STATE.get("account") or {}
-        nl = acct.get("NetLiquidation")
-        if nl:                                    # base-ccy NetLiq -> USD (HKD peg) for idle cash
-            from dashboard.data import ib_client
-            nl_usd = nl * ib_client._PEG_USD_PER.get(acct.get("_ccy", ""), 1.0)
-            cash = max(nl_usd - deployed, 0.0)
-            if cash > 0:
-                slices.append({"value": round(cash, 2), "name": "Cash"})
-        if slices:
-            ui.echart({
-                "tooltip": {"trigger": "item", "formatter": "{b}: ${c} ({d}%)"},
-                "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 10}},
-                "series": [{"type": "pie", "radius": ["40%", "65%"],
-                            "center": ["50%", "45%"], "data": slices,
-                            "label": {"formatter": "{b} {d}%", "fontSize": 10}}],
-            }).classes("w-full h-72").tooltip(
-                "Portfolio allocation by live market value (USD); Cash = NetLiq − deployed")
     with ui.row().classes("w-full flex-wrap gap-3"):
         for t in open_t:
             key = t["instrument"]
@@ -508,7 +568,14 @@ def active_panel() -> None:
                     ui.badge(t["direction"],
                              color="positive" if t["direction"] == "long" else "negative")
                 ui.label(f"{price:,.4f}").classes("text-base")
-                pnl = f"  (${pos['profit']:+,.2f})" if pos else ""
+                if pos:                                   # P&L in account base ccy (HKD)
+                    from dashboard.data import ib_client
+                    _acct = service.STATE.get("account") or {}
+                    _ccy = _acct.get("_ccy", "")
+                    _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
+                    pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
+                else:
+                    pnl = ""
                 ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
                 from dashboard.execution import broker as _bk
                 src = f"{_bk.name()} fill" if pos else "paper"
@@ -605,7 +672,7 @@ def retrospective_panel() -> None:
 def _refresh_all_panels() -> None:
     header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
     grid.refresh(); paper_panel.refresh(); active_panel.refresh()
-    gate_panel.refresh(); retrospective_panel.refresh()
+    gate_panel.refresh(); retrospective_panel.refresh(); portfolio_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -831,6 +898,7 @@ def main_page() -> None:
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
             with ui.tab_panel(t_board):
                 macro_banner()
+                portfolio_panel()
                 active_panel()
                 gate_panel()
                 opportunities()

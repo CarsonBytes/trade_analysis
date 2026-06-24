@@ -127,6 +127,20 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["account"] = None
         log.debug("account_summary error: %s", e)
+    # record an equity (NetLiq) snapshot for the portfolio line chart (throttled ~10min)
+    try:
+        acct = STATE.get("account")
+        if acct and acct.get("NetLiquidation") is not None:
+            import time as _time
+            hist, _ts = store.cache_get("equity_history")
+            hist = hist or []
+            now_s = int(_time.time())
+            if not hist or now_s - hist[-1][0] >= 600:
+                hist.append([now_s, round(float(acct["NetLiquidation"]), 2),
+                             acct.get("_ccy", "")])
+                store.cache_set("equity_history", hist[-3000:])
+    except Exception as e:
+        log.debug("equity_history error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
     if STATE["conn"] and STATE["conn"]["ping_ms"] > 300:
         log.warning("MT5 link: %s ping %.0fms (high)", STATE["conn"]["server"],
