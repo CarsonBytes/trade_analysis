@@ -22,12 +22,26 @@ Honest forward ≈ **4–7% CAGR / ~−11% DD** (full-period is the anchor; OOS 
 **Research is SATURATED.** ~13 dimensions tested; the ONLY thing that ever improved the
 strategy is **adding uncorrelated positive-edge markets** (the ETF universe expansion:
 10→16 was +2.8% OOS, 16→18 was +0.6%/flat — see EMB/PFF isolation table below). ALL rejected (with data): wider futures classes,
-vol-targeting (pure leverage), dynamic exits (breakeven/trailing/STRUCT < fixed), shorter
+vol-targeting (LEVERAGE DIAL, no edge at ANY cap — closed 2026-06-23. @3x cap = TRAP: OOS @8%
++20%/-11.5% but FULL DD explodes -10.5%→-27% as it levers into vol spikes. @1.5x cap removes
+the blowup but ratio is IDENTICAL to fixed — full 0.42=0.42, OOS 1.55≈1.54 — i.e. it just
+scales CAGR+DD ~1.5x. Equivalent to raising base risk 0.5%→0.75%; the machinery adds nothing
+over a static risk bump. If more return wanted, bump risk%, don't vol-target), dynamic exits (CLOSED across 1.5-4xATR 2026-06-23: breakeven 0.52 / pure-trail-2R 0.70 / STRUCT
+−0.04 all < fixed 0.81 CAGR/DD; vol-trail chandelier: 3-4xATR ≡ fixed (too wide to bind before
+RR3 TP), and TIGHTER binds but is STRICTLY WORSE — 1.5x = expR 0.259/DD -11.0/ratio 0.62, 2x =
+0.79; cutting winners loses, as TF theory predicts), pullback entry (--pullback, 2026-06-23:
+wait <=2wk for retrace to within 2% of 20wk MA else skip. expR UNCHANGED 0.357→0.351 & win 49%→49%
+= NO entry-timing alpha; but drops 58% of signals 1118→465 — the non-retracing breakouts are the
+strongest runners — so OOS CAGR collapses 9.9%→3.7%, ratio 1.52→0.82. DD "improves" only via idle
+cash. Classic miss-the-runners failure), shorter
 horizons (4–6wk plateau), shorts (net-negative→long-only), concentrated (no-op — de-corr
 buckets empty for futures+ETF), tail-risk circuit breaker (kills CAGR, no DD help),
-class-weighting (worse OOS DD), SPY-regime overlay (hurts diversified book), ADX (halves
-return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kept only
-EMB+PFF). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
+class-weighting (worse OOS DD), SPY-regime overlay (hurts diversified book), VIX-regime size
+ladder (2026-06-23 --vix-regime: +10.1%/-6.5%→+8.4%/-7.7%, worse CAGR AND worse DD despite
+cutting exposure 15% — VIX is coincident/lagging, trend filter already de-risks endogenously;
+same verdict as SPY-regime → regime overlays are redundant on a long-only TSMOM book), ADX
+(halves return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kept only
+EMB+PFF, EMB later dropped — see below). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
 class-momentum; needs 100+ names = idiosyncratic risk we reject). Score on yfinance
 (=F/ETF tickers, fast, = backtest data); IBKR for EXECUTION only.
 
@@ -77,6 +91,46 @@ working strategy from bad luck; it would tempt killing a fine strategy or trusti
 First months: monitor OPERATIONAL only (fills / auto-roll / sizing execute correctly;
 realized per-trade R distribution + equity vol consistent with backtest). Verdict on edge
 needs **n≥30 trades ≈ 1yr+** via the broker-truth retrospective (as elsewhere in this doc).
+
+**Objective stop/review tripwires (use these, NOT a live-CAGR-vs-backtest ratio).** Annualized
+return at n≈30 has a CI wider than any 50–80%-of-backtest band, so a CAGR-ratio gate just
+flips coins. Defensible triggers instead:
+- **Drawdown breach:** realized equity DD exceeds the IS worst case with buffer — **> −13%**
+  (IS −10.7% + ~20%) → halt new entries, review sizing/execution. Regime-independent.
+- **Edge sign at n≥30:** if realized per-trade expR ≤ 0 once n≥30 (broker-truth, costs in R)
+  → the edge has not shown up; stop and investigate. (Backtest expR ≈ +0.36 OOS / +0.17 IS;
+  the honest fail test is *sign*, not magnitude.)
+- **Slippage:** if realized half-spread/fills materially exceed the modeled cost → re-cost,
+  don't blame the strategy.
+- **0.25%-risk return context** (if chosen for the −5–6% DD): sizing is ~linear in risk %, so
+  expect ≈ half the CAGR (~+5% OOS / ~+1% IS). At +1% IS the question "is it worth trading?"
+  is fair — that's the price of capping DD at −5–6%.
+
+**EMB re-add trigger (objective, no spread-tracking):** re-test (do NOT auto-add) if EMB
+outperforms HYG by **>5% over any rolling 12-month window** — i.e. it has decoupled from the
+HYG+TLT blend it's currently redundant to. Outperformance is only a *re-test* signal; only re-add
+if a fresh isolation run clears the bar. Checkable once a year, no live data feed needed.
+
+### Research status — THIS strategy is closed; the search space is not
+Weekly long-only TSMOM on this ETF universe is **saturated** (every overlay + the universe
+sweep tested; only universe-expansion ever helped, now exhausted at single-ETF granularity).
+That is a verdict on *this strategy*, not on all strategies. Parked future directions (revisit
+only after paper-trading yields broker-truth data — do NOT pre-emptively re-open):
+- **Cross-sectional momentum** — needs a much larger, less-clustered universe (18 correlated
+  ETFs collapse it to the already-rejected class-rotation; predicted to fail here).
+- **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
+  one is untested but high overfit risk on this sample.
+- **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
+  THE one positive-edge discovery: long-only oversold reversion (z≤−2 vs 20wk MA, gated ADX<20,
+  TP at the mean) has a REAL standalone OOS edge — expR **+0.451** (> trend's +0.357), PF 1.75,
+  holds OOS (IS +0.523→OOS +0.451), DSR 100%. BUT blending it does NOT improve the frontier:
+  trend+MR = OOS +11.7%/−8.2% (ratio 1.43) vs trend +9.9%/−6.5% (1.52). It raises CAGR but raises
+  DD MORE → ratio falls. Matched-risk kill-test: scaling trend to −8.2% DD (×1.26) gives ≈12.5%
+  CAGR > the blend's 11.7% — i.e. **just sizing the core up dominates adding MR.** Cause: MR buys
+  dips = adds long exposure during stress, stacking on the trend book; both long → tail-correlated,
+  so MR's low standalone Sharpe (OOS 0.27) can't diversify a higher-Sharpe book. REJECTED as a
+  risk-adjusted improvement. (Open: a risk-BUDGETED blend — hold total risk constant, size MR down
+  — is the only untried variant; low prior given the tail correlation, but it's the one stone left.)
 
 **ETF execution path BUILT + live-verified** (except an actual fill, which awaits a signal):
 `contracts.size_shares`, `ib_exec._place_etf_bracket` (SMART Stock bracket), routes ETF vs

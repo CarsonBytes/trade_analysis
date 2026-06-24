@@ -43,6 +43,9 @@ CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): p
                                  # entries when portfolio DD >= stop, resume when DD <= resume
 REGIME: object = None            # --regime: SPY 40wk-MA bull/bear Series; scale size in bears
 REGIME_BEAR_SIZE = 0.40          # position size in a SPY-bear regime (vs 1.0 in bull)
+PULLBACK: bool = False           # --pullback: don't enter on the breakout bar; wait up to
+PULLBACK_WAIT = 2                # ..PULLBACK_WAIT bars for price to retrace within PULLBACK_BAND
+PULLBACK_BAND = 0.02             # ..of the 20wk MA (trend intact, better entry); else skip signal
 CLASS_WEIGHT: bool = False       # --class-weight: scale risk by a class's trailing-12mo
                                  # realized expR (walk-forward; tilt toward recent winners)
 CLUSTER: bool = False            # --cluster: de-correlate by ASSET CLASS (one open
@@ -97,13 +100,32 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
         obj = confidence_model.objective(score)        # s5 passes; included for parity
         if obj and obj[2] >= confidence_model.MIN_SAMPLES and obj[1] < paper.MIN_EDGE_R:
             i += 1; continue
+        entry_i = i                                    # breakout bar (default entry)
+        if PULLBACK:
+            # wait for price to retrace within PULLBACK_BAND of the 20wk MA while the
+            # trend stays intact; enter on that bar (recompute SL/TP there). No look-ahead:
+            # only bars > i are inspected and entry uses that bar's own close.
+            ma20 = close.rolling(20).mean()
+            j = None
+            for k in range(i + 1, min(i + 1 + PULLBACK_WAIT, n)):
+                m = ma20.iloc[k]
+                if not (m == m):
+                    continue
+                near = abs(close.iloc[k] - m) <= PULLBACK_BAND * m
+                intact = (close.iloc[k] > m) if direction == "long" else (close.iloc[k] < m)
+                if near and intact:
+                    j = k; break
+            if j is None:
+                i += 1; continue                       # no pullback -> skip the signal
+            entry_i = j
+            facts, _ = compute_facts(close.iloc[: entry_i + 1], key)
         res = paper.compute_sltp(facts, direction, sl_method, paper.RR_DEFAULT)
         if res is None:
-            i += 1; continue
+            i = entry_i + 1; continue
         entry, sl, tp, rr_act = res
         if rr_act < paper.MIN_RR:
-            i += 1; continue
-        bars = df.iloc[i + 1: i + 1 + H]
+            i = entry_i + 1; continue
+        bars = df.iloc[entry_i + 1: entry_i + 1 + H]
         outcome = resolve(direction, entry, sl, tp, bars)
         if outcome is None:
             break
@@ -113,9 +135,59 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
         spec = contracts.SPECS.get(key)
         cost_abs = contracts.cost_points(spec) if spec else None
         r = paper.r_multiple(direction, entry, sl, exit_px, cost_abs=cost_abs)
+        out.append({"key": key, "entry_i": entry_i, "entry_date": df.index[entry_i],
+                    "exit_date": df.index[min(entry_i + used, n - 1)],
+                    "direction": direction, "r": r})
+        i = entry_i + used + 1
+    return out
+
+
+# --- mean-reversion sub-strategy (the ONE untested return source) -------------
+# Hypothesis: in non-trending (ADX<20) chop, a long-only oversold-reversion sleeve
+# adds low-correlation edge the trend book misses. Pre-committed params, no tuning;
+# judged on standalone OOS expR FIRST (a negative-edge sleeve can't help a blend).
+MR_ADX_MAX = 20.0     # only act in chop
+MR_Z_ENTRY = -2.0     # long when price <= 2 SD below the 20-bar MA (oversold)
+MR_Z_STOP = -3.0      # stop if it falls to 3 SD (reversion thesis broken)
+MR_WIN = 20           # MA / SD lookback (bars). On --weekly bars this is ~20 weeks.
+
+def _mr_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
+    """Long-only oversold mean-reversion, gated to ADX<20. Entry when z<=MR_Z_ENTRY,
+    TP back at the MA (z=0), SL at MR_Z_STOP, time-capped at `horizon`. Reuses the
+    fixed-exit engine (_resolve_daily). No look-ahead: bars after entry only."""
+    if "long" not in _DIRECTIONS:                  # long-only sleeve
+        return []
+    if paper.WEEKLY_TREND_CLASSES and active_by_key(key).asset_class not in paper.WEEKLY_TREND_CLASSES:
+        return []
+    H = horizon if horizon is not None else paper.HORIZON_DAYS
+    close = df["close"]; n = len(df)
+    ma = close.rolling(MR_WIN).mean()
+    sd = close.rolling(MR_WIN).std(ddof=1)
+    adx = _adx(df)
+    i = 160; out = []
+    while i < n - 1:
+        m, s, a = ma.iloc[i], sd.iloc[i], adx.iloc[i]
+        if not (m == m and s == s and a == a) or s <= 0 or a >= MR_ADX_MAX:
+            i += 1; continue
+        z = (close.iloc[i] - m) / s
+        if z > MR_Z_ENTRY:                          # not oversold enough
+            i += 1; continue
+        entry = close.iloc[i]
+        sl = m + MR_Z_STOP * s                      # below entry (z=-3 line)
+        tp = m                                      # reversion target = the mean
+        if not (sl < entry < tp):                   # sanity: long needs sl<entry<tp
+            i += 1; continue
+        bars = df.iloc[i + 1: i + 1 + H]
+        outcome = _resolve_daily("long", entry, sl, tp, bars)
+        if outcome is None:
+            break
+        status, exit_px, used = outcome
+        spec = contracts.SPECS.get(key)
+        cost_abs = contracts.cost_points(spec) if spec else None
+        r = paper.r_multiple("long", entry, sl, exit_px, cost_abs=cost_abs)
         out.append({"key": key, "entry_i": i, "entry_date": df.index[i],
                     "exit_date": df.index[min(i + used, n - 1)],
-                    "direction": direction, "r": r})
+                    "direction": "long", "r": r})
         i += used + 1
     return out
 
@@ -166,7 +238,12 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         sub = REGIME[REGIME.index <= asof]
         if len(sub) == 0:
             return 1.0
-        return 1.0 if bool(sub.iloc[-1]) else REGIME_BEAR_SIZE
+        v = sub.iloc[-1]
+        # bool Series (--regime SPY MA): True=full, False=bear. float Series
+        # (--vix-regime): the value IS the size multiplier (graduated ladder).
+        if REGIME.dtype == bool:
+            return 1.0 if bool(v) else REGIME_BEAR_SIZE
+        return float(v)
 
     def _vol_factor() -> float:
         if target_vol is None or len(realized) < VOLTARGET_WINDOW:
@@ -345,6 +422,17 @@ def main():
     ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
                     help="annualised portfolio vol target (e.g. 0.12); adds a "
                          "vol-targeted vs fixed-risk comparison at 0.5%% risk")
+    ap.add_argument("--meanrev", action="store_true",
+                    help="MEAN-REVERSION ONLY (no trend): long-only oversold reversion in "
+                         "ADX<20 chop -- tests whether the MR sleeve has any standalone edge")
+    ap.add_argument("--meanrev-blend", action="store_true",
+                    help="trend book + MR sleeve together (only worth it if --meanrev shows edge)")
+    ap.add_argument("--pullback", action="store_true",
+                    help="enter on a retrace to within 2%% of the 20wk MA (<=2 bars after the "
+                         "breakout) instead of on the breakout bar; skip signal if no pullback")
+    ap.add_argument("--voltarget-cap", type=float, default=None, metavar="X",
+                    help="override the max vol-target leverage multiple (default 3.0); "
+                         "e.g. 1.5 to test a 'mild' vol-target that bounds the tail")
     ap.add_argument("--ddreport", action="store_true",
                     help="REAL drawdown-frequency analysis (episodes by depth) at "
                          "0.5/1.0/1.5%% risk -- the honest 'how often / how deep'")
@@ -382,10 +470,20 @@ def main():
     ap.add_argument("--regime", action="store_true",
                     help="regime overlay: scale ALL position sizes to 40%% when SPY is "
                          "below its 40wk MA (equity bear) -- tests if it helps a diversified book")
+    ap.add_argument("--vix-regime", action="store_true",
+                    help="regime overlay: graduated VIX size ladder (forward-looking, applied "
+                         "to sizing not entry) -- VIX<20=100%%, <25=75%%, <30=50%%, else 25%%")
     ap.add_argument("--class-weight", action="store_true",
                     help="walk-forward: scale risk by each class's trailing-12mo expR")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, VOLTARGET_FACTOR_CAP, PULLBACK
+    if args.pullback:
+        PULLBACK = True
+        print(f"[PULLBACK ENTRY: retrace to <={PULLBACK_BAND:.0%} of 20wk MA within "
+              f"{PULLBACK_WAIT} bars, else skip]")
+    if args.voltarget_cap is not None:
+        VOLTARGET_FACTOR_CAP = args.voltarget_cap
+        print(f"[VOLTARGET CAP override: max leverage {VOLTARGET_FACTOR_CAP}x]")
     if args.class_weight:
         CLASS_WEIGHT = True
         print("[CLASS-WEIGHT: risk scaled by trailing-12mo class expR (0.25-2.0x)]")
@@ -473,12 +571,34 @@ def main():
         if len(df) < min_bars:
             continue
         data[inst.key] = df
-        cands += _signals(df, inst.key)
+        if args.meanrev:                              # MR-only: standalone edge test
+            cands += _mr_signals(df, inst.key)
+        else:
+            cands += _signals(df, inst.key)           # trend (+ MR sleeve if --meanrev-blend)
+            if args.meanrev_blend:
+                cands += _mr_signals(df, inst.key)
     if args.regime and "SPY" in data:                 # SPY 40wk-MA bull/bear overlay
         global REGIME
         spy = data["SPY"]["close"]
         REGIME = (spy > spy.rolling(40).mean())        # True = bull (above 40wk MA)
         print(f"[REGIME: SPY 40wk-MA -- size {REGIME_BEAR_SIZE:.0%} in bear, 100% in bull]")
+    if args.vix_regime:                               # graduated VIX size ladder (float Series)
+        import yfinance as yf
+        vraw = yf.download("^VIX", period="max", interval="1wk", progress=False, auto_adjust=True)
+        if vraw is not None and len(vraw):
+            if hasattr(vraw.columns, "nlevels") and vraw.columns.nlevels > 1:
+                vraw.columns = vraw.columns.get_level_values(0)
+            vix = vraw["Close"].dropna()
+            if vix.index.tz is None:
+                vix.index = vix.index.tz_localize("UTC")
+            # ladder: <20=100%, <25=75%, <30=50%, else 25%. as-of lookup in _regime_factor
+            # uses VIX up to entry week -> forward-looking signal, applied to SIZE not entry.
+            REGIME = vix.apply(lambda v: 1.0 if v < 20 else 0.75 if v < 25
+                               else 0.50 if v < 30 else 0.25).astype(float)
+            print(f"[VIX-REGIME: size ladder <20=100%/<25=75%/<30=50%/else 25% "
+                  f"(n={len(REGIME)}wk, mean mult {REGIME.mean():.2f})]")
+        else:
+            print("[VIX-REGIME: ^VIX fetch failed -- overlay OFF]")
     span = max(df.index[-1] for df in data.values()) - min(df.index[0] for df in data.values())
     years = span.days / 365.25
     if args.horizon_curve:
@@ -648,6 +768,8 @@ def _exit_test(data, span, years) -> None:
         "STRUCT SL/TP":       ("STRUCT", None),
         "breakeven @+1R":     ("ATR",    partial(_resolve_daily, breakeven_at=1.0)),
         "pure trail 2R arm0": ("ATR",    partial(_resolve_trail, arm_r=0.0, dist_r=2.0)),
+        "vol-trail 1.5xATR":  ("ATR",    partial(_resolve_voltrail, mult=1.5)),
+        "vol-trail 2xATR":    ("ATR",    partial(_resolve_voltrail, mult=2.0)),
         "vol-trail 3xATR":    ("ATR",    partial(_resolve_voltrail, mult=3.0)),
         "vol-trail 4xATR":    ("ATR",    partial(_resolve_voltrail, mult=4.0)),
     }
