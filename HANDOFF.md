@@ -120,11 +120,12 @@ data — do NOT pre-emptively re-open):
 - **Cross-sectional momentum** — needs a much larger, less-clustered universe (18 correlated
   ETFs collapse it to the already-rejected class-rotation; predicted to fail here).
 - **External / alt-data** — a different data infrastructure, not a price overlay:
-  - **VIX sentiment "buy the fear"** — TESTED 2026-06-24 (`--vix-entry`: long index ETFs the week
-    after ^VIX≥28). REJECTED — classic IS/OOS instability: expR **−0.013 IS** (no edge in the first
-    ~20y) vs +0.544 OOS. The OOS win is QE-era recency luck (2020/2022 V-recoveries), NOT a stable
-    signal; worse than the MR sleeve (which was +edge in BOTH halves). (Also note --vix-regime size
-    overlay was already rejected.) DSR 97% is misleading — it pools the sample, can't see the split.
+  - **VIX sentiment "buy the fear"** — TESTED 2026-06-24 (`--vix-entry`, VIX_CLASS env to pick the
+    bought class). REJECTED across ALL flavors: index (long SPY/QQQ on ^VIX≥28) = IS/OOS instability
+    expR −0.013 IS vs +0.544 OOS (QE-era recency luck, not stable); metal (GLD/SLV) +0.199 weak;
+    rate (TLT/IEF) +0.157 weak w/ −11.9% DD. All far below trend & the MR sleeve (+0.451). Since CNN
+    Fear&Greed is ~a VIX proxy (built from VIX+put/call+momentum), this also stands in for the doc's
+    untestable "F&G<20→TLT" — no edge. (--vix-regime size overlay was already separately rejected.)
   - **Macro surprise** (CPI/GDP/NFP actual-vs-consensus), **ETF fund-flows** — UNTESTED, and NOT
     testable in the current stack: both need a new external data feed (economic-calendar surprises;
     issuer creation/redemption data) we don't have. A separate data-acquisition project, not a quick

@@ -217,7 +217,9 @@ def _vix_weekly():
 def _vix_entry_signals(df: pd.DataFrame, key: str, horizon: int | None = None) -> list[dict]:
     """Long index ETFs the week after ^VIX closes >= VIX_FEAR (buy the fear). Fixed
     ATR-SL + RR3-TP via the normal engine. As-of VIX lookup -> no look-ahead."""
-    if "long" not in _DIRECTIONS or active_by_key(key).asset_class != "index":
+    import os as _os
+    _want_cls = _os.environ.get("VIX_CLASS", "index")   # which class to buy on a fear spike
+    if "long" not in _DIRECTIONS or active_by_key(key).asset_class != _want_cls:
         return []
     H = horizon if horizon is not None else paper.HORIZON_DAYS
     vix = _vix_weekly()
