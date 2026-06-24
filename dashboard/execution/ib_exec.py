@@ -220,13 +220,16 @@ def sync_closures() -> list[str]:
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, local_symbol, qty, expiry, "
                          "status FROM ib_mirror").fetchall()
-    def _snapshot():
-        ib.reqAllOpenOrders()                      # populate orders from any session
-        working = {t.contract.conId for t in (ib.openTrades() or [])
-                   if t.orderStatus.status in
-                   ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
-        return {p.contract.conId: p for p in (ib.positions() or [])}, working
-    positions, working_conids = ib_client.call(_snapshot)
+    # async order request runs on the loop thread via _run (the sync reqAllOpenOrders
+    # wrapper would try to start the already-running loop -> RuntimeError). Wrap in a
+    # coroutine since the *Async method returns a Future, not a bare coroutine.
+    async def _fetch_orders():
+        return await ib.reqAllOpenOrdersAsync()
+    open_trades = ib_client._run(_fetch_orders()) or []
+    working_conids = {t.contract.conId for t in open_trades
+                      if t.orderStatus.status in
+                      ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
+    positions = ib_client.call(lambda: {p.contract.conId: p for p in (ib.positions() or [])})
     for paper_id, con_id, local_symbol, qty, expiry, mstatus in rows:
         pt = journal.get(paper_id)
         if pt is None or mstatus == "CLOSED":

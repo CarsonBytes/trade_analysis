@@ -459,6 +459,36 @@ def active_panel() -> None:
                  "qualifying signals.").classes("text-sm text-grey")
         return
     positions = service.STATE.get("positions", {})
+    # portfolio allocation pie: live position market values (USD) + idle cash
+    if positions:
+        slices, deployed = [], 0.0
+        for t in open_t:
+            pos = positions.get(t["id"])
+            if not pos:
+                continue
+            key = t["instrument"]
+            live = service.STATE.get("live", {}).get(key)
+            px = live["price"] if live else pos["open"]
+            val = pos["volume"] * px
+            deployed += val
+            slices.append({"value": round(val, 2), "name": key})
+        acct = service.STATE.get("account") or {}
+        nl = acct.get("NetLiquidation")
+        if nl:                                    # base-ccy NetLiq -> USD (HKD peg) for idle cash
+            from dashboard.data import ib_client
+            nl_usd = nl * ib_client._PEG_USD_PER.get(acct.get("_ccy", ""), 1.0)
+            cash = max(nl_usd - deployed, 0.0)
+            if cash > 0:
+                slices.append({"value": round(cash, 2), "name": "Cash"})
+        if slices:
+            ui.echart({
+                "tooltip": {"trigger": "item", "formatter": "{b}: ${c} ({d}%)"},
+                "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 10}},
+                "series": [{"type": "pie", "radius": ["40%", "65%"],
+                            "center": ["50%", "45%"], "data": slices,
+                            "label": {"formatter": "{b} {d}%", "fontSize": 10}}],
+            }).classes("w-full h-72").tooltip(
+                "Portfolio allocation by live market value (USD); Cash = NetLiq − deployed")
     with ui.row().classes("w-full flex-wrap gap-3"):
         for t in open_t:
             key = t["instrument"]
