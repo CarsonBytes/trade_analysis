@@ -1,7 +1,50 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-06-22.
+Last updated 2026-06-25.
+
+---
+
+## ⭐⭐⭐ ADOPTED PLAN & FIGURES (single source of truth, 2026-06-25)
+
+**LIVE on IBKR paper since 2026-06-24** — `BROKER=ib` + `UNIVERSE=etf`, account DUK968178
+(~US$130k / 1.01M HKD), port 4002. Restart: `Stop/Start-ScheduledTask DashboardApp`.
+
+**Strategy = 17-ETF long-only weekly TSMOM @ 0.5% risk.**
+- Universe (17): GLD·SLV·CPER / SPY·QQQ·DIA·IWM / IEF·TLT·SHY / HYG·TIP·EFA·EEM·DBC·VNQ·**PFF**
+  (EMB dropped — redundant vs HYG+TLT).
+- 5-week horizon (~3.3wk avg hold), fixed ATR stop + 3:1 RR target, equal-risk sizing (risk
+  parity), no vol-targeting. ~32-33 trades/yr. Quality (risk-independent): PF **1.52**, win 46%,
+  expR +0.27R, DSR 100%.
+
+**Headline backtest @ 0.5% risk (33.4y longweekly) — the numbers to plan around:**
+
+| Period | CAGR | Max DD |
+|---|---|---|
+| **Full history ~33y** (HONEST ANCHOR) | **+4.4–4.7%** | **−10.5 to −11%** |
+| Recent ~13y (OOS — bull-flattered) | +10.0% | −6.5% |
+| Older ~20y (IS — weak regime) | +2.4% | −10.5% |
+
+→ **Plan around ~4–7% CAGR / ~−11% worst-case DD.** The +10% is the OPTIMISTIC recent case,
+NOT the all-history baseline. (Common confusion: "10%" = recent OOS, not full history.)
+
+**Risk dial (full-history; pure leverage — CAGR/DD ratio constant ~0.42):**
+
+| Risk/trade | CAGR (full) | Max DD | (recent-OOS CAGR ≈ 2×) |
+|---|---|---|---|
+| 0.25% | +2.2% | −5.4% | ~+5% |
+| **0.5% (LIVE)** | **+4.4%** | **−10.5%** | **~+10%** |
+| 1.0% | +8.5% | −20.1% | ~+20% |
+
+Note: a SHORTER recent-only window (non-`--longweekly`) shows OOS ~+18-19% @ 0.5% — the most
+bull-flattered slice; do NOT plan around it. The 20% figure = either that, or 1% risk.
+
+**Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
+16+EMB 1.54, **16+PFF=17 ADOPTED 1.55**, 18 1.47. 16→17→18 is sampling noise → universe SATURATED.
+
+**Everything else REJECTED (see detailed sections below):** vol-targeting (leverage trap),
+SPY/VIX regime overlays, pullback entry, all dynamic exits, MR sleeve (only +edge but sub-threshold),
+XSMOM, VIX-sentiment, macro/flows (no data), prop-firm fit (poor). Research COMPLETE.
 
 ---
 
