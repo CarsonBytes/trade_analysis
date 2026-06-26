@@ -66,9 +66,14 @@ strategy returns are negatively correlated, so you can't pair best-case strategy
 cash). That curve = **+5.7% full-history nominal @ 0.5%** (NOT 4.4%+2.7%=7.1%). Quote REAL returns:
 −~2.5% inflation → **~+3% real (full-history) / ~+2% real strategy-only**. The +10-12% "recent"
 is a ZIRP+tech-bull ANOMALY — anchor on full-history, never forecast off it.
-**Cash lever SCALES WITH ACCOUNT SIZE:** IBKR pays the full cash rate only at NAV≥$100k and scales
-DOWN proportionally below that — a ~$12.8k (HK$100k) account earns ~13% of full rate ≈ **+0.3-0.5%**;
-the ~$130k paper account (>$100k) ≈ **+2.5%**. So the all-in REAL expectation is ~+2-3% on a small
+**Cash lever & account size — SGOV bypasses IB's small-account throttle:** IBKR's *direct* cash
+interest is throttled below NAV $100k (a ~$12.8k acct earns ~13% of full rate ≈ +0.3-0.5%). BUT
+**SGOV (0-3mo T-bill ETF) pays its ~5% yield regardless of NAV** — so on a SMALL account, parking
+idle USD cash in SGOV recovers the FULL ~+1.5-2.5% (current rates) that IB direct interest would
+throttle. So the cash lever is ~+2% even on a small account IF via SGOV (not IB interest). Caveat:
+needs HKD→USD + sell-SGOV-to-trade (T+1 friction) — do it MANUALLY at small size, don't auto-code
+yet. (Rejected refinements: weekly contribution-splitting = DCA drag, return-negative + moot vs
+signal-driven entries; rebalance dead-band = redundant, strategy already gates on trend-strength≥5.) So the all-in REAL expectation is ~+2-3% on a small
 live account, ~+3-3.5% real once NAV>$100k & cash USD-optimised. Value = low-DD low-stress real
 positive return; the growth engine is CONTRIBUTIONS + capital, not overlays.
 
