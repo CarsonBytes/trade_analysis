@@ -877,6 +877,43 @@ def _direction_test(data, span, years) -> None:
           "OOS CAGR and CAGR/DD (a real asymmetry, not noise).")
 
 
+def _resolve_partial(direction, entry, sl, tp, bars, take_r=1.5, take_frac=0.5):
+    """PARTIAL profit-taking: bank `take_frac` of the position at +take_r and move the
+    stop to breakeven for the rest, which runs to the original TP (or BE / time). Returns
+    a synthetic exit price encoding the BLENDED R so r_multiple recovers it."""
+    risk = abs(entry - sl)
+    if risk <= 0 or len(bars) == 0:
+        return None
+    rr = abs(tp - entry) / risk
+    sgn = 1 if direction == "long" else -1
+    take_lvl = entry + sgn * take_r * risk
+    be, done = entry, False
+
+    def _blend(rest):
+        return take_frac * take_r + (1 - take_frac) * rest
+
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo = row["high"], row["low"]
+        fav, adv = (hi, lo) if direction == "long" else (lo, hi)
+        if not done:
+            if (adv <= sl if direction == "long" else adv >= sl):
+                return "LOSS", sl, n                       # full stop before any partial
+            if (fav >= tp if direction == "long" else fav <= tp):
+                return "WIN", tp, n                        # full TP (rare: take_r < RR)
+            if (fav >= take_lvl if direction == "long" else fav <= take_lvl):
+                done = True                                # bank half, stop -> breakeven
+        else:
+            if (fav >= tp if direction == "long" else fav <= tp):
+                return "WIN", entry + sgn * _blend(rr) * risk, n
+            if (adv <= be if direction == "long" else adv >= be):
+                b = _blend(0.0)
+                return ("WIN" if b > 0 else "LOSS"), entry + sgn * b * risk, n
+    last = float(bars["close"].iloc[-1])
+    rest = sgn * (last - entry) / risk
+    b = _blend(rest) if done else rest
+    return "EXPIRED", entry + sgn * b * risk, len(bars)
+
+
 def _exit_test(data, span, years) -> None:
     """Pre-specified EXIT-METHOD comparison on the CURRENT locked config (the prior
     breakeven test was on the old spot/daily universe -- doesn't transfer). One run,
@@ -899,6 +936,9 @@ def _exit_test(data, span, years) -> None:
         "vol-trail 2xATR":    ("ATR",    partial(_resolve_voltrail, mult=2.0)),
         "vol-trail 3xATR":    ("ATR",    partial(_resolve_voltrail, mult=3.0)),
         "vol-trail 4xATR":    ("ATR",    partial(_resolve_voltrail, mult=4.0)),
+        "partial 50%@1.5R+BE": ("ATR",   partial(_resolve_partial, take_r=1.5, take_frac=0.5)),
+        "partial 50%@2R+BE":  ("ATR",    partial(_resolve_partial, take_r=2.0, take_frac=0.5)),
+        "partial 33%@1R+BE":  ("ATR",    partial(_resolve_partial, take_r=1.0, take_frac=0.33)),
     }
     cut = min(min(df.index) for df in data.values()) + (span * 0.6)
     print("\nEXIT-METHOD TEST (current config: {metal,index,rate}, 5wk, RR3, "

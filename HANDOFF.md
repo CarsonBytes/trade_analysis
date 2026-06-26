@@ -47,7 +47,12 @@ and is rate-regime dependent: ~0 in the 2010-21 zero era (so OOS uplift only +0.
 at today's ~4% rates with ~60% idle. **Forward total @ current rates ≈ 7% (full-hist anchor) to
 ~12-13% (recent).** On a real IBKR account this is ~AUTOMATIC (IBKR pays interest on idle cash) —
 no need to buy BIL/SHV. This is the ONLY "execution-layer" lever that survived (trade-cost/tax
-optimisation are negligible for a liquid, ~3wk-hold strategy).
+optimisation are negligible for a liquid, ~3wk-hold strategy; partial-profit-taking, limit-order
+execution, rebalance thresholds, SGOV-arb, rate-linked risk all rejected/marginal).
+**HKD CAVEAT:** the +2.7% assumes USD T-bill yield on ALL idle cash. This account is HKD-base, IB
+pays 0% on the first $10k then benchmark−0.5%, and idle HKD earns HKD (not USD) rates — so the
+REAL uplift is likely **~+0.5-1.5%** unless most cash is converted to USD with NAV>$10k. It's a
+rate-environment bonus, not alpha.
 
 **Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
 16+EMB 1.54, **16+PFF=17 ADOPTED 1.55**, 18 1.47. 16→17→18 is sampling noise → universe SATURATED.
@@ -87,7 +92,9 @@ scales CAGR+DD ~1.5x. Equivalent to raising base risk 0.5%→0.75%; the machiner
 over a static risk bump. If more return wanted, bump risk%, don't vol-target), dynamic exits (CLOSED across 1.5-4xATR 2026-06-23: breakeven 0.52 / pure-trail-2R 0.70 / STRUCT
 −0.04 all < fixed 0.81 CAGR/DD; vol-trail chandelier: 3-4xATR ≡ fixed (too wide to bind before
 RR3 TP), and TIGHTER binds but is STRICTLY WORSE — 1.5x = expR 0.259/DD -11.0/ratio 0.62, 2x =
-0.79; cutting winners loses, as TF theory predicts), pullback entry (--pullback, 2026-06-23:
+0.79; PARTIAL profit-taking also REJECTED 2026-06-25 — 50%@1.5R/2R/33%@1R +BE all < fixed on
+BOTH expR & ratio (0.73/0.78/0.51 vs 0.81); raises win% 48→51-56% but caps the fat-tail winners,
+classic win-rate-vs-expectancy trap; cutting winners loses, as TF theory predicts), pullback entry (--pullback, 2026-06-23:
 wait <=2wk for retrace to within 2% of 20wk MA else skip. expR UNCHANGED 0.357→0.351 & win 49%→49%
 = NO entry-timing alpha; but drops 58% of signals 1118→465 — the non-retracing breakouts are the
 strongest runners — so OOS CAGR collapses 9.9%→3.7%, ratio 1.52→0.82. DD "improves" only via idle
