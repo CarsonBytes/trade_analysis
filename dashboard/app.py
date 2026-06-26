@@ -563,28 +563,31 @@ def portfolio_panel() -> None:
     # allocation pie: strategy positions + SGOV + buffer cash, dual-currency on hover
     id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
     base_to_usd = 1.0 / usd_to_base if usd_to_base else 0.0   # base ccy -> USD
-    slices = []
-
-    def _slice(name_short, base_val, usd_val):
-        # name carries BOTH currencies so the tooltip shows actual (USD) + converted (ccy)
-        slices.append({"value": round(base_val, 2),
-                       "name": f"{name_short}  ·  ${usd_val:,.0f} USD"})
+    raw = []  # (short_name, base_value, usd_value)
     for pid, p in positions.items():
         mv_usd = p["volume"] * p["open"] + p.get("profit", 0.0)
-        _slice(id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd)
+        raw.append((id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd))
     if sgov_base > 0:
-        _slice("SGOV ~5%", sgov_base, sgov_base * base_to_usd)
+        raw.append(("SGOV ~5%", sgov_base, sgov_base * base_to_usd))
     if cash is not None and cash > 0:
-        _slice("Cash buffer", cash, cash * base_to_usd)
+        raw.append(("Cash buffer", cash, cash * base_to_usd))
+    total_base = sum(b for _, b, _ in raw) or 1.0
+    # FULLY precomputed labels (USD actual + ccy converted + %) baked into the slice name
+    # -> no ECharts {..} templates rendered; details sit on each slice's title, not the tooltip.
+    slices = [{"value": round(b, 2),
+               "name": f"{s} {b / total_base * 100:.0f}%\n${u:,.0f} / {ccy} {b:,.0f}"}
+              for s, b, u in raw]
     if slices:
         ui.echart({
-            "tooltip": {"trigger": "item", "formatter": "{b}<br/>" + ccy + " {c}  ({d}%)"},
-            "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 9}},
-            "series": [{"type": "pie", "radius": ["40%", "65%"],
-                        "center": ["50%", "45%"], "data": slices,
-                        "label": {"formatter": "{d}%", "fontSize": 10}}],
-        }).classes("w-full h-72").tooltip(
-            f"Allocation — each slice shows USD (actual) + {ccy} (converted)")
+            "tooltip": {"show": False},
+            "legend": {"show": False},
+            "series": [{"type": "pie", "radius": ["35%", "60%"],
+                        "center": ["50%", "50%"], "data": slices,
+                        "label": {"show": True, "position": "outside", "fontSize": 9,
+                                  "formatter": "{b}"},
+                        "labelLine": {"show": True}}],
+        }).classes("w-full h-80").tooltip(
+            f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
 @ui.refreshable
