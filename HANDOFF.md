@@ -58,8 +58,19 @@ actionable fix is ops, not research: (1) hold idle cash in USD (convert HKD→US
 5-6% debit. Realistic uplift: **~+0.5-1.5% if left in HKD, ~+2.5% if converted to USD**. NOT
 backtestable (FX/IB-tiers/fills aren't in price data); NOT alpha (rate bonus, ~0 if USD rates→0).
 Rejected/skip: TWAP-VWAP order-splitting (market impact ~0 at $130k on liquid ETFs); limit orders
-= minor cheap insurance only (weekly/liquid book, not intraday). So forward TOTAL @ current rates
-≈ **~7% (full anchor) to ~12% (recent), IF cash is USD-optimised.**
+= minor cheap insurance only (weekly/liquid book, not intraday).
+
+**HONEST NUMBER (do NOT naively add strategy + cash):** the proper total is the `--cash-yield`
+backtest CURVE (correlation-aware: when deployed you hold less idle cash → less interest; cash &
+strategy returns are negatively correlated, so you can't pair best-case strategy with best-case
+cash). That curve = **+5.7% full-history nominal @ 0.5%** (NOT 4.4%+2.7%=7.1%). Quote REAL returns:
+−~2.5% inflation → **~+3% real (full-history) / ~+2% real strategy-only**. The +10-12% "recent"
+is a ZIRP+tech-bull ANOMALY — anchor on full-history, never forecast off it.
+**Cash lever SCALES WITH ACCOUNT SIZE:** IBKR pays the full cash rate only at NAV≥$100k and scales
+DOWN proportionally below that — a ~$12.8k (HK$100k) account earns ~13% of full rate ≈ **+0.3-0.5%**;
+the ~$130k paper account (>$100k) ≈ **+2.5%**. So the all-in REAL expectation is ~+2-3% on a small
+live account, ~+3-3.5% real once NAV>$100k & cash USD-optimised. Value = low-DD low-stress real
+positive return; the growth engine is CONTRIBUTIONS + capital, not overlays.
 
 **Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
 16+EMB 1.54, **16+PFF=17 ADOPTED 1.55**, 18 1.47. 16→17→18 is sampling noise → universe SATURATED.
