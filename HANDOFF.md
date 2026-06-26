@@ -149,6 +149,28 @@ data — do NOT pre-emptively re-open):
   budget-selection risk. VERDICT: not adopted — sub-threshold, and not worth a second counter-trend
   order type in live execution for ~half a point of CAGR. The 17-ETF trend book remains the answer.
 
+### Prop-firm fit (The5ers Bootcamp) — ANALYSED 2026-06-25, not worth the time
+Question: trade this strategy on a 3-step funded-trader challenge (rules: +6% target per step,
+**5% static max-loss** from step start, no time limit, ~$95, FX/index-CFD/metal-CFD on MT5 —
+NO ETFs). Verdict: **poor fit; cheap one-off gamble at best, not a time investment.**
+- **Universe mismatch:** only ~7 of 17 ETFs map to CFDs (index→US500/NAS100/US30/US2000,
+  metal→XAU/XAG, commodity). The bonds/credit/intl/REIT diversifiers that DRIVE the edge aren't
+  CFD-tradeable. That subset (index+metal+commodity, longweekly) = **+2.5% full CAGR / −10.5% DD**
+  — half the return, same bad DD → breaches a 5% limit.
+- **Gold-only** is the strongest single CFD market (GLD weekly trend: mean **+0.49R**, 52% win,
+  ~3.2 trades/yr, 69 trades/21.6y). Monte-Carlo barrier pass-prob (`dashboard/research/prop_passprob.py`,
+  bootstrap, static 6%-before-5%): high odds only at impractical timescales —
+  0.5% risk 98%/~21y, 1% 79%(57% w/ swap)/~9y, 2% 46%/~3.8y, 3% 31%/~1.9y, 5% 12%/~0.9y. The
+  pass-rate-vs-TIME trap (gold trades only ~3x/yr) is the killer; realistic ~2% = ~1-in-3 over ~4y.
+- **Gold-only @ 1% risk projection** (real 22y path): CAGR **+1.53%**, **maxDD −11.6%**, vol 2.84%,
+  **Sharpe 0.54**, 1.39x/22y — low return, lumpy, single-asset; the −11.6% DD confirms it can breach
+  the 5% floor (~21% of steps). Era-risk: +0.49R comes from gold's 2004-25 secular bull, may not persist.
+- Caveats stacking against: CFD overnight financing on 3-wk holds (unmodeled, ~0.15R haircut drops
+  1% pass 79%→57%), funded stage tightens to 4% DD (harder to KEEP than to pass), single-asset regime risk.
+- Conclusion: the strategy is built to COMPOUND a real account over years (Sharpe ~1.5 on the full
+  ETF book), not to sprint a +6%/−5% barrier. Diversifying the CFD basket trades frequency for
+  cluster-DD risk. Keep the edge on the IBKR account; don't invest research time in prop challenges.
+
 **ETF execution path BUILT + live-verified** (except an actual fill, which awaits a signal):
 `contracts.size_shares`, `ib_exec._place_etf_bracket` (SMART Stock bracket), routes ETF vs
 futures, `ib_client.stock_contract`/`fx_to_usd`. **Currency bug FIXED** — `_equity_usd`
