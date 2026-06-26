@@ -28,6 +28,14 @@ def sync_closures() -> list[str]:
     return _backend().sync_closures()
 
 
+def keep_cash_usd() -> dict:
+    """Convert idle HKD cash to USD (clears USD margin debit; IB only; CASH_USD=1)."""
+    b = _backend()
+    if hasattr(b, "keep_cash_usd"):
+        return b.keep_cash_usd()
+    return {"enabled": False}
+
+
 def sweep_cash() -> dict:
     """IDLE-CASH sweep into SGOV (IB backend only; opt-in via CASH_SWEEP=1)."""
     b = _backend()

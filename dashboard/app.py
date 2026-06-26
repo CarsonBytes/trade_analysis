@@ -508,6 +508,20 @@ def portfolio_panel() -> None:
         if sgov_base > 0:
             _stat("Cash in SGOV", _money(sgov_base), "text-green",
                   "Idle cash parked in SGOV (0-3mo T-bill ETF) earning ~5% — auto-swept")
+        fx = service.STATE.get("fx_usd") or {}
+        if fx.get("enabled"):
+            usd_c = fx.get("usd_cash", 0.0)
+            hkd_c = fx.get("hkd_cash", 0.0)
+            _stat("USD cash", f"${usd_c:,.0f}",
+                  "text-green" if usd_c >= 0 else "text-red",
+                  "USD cash balance — negative = margin debit (~5-6% interest); auto-converts "
+                  f"idle HKD→USD each cycle. HKD residual: {hkd_c:,.0f}")
+        accrued = acct.get("AccruedCash")
+        if accrued is not None:
+            _stat("Interest accrued", _money(accrued),
+                  "text-green" if accrued >= 0 else "text-red",
+                  "Cash/SGOV interest accrued this period (IB pays it out monthly). "
+                  "Negative = net margin interest owed.")
 
     # equity line chart (account value over time, base ccy)
     if len(hist) >= 2:
@@ -526,27 +540,51 @@ def portfolio_panel() -> None:
         ui.label("Equity curve builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
 
-    # allocation pie (base ccy): strategy positions + SGOV cash-parking + buffer cash
+    # SGOV cash-parking value over time
+    sh, _shts = store.cache_get("sgov_history")
+    sh = sh or []
+    if sgov_base > 0 or len(sh) >= 2:
+        ui.label("Cash parked in SGOV (earning ~5%)").classes("text-sm font-bold mt-2")
+    if len(sh) >= 2:
+        sxs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in sh]
+        sys_ = [h[1] for h in sh]
+        ui.echart({
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": sxs, "boundaryGap": False},
+            "yAxis": {"type": "value", "name": ccy, "scale": True},
+            "series": [{"type": "line", "data": sys_, "smooth": True, "areaStyle": {},
+                        "lineStyle": {"width": 2}, "itemStyle": {"color": "#0891b2"}}],
+            "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
+        }).classes("w-full h-44").tooltip(f"SGOV holding value ({ccy}) over time")
+    elif sgov_base > 0:
+        ui.label("SGOV value chart builds as snapshots accrue (~one point / 10 min).")\
+            .classes("text-sm text-grey mt-1")
+
+    # allocation pie: strategy positions + SGOV + buffer cash, dual-currency on hover
     id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
+    base_to_usd = 1.0 / usd_to_base if usd_to_base else 0.0   # base ccy -> USD
     slices = []
+
+    def _slice(name_short, base_val, usd_val):
+        # name carries BOTH currencies so the tooltip shows actual (USD) + converted (ccy)
+        slices.append({"value": round(base_val, 2),
+                       "name": f"{name_short}  ·  ${usd_val:,.0f} USD"})
     for pid, p in positions.items():
-        mv_base = (p["volume"] * p["open"] + p.get("profit", 0.0)) * usd_to_base
-        slices.append({"value": round(mv_base, 2), "name": id_to_sym.get(pid, str(pid))})
+        mv_usd = p["volume"] * p["open"] + p.get("profit", 0.0)
+        _slice(id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd)
     if sgov_base > 0:
-        slices.append({"value": round(sgov_base, 2), "name": "SGOV (cash ~5%)"})
+        _slice("SGOV ~5%", sgov_base, sgov_base * base_to_usd)
     if cash is not None and cash > 0:
-        slices.append({"value": round(cash, 2), "name": "Cash (buffer)"})
+        _slice("Cash buffer", cash, cash * base_to_usd)
     if slices:
-        if True:  # noqa: render pie
-            ui.echart({
-                "tooltip": {"trigger": "item",
-                            "formatter": "{b}: " + ccy + " {c} ({d}%)"},
-                "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 10}},
-                "series": [{"type": "pie", "radius": ["40%", "65%"],
-                            "center": ["50%", "45%"], "data": slices,
-                            "label": {"formatter": "{b} {d}%", "fontSize": 10}}],
-            }).classes("w-full h-72").tooltip(
-                f"Allocation by position market value + idle cash ({ccy})")
+        ui.echart({
+            "tooltip": {"trigger": "item", "formatter": "{b}<br/>" + ccy + " {c}  ({d}%)"},
+            "legend": {"type": "scroll", "bottom": 0, "textStyle": {"fontSize": 9}},
+            "series": [{"type": "pie", "radius": ["40%", "65%"],
+                        "center": ["50%", "45%"], "data": slices,
+                        "label": {"formatter": "{d}%", "fontSize": 10}}],
+        }).classes("w-full h-72").tooltip(
+            f"Allocation — each slice shows USD (actual) + {ccy} (converted)")
 
 
 @ui.refreshable

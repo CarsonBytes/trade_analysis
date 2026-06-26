@@ -359,6 +359,77 @@ def live_positions() -> dict:
     return out
 
 
+# --- keep cash in USD (clear the USD margin debit; earn USD interest) -------------
+def _ledger_cash(ib) -> dict:
+    """{currency: CashBalance} from the account ledger (per-currency, not base-consolidated)."""
+    async def _fetch():
+        return await ib.accountSummaryAsync()
+    summ = ib_client._run(_fetch())
+    out = {}
+    for v in summ:
+        if v.tag == "$LEDGER-CashBalance" and v.currency in ("USD", "HKD"):
+            try:
+                out[v.currency] = float(v.value)
+            except (TypeError, ValueError):
+                pass
+        if v.tag == "$LEDGER-ExchangeRate" and v.currency == "USD":
+            try:                                       # USD ledger ExchangeRate = HKD per 1 USD
+                out["_hkd_per_usd"] = float(v.value)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def keep_cash_usd() -> dict:
+    """Convert idle HKD cash to USD so it earns USD interest (and CLEARS any USD margin
+    debit, which costs ~5-6%). Opt-in via CASH_USD=1, paper-guarded. Converts HKD down to
+    a small residual buffer. Returns status for the dashboard."""
+    status = {"enabled": os.environ.get("CASH_USD", "").lower() in ("1", "true", "yes"),
+              "usd_cash": 0.0, "hkd_cash": 0.0, "log": ""}
+    if not status["enabled"]:
+        return status
+    ib = _guard()
+    if ib is None:
+        return status
+    led = _ledger_cash(ib)
+    hkd = led.get("HKD", 0.0)
+    status["usd_cash"] = led.get("USD", 0.0)
+    status["hkd_cash"] = hkd
+    rate = led.get("_hkd_per_usd", 7.84)              # HKD per USD
+    KEEP_HKD = 500.0                                  # leave a tiny HKD residual
+    if hkd <= KEEP_HKD or rate <= 0:
+        return status
+    usd_to_buy = int((hkd - KEEP_HKD) / rate)         # BUY USD, SELL HKD
+    if usd_to_buy < 1:
+        return status
+    if os.environ.get("CASH_USD_DRYRUN", "").lower() in ("1", "true", "yes"):
+        status["log"] = (f"keep-cash-usd DRYRUN: would convert HKD {hkd:,.0f} -> "
+                         f"BUY ${usd_to_buy:,} (USD cash now {status['usd_cash']:,.0f})")
+        log.info("ib_exec: %s", status["log"])
+        return status
+    import ib_async
+    fx = ib_async.Forex("USDHKD")
+
+    async def _qualify():                              # qualify on the loop thread (no nesting)
+        await ib.qualifyContractsAsync(fx)
+        return fx
+    try:
+        ib_client._run(_qualify())
+        o = ib_async.MarketOrder("BUY", usd_to_buy)   # BUY USD base, pay HKD
+        o.orderRef = "keep-cash-usd"
+        ib_client.call(lambda: ib.placeOrder(fx, o))
+    except Exception as e:                             # noqa: BLE001
+        status["log"] = f"keep-cash-usd: FX order failed ({e})"
+        log.warning("ib_exec: %s", status["log"])
+        return status
+    status["log"] = (f"keep-cash-usd: converted ~HKD {hkd:,.0f} -> BUY ${usd_to_buy:,} "
+                     f"(clears USD debit / parks idle cash in USD @~3.1%)")
+    status["usd_cash"] = status["usd_cash"] + usd_to_buy
+    status["hkd_cash"] = KEEP_HKD
+    log.info("ib_exec: %s", status["log"])
+    return status
+
+
 # --- idle-cash sweep into SGOV (0-3mo T-bill ETF) --------------------------------
 SGOV_SYMBOL = "SGOV"
 SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MKT fills real)

@@ -360,7 +360,8 @@ def account_summary() -> dict | None:
     except Exception:                                  # noqa: BLE001
         return None
     want = {"NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower",
-            "UnrealizedPnL", "RealizedPnL", "GrossPositionValue", "ExcessLiquidity"}
+            "UnrealizedPnL", "RealizedPnL", "GrossPositionValue", "ExcessLiquidity",
+            "AccruedCash"}
     out: dict = {}
     ccy = None
     for v in vals:
