@@ -28,6 +28,14 @@ def sync_closures() -> list[str]:
     return _backend().sync_closures()
 
 
+def sweep_cash() -> dict:
+    """IDLE-CASH sweep into SGOV (IB backend only; opt-in via CASH_SWEEP=1)."""
+    b = _backend()
+    if hasattr(b, "sweep_cash"):
+        return b.sweep_cash()
+    return {"enabled": False}
+
+
 def live_positions() -> dict:
     return _backend().live_positions()
 

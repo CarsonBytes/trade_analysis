@@ -485,6 +485,10 @@ def portfolio_panel() -> None:
             if tip:
                 lbl.tooltip(tip)
 
+    sweep = service.STATE.get("cash_sweep") or {}
+    sgov_base = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+    invested = (gpv - sgov_base) if gpv is not None else None   # strategy deployment ex-SGOV
+
     ui.label("Portfolio").classes("text-lg font-bold")
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
         _stat("Total value", _money(nl), "text-grey-9",
@@ -495,10 +499,15 @@ def portfolio_panel() -> None:
         _stat("Unrealized (open)", _money(upnl),
               "text-green" if upnl >= 0 else "text-red",
               "P&L of currently open positions (USD converted at the HKD peg)")
-        if gpv is not None:
-            _stat("Invested", _money(gpv))
+        if invested is not None:
+            _stat("Invested", _money(invested), "text-grey-9",
+                  "Market value of strategy ETF positions (excludes SGOV cash parking)")
         if cash is not None:
-            _stat("Cash", _money(cash))
+            _stat("Cash (buffer)", _money(cash), "text-grey-9",
+                  "Un-parked cash kept available for the strategy")
+        if sgov_base > 0:
+            _stat("Cash in SGOV", _money(sgov_base), "text-green",
+                  "Idle cash parked in SGOV (0-3mo T-bill ETF) earning ~5% — auto-swept")
 
     # equity line chart (account value over time, base ccy)
     if len(hist) >= 2:
@@ -517,16 +526,18 @@ def portfolio_panel() -> None:
         ui.label("Equity curve builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
 
-    # allocation pie (base ccy): each position's market value + idle cash
-    if positions:
-        id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
-        slices = []
-        for pid, p in positions.items():
-            mv_base = (p["volume"] * p["open"] + p.get("profit", 0.0)) * usd_to_base
-            slices.append({"value": round(mv_base, 2), "name": id_to_sym.get(pid, str(pid))})
-        if cash is not None and cash > 0:
-            slices.append({"value": round(cash, 2), "name": "Cash"})
-        if slices:
+    # allocation pie (base ccy): strategy positions + SGOV cash-parking + buffer cash
+    id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
+    slices = []
+    for pid, p in positions.items():
+        mv_base = (p["volume"] * p["open"] + p.get("profit", 0.0)) * usd_to_base
+        slices.append({"value": round(mv_base, 2), "name": id_to_sym.get(pid, str(pid))})
+    if sgov_base > 0:
+        slices.append({"value": round(sgov_base, 2), "name": "SGOV (cash ~5%)"})
+    if cash is not None and cash > 0:
+        slices.append({"value": round(cash, 2), "name": "Cash (buffer)"})
+    if slices:
+        if True:  # noqa: render pie
             ui.echart({
                 "tooltip": {"trigger": "item",
                             "formatter": "{b}: " + ccy + " {c} ({d}%)"},

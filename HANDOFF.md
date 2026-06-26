@@ -71,8 +71,14 @@ interest is throttled below NAV $100k (a ~$12.8k acct earns ~13% of full rate �
 **SGOV (0-3mo T-bill ETF) pays its ~5% yield regardless of NAV** — so on a SMALL account, parking
 idle USD cash in SGOV recovers the FULL ~+1.5-2.5% (current rates) that IB direct interest would
 throttle. So the cash lever is ~+2% even on a small account IF via SGOV (not IB interest). Caveat:
-needs HKD→USD + sell-SGOV-to-trade (T+1 friction) — do it MANUALLY at small size, don't auto-code
-yet. (Rejected refinements: weekly contribution-splitting = DCA drag, return-negative + moot vs
+needs HKD→USD + sell-SGOV-to-trade (T+1 friction). **AUTO-SWEEP BUILT 2026-06-26** (ib_exec.sweep_cash,
+opt-in CASH_SWEEP=1, paper-guarded, parks 60% of idle cash in SGOV keeping a 40% buffer; runs after
+sync_closures; dashboard shows "Cash in SGOV" stat+pie slice). **Real IB cash rate observed = 3.12%
+APY** (not the 4.3% assumed), so SGOV (~4.8-5%) edge over USD-cash = **~1.8%** (~$1,480/yr on the $130k
+paper acct at ~60% idle) — bigger than thought. Automation threshold therefore LOWER: worth it from
+~$75-100k NAV; below that just hold USD cash (3.12% auto) and skip the complexity. **Exchange loss is
+negligible:** IB FX ~0.2bp+min$2 (~0.005% one-time), HKD pegged to USD (no real FX risk), and the book
+trades USD ETFs so cash stays USD (no round-tripping). Convert HKD→USD freely. (Rejected refinements: weekly contribution-splitting = DCA drag, return-negative + moot vs
 signal-driven entries; rebalance dead-band = redundant, strategy already gates on trend-strength≥5.) FORWARD total @ constant current rate (`--cash-rate 0.043`, IB USD rate; achievable on ANY
 account size via manual SGOV): @0.5% **+6.1% nominal / ~+3.6% real, maxDD −9.2%** (cash drip
 slightly REDUCES DD: −10.5→−9.2); recent OOS +11.2%/−5.9%; IS +4.5%. (+1.7% over strategy-only,

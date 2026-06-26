@@ -359,6 +359,90 @@ def live_positions() -> dict:
     return out
 
 
+# --- idle-cash sweep into SGOV (0-3mo T-bill ETF) --------------------------------
+SGOV_SYMBOL = "SGOV"
+SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MKT fills real)
+CASH_SWEEP_TARGET = 0.60      # park 60% of (idle cash + SGOV); keep 40% buffer for the strategy
+CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas
+
+
+def _sweep_on() -> bool:
+    return os.environ.get("CASH_SWEEP", "").lower() in ("1", "true", "yes")
+
+
+def sweep_cash() -> dict:
+    """Park idle cash in SGOV so it earns ~T-bill yield, keeping a buffer so the
+    strategy ALWAYS has cash. Rebalances SGOV toward CASH_SWEEP_TARGET of (idle cash
+    + SGOV) each cycle. Paper-guarded + opt-in (CASH_SWEEP=1). Returns a status dict
+    for the dashboard. NB: IB *paper* may not credit the actual distribution -- this
+    runs the MECHANICS; the real yield materialises on a funded account."""
+    status = {"enabled": _sweep_on(), "sgov_qty": 0.0, "sgov_value_base": 0.0,
+              "ccy": "", "log": ""}
+    if not _sweep_on():
+        return status
+    ib = _guard()
+    if ib is None:
+        return status
+    summ = ib_client.account_summary()
+    if not summ or summ.get("TotalCashValue") is None:
+        return status
+    ccy = summ.get("_ccy", "")
+    status["ccy"] = ccy
+    base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)      # USD -> base ccy
+    cash_usd = float(summ["TotalCashValue"]) / base_per_usd
+    contract = ib_client.stock_contract(SGOV_SYMBOL)
+    if contract is None:
+        status["log"] = "cash-sweep: SGOV contract unavailable, retry"
+        return status
+    con_id = getattr(contract, "conId", 0)
+
+    def _snap():
+        pos = next((p for p in (ib.positions() or []) if p.contract.conId == con_id), None)
+        pf = next((i for i in (ib.portfolio() or []) if i.contract.conId == con_id), None)
+        qty = float(pos.position) if pos else 0.0
+        px = float(pf.marketPrice) if (pf and pf.marketPrice and pf.marketPrice == pf.marketPrice
+                                       and pf.marketPrice > 0) else SGOV_PX_EST
+        return qty, px
+    sgov_qty, px = ib_client.call(_snap)
+    sgov_usd = sgov_qty * px
+    status["sgov_qty"] = sgov_qty
+    status["sgov_value_base"] = sgov_usd * base_per_usd
+
+    investable = max(cash_usd + sgov_usd, 0.0)
+    target_usd = investable * CASH_SWEEP_TARGET
+    delta_usd = target_usd - sgov_usd
+    if abs(delta_usd) < CASH_SWEEP_MIN_USD:
+        return status
+    shares = int(delta_usd // px) if delta_usd > 0 else -int((-delta_usd) // px)
+    shares = max(-int(sgov_qty), shares)          # never sell more SGOV than we hold
+    if shares == 0:
+        return status
+    action, qty = ("BUY", shares) if shares > 0 else ("SELL", -shares)
+    if os.environ.get("CASH_SWEEP_DRYRUN", "").lower() in ("1", "true", "yes"):
+        status["log"] = (f"cash-sweep DRYRUN: would {action} {qty} SGOV @~{px:.2f} "
+                         f"(idle ${cash_usd:,.0f} -> target SGOV ${target_usd:,.0f})")
+        log.info("ib_exec: %s", status["log"])
+        return status
+    import ib_async
+
+    def _send():
+        o = ib_async.MarketOrder(action, qty)
+        o.orderRef = "cash-sweep-sgov"
+        o.tif = "DAY"
+        return ib.placeOrder(contract, o)
+    try:
+        ib_client.call(_send)
+    except Exception as e:                         # noqa: BLE001
+        status["log"] = f"cash-sweep: order failed ({e})"
+        return status
+    status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
+    status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
+    status["log"] = (f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
+                     f"(idle cash parked at ~{CASH_SWEEP_TARGET:.0%})")
+    log.info("ib_exec: %s", status["log"])
+    return status
+
+
 def reconcile() -> list[dict]:
     """Per mirrored trade: paper R vs realized IB R from fills (PnL incl.
     commission, normalised by the risk money at placement)."""

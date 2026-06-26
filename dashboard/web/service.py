@@ -169,6 +169,12 @@ def refresh_cheap() -> None:
         broker.sync_closures()
     except Exception as e:
         log.exception("executor closure sync error: %s", e)
+    # park idle cash in SGOV (opt-in CASH_SWEEP=1); strategy always keeps a buffer
+    try:
+        STATE["cash_sweep"] = broker.sweep_cash()
+    except Exception as e:
+        STATE["cash_sweep"] = {"enabled": False}
+        log.debug("cash sweep error: %s", e)
 
 
 def refresh_news() -> None:
