@@ -39,6 +39,16 @@ NOT the all-history baseline. (Common confusion: "10%" = recent OOS, not full hi
 Note: a SHORTER recent-only window (non-`--longweekly`) shows OOS ~+18-19% @ 0.5% — the most
 bull-flattered slice; do NOT plan around it. The 20% figure = either that, or 1% risk.
 
+**TOTAL return incl. idle-cash interest (`--cash-yield`, real ^IRX 13wk T-bill, 2026-06-25):**
+the backtest CAGR above is STRATEGY P&L with cash@0%. Crediting idle cash (strategy is ~60% in
+cash at 0.5%) adds, full-history avg, **+1.3% @ 0.5%** (4.4→**5.7%**), +1.7% @0.25%, +0.9% @1% —
+**max DD UNCHANGED** (free, no added risk; +months 55→61%). It's the risk-free rate, NOT alpha,
+and is rate-regime dependent: ~0 in the 2010-21 zero era (so OOS uplift only +0.7%), ~+2.5-2.8%
+at today's ~4% rates with ~60% idle. **Forward total @ current rates ≈ 7% (full-hist anchor) to
+~12-13% (recent).** On a real IBKR account this is ~AUTOMATIC (IBKR pays interest on idle cash) —
+no need to buy BIL/SHV. This is the ONLY "execution-layer" lever that survived (trade-cost/tax
+optimisation are negligible for a liquid, ~3wk-hold strategy).
+
 **Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
 16+EMB 1.54, **16+PFF=17 ADOPTED 1.55**, 18 1.47. 16→17→18 is sampling noise → universe SATURATED.
 

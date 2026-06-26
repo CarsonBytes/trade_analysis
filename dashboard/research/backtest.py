@@ -43,6 +43,8 @@ CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): p
                                  # entries when portfolio DD >= stop, resume when DD <= resume
 REGIME: object = None            # --regime: SPY 40wk-MA bull/bear Series; scale size in bears
 REGIME_BEAR_SIZE = 0.40          # position size in a SPY-bear regime (vs 1.0 in bull)
+CASH_YIELD = None                # --cash-yield: annualised rate Series (decimal) by date;
+                                 # credits idle (un-deployed) equity = execution-layer realism
 PULLBACK: bool = False           # --pullback: don't enter on the breakout bar; wait up to
 PULLBACK_WAIT = 2                # ..PULLBACK_WAIT bars for price to retrace within PULLBACK_BAND
 PULLBACK_BAND = 0.02             # ..of the 20wk MA (trend intact, better entry); else skip signal
@@ -137,7 +139,10 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
         r = paper.r_multiple(direction, entry, sl, exit_px, cost_abs=cost_abs)
         out.append({"key": key, "entry_i": entry_i, "entry_date": df.index[entry_i],
                     "exit_date": df.index[min(entry_i + used, n - 1)],
-                    "direction": direction, "r": r})
+                    "direction": direction, "r": r,
+                    # notional / risk_money = entry / stop_distance -> how much cash this
+                    # position ties up per $ risked (for the idle-cash interest model).
+                    "nmult": float(entry / max(abs(entry - sl), 1e-9))})
         i = entry_i + used + 1
     return out
 
@@ -271,6 +276,14 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     realized: list[float] = []
     class_hist: dict = {}               # asset_class -> [(exit_date, r)] CLOSED trades
     nid = 0
+    dep = [0.0]                         # currently-deployed notional (cash tied up in positions)
+    last_t = [cands[0]["entry_date"]] if cands else [None]
+
+    def _rate(asof) -> float:
+        if CASH_YIELD is None:
+            return 0.0
+        sub = CASH_YIELD[CASH_YIELD.index <= asof]
+        return float(sub.iloc[-1]) if len(sub) else float(CASH_YIELD.iloc[0])
 
     def _class_factor(cls, asof) -> float:
         """Walk-forward class tilt: scale risk by the class's TRAILING-12mo realized
@@ -314,6 +327,7 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         for pid in [p for p, v in open_pos.items() if v["exit_date"] <= upto]:
             v = open_pos.pop(pid)
             equity += v["pnl"]
+            dep[0] -= v.get("notional", 0.0)
             open_keys.discard(v["key"])
             for b in v["buckets"]:
                 open_buckets.discard(b)
@@ -324,6 +338,13 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     peak_eq = START_EQUITY
     paused = False
     for c in cands:
+        if CASH_YIELD is not None and last_t[0] is not None:   # accrue idle-cash interest
+            d = (c["entry_date"] - last_t[0]).days
+            if d > 0:
+                idle = max(equity - dep[0], 0.0)
+                equity += idle * _rate(last_t[0]) * d / 365.0
+                eq_points.append((c["entry_date"], equity))
+            last_t[0] = c["entry_date"]
         _close_due(c["entry_date"])
         if CIRCUIT_DD:                                  # tail-risk circuit breaker
             peak_eq = max(peak_eq, equity)
@@ -349,8 +370,11 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         cls = active_by_key(c["key"]).asset_class
         risk_money = (equity * risk * _vol_factor() * _class_factor(cls, c["entry_date"])
                       * _regime_factor(c["entry_date"]) * c.get("risk_mult", 1.0))
+        notional = min(risk_money * c.get("nmult", 0.0), equity)   # cash tied up (capped)
+        dep[0] += notional
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"], "cls": cls,
-                         "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"]}
+                         "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"],
+                         "notional": notional}
         open_keys.add(c["key"])
         for b in buckets:
             open_buckets.add(b)
@@ -476,6 +500,9 @@ def main():
     ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
                     help="annualised portfolio vol target (e.g. 0.12); adds a "
                          "vol-targeted vs fixed-risk comparison at 0.5%% risk")
+    ap.add_argument("--cash-yield", action="store_true",
+                    help="credit idle (un-deployed) cash at the real historical 13wk T-bill rate "
+                         "(^IRX) -- total return incl. cash interest, not just strategy P&L")
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
@@ -667,6 +694,21 @@ def main():
                   f"(n={len(REGIME)}wk, mean mult {REGIME.mean():.2f})]")
         else:
             print("[VIX-REGIME: ^VIX fetch failed -- overlay OFF]")
+    if args.cash_yield:                               # credit idle cash at real ^IRX T-bill rate
+        global CASH_YIELD
+        import yfinance as yf
+        irx = yf.download("^IRX", period="max", interval="1wk", progress=False, auto_adjust=True)
+        if irx is not None and len(irx):
+            if hasattr(irx.columns, "nlevels") and irx.columns.nlevels > 1:
+                irx.columns = irx.columns.get_level_values(0)
+            s = (irx["Close"].dropna() / 100.0)       # ^IRX is an annualised percent
+            if s.index.tz is None:
+                s.index = s.index.tz_localize("UTC")
+            CASH_YIELD = s
+            print(f"[CASH-YIELD: idle cash credited at ^IRX 13wk T-bill "
+                  f"(n={len(s)}wk, mean {s.mean():.2%}, latest {s.iloc[-1]:.2%})]")
+        else:
+            print("[CASH-YIELD: ^IRX fetch failed -- idle cash stays at 0%]")
     if args.mom_filter:                               # relative-strength (XSMOM) overlay
         N, LB = args.mom_filter, 13                    # top-N by trailing ~3mo (13wk) return
         rets = {k: df["close"].pct_change(LB) for k, df in data.items()}
