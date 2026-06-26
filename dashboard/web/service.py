@@ -186,7 +186,7 @@ def refresh_cheap() -> None:
     try:
         import time as _t3
         cached, _ = store.cache_get("tbill_rate")
-        if not cached or (_t3.time() - cached[0]) > 86400:
+        if not cached or (_t3.time() - cached[0]) > 14400:   # refresh ^IRX every ~4h
             import yfinance as yf
             irx = yf.download("^IRX", period="5d", interval="1d", progress=False,
                               auto_adjust=True)

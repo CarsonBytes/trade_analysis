@@ -487,8 +487,10 @@ def portfolio_panel() -> None:
 
     sweep = service.STATE.get("cash_sweep") or {}
     sgov_base = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
-    _tb = service.STATE.get("tbill_rate")               # live ^IRX = SGOV yield proxy
-    sgov_yld = f"~{_tb:.1f}%" if _tb else "~T-bill rate"
+    _tb = service.STATE.get("tbill_rate")               # live ^IRX (13wk T-bill), %
+    sgov_rate = (_tb - 0.07) if _tb else None           # SGOV ≈ ^IRX minus 0.07% fee
+    ib_rate = max(_tb - 0.55, 0.0) if _tb else None     # IB pays ~benchmark-0.5% (3.12% @ IRX 3.67)
+    sgov_yld = f"~{sgov_rate:.1f}%" if sgov_rate else "~T-bill rate"
     invested = (gpv - sgov_base) if gpv is not None else None   # strategy deployment ex-SGOV
 
     ui.label("Portfolio").classes("text-lg font-bold")
@@ -524,6 +526,14 @@ def portfolio_panel() -> None:
                   "text-green" if accrued >= 0 else "text-red",
                   "Cash/SGOV interest accrued this period (IB pays it out monthly). "
                   "Negative = net margin interest owed.")
+        # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB rate
+        if sgov_rate is not None:
+            sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
+            cash_mo = (cash or 0.0) * (ib_rate or 0.0) / 100.0 / 12.0
+            proj = sgov_mo + cash_mo
+            _stat("Projected interest (1mo)", _money(proj), "text-green",
+                  f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
+                  f"USD cash {_money(cash_mo)} @ {ib_rate:.1f}% (live ^IRX-derived rates)")
 
     # equity line chart (account value over time, base ccy)
     if len(hist) >= 2:
