@@ -49,10 +49,17 @@ at today's ~4% rates with ~60% idle. **Forward total @ current rates ≈ 7% (ful
 no need to buy BIL/SHV. This is the ONLY "execution-layer" lever that survived (trade-cost/tax
 optimisation are negligible for a liquid, ~3wk-hold strategy; partial-profit-taking, limit-order
 execution, rebalance thresholds, SGOV-arb, rate-linked risk all rejected/marginal).
-**HKD CAVEAT:** the +2.7% assumes USD T-bill yield on ALL idle cash. This account is HKD-base, IB
-pays 0% on the first $10k then benchmark−0.5%, and idle HKD earns HKD (not USD) rates — so the
-REAL uplift is likely **~+0.5-1.5%** unless most cash is converted to USD with NAV>$10k. It's a
-rate-environment bonus, not alpha.
+**HKD/USD CASH OPTIMISATION (the real execution lever — account config, NOT code/strategy):**
+account is HKD-base holding USD ETFs. Idle HKD earns ~1-2%; idle USD earns ~4.5% (T-bill/SGOV);
+and buying USD ETFs vs HKD cash can create a USD DEBIT charged ~5-6% margin interest. So the
+actionable fix is ops, not research: (1) hold idle cash in USD (convert HKD→USD, IB FX spread
+~0.2bp, keep NAV>$10k past IB's 0% tier) → captures the full ~+2.5% `--cash-yield` USD ceiling;
+(2) optionally park USD in SGOV (~+0.3-0.5% over IB's rate); (3) keep a USD buffer to avoid the
+5-6% debit. Realistic uplift: **~+0.5-1.5% if left in HKD, ~+2.5% if converted to USD**. NOT
+backtestable (FX/IB-tiers/fills aren't in price data); NOT alpha (rate bonus, ~0 if USD rates→0).
+Rejected/skip: TWAP-VWAP order-splitting (market impact ~0 at $130k on liquid ETFs); limit orders
+= minor cheap insurance only (weekly/liquid book, not intraday). So forward TOTAL @ current rates
+≈ **~7% (full anchor) to ~12% (recent), IF cash is USD-optimised.**
 
 **Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
 16+EMB 1.54, **16+PFF=17 ADOPTED 1.55**, 18 1.47. 16→17→18 is sampling noise → universe SATURATED.
