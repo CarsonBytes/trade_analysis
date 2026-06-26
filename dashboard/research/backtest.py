@@ -282,6 +282,8 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     def _rate(asof) -> float:
         if CASH_YIELD is None:
             return 0.0
+        if isinstance(CASH_YIELD, (int, float)):        # constant rate (--cash-rate)
+            return float(CASH_YIELD)
         sub = CASH_YIELD[CASH_YIELD.index <= asof]
         return float(sub.iloc[-1]) if len(sub) else float(CASH_YIELD.iloc[0])
 
@@ -503,6 +505,9 @@ def main():
     ap.add_argument("--cash-yield", action="store_true",
                     help="credit idle (un-deployed) cash at the real historical 13wk T-bill rate "
                          "(^IRX) -- total return incl. cash interest, not just strategy P&L")
+    ap.add_argument("--cash-rate", type=float, default=None, metavar="R",
+                    help="credit idle cash at a CONSTANT annual rate (e.g. 0.043 for today's IB "
+                         "USD rate) instead of historical ^IRX -- forward total-return estimate")
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
@@ -694,8 +699,11 @@ def main():
                   f"(n={len(REGIME)}wk, mean mult {REGIME.mean():.2f})]")
         else:
             print("[VIX-REGIME: ^VIX fetch failed -- overlay OFF]")
-    if args.cash_yield:                               # credit idle cash at real ^IRX T-bill rate
+    if args.cash_rate is not None:                    # constant forward rate
         global CASH_YIELD
+        CASH_YIELD = args.cash_rate
+        print(f"[CASH-YIELD: idle cash credited at CONSTANT {args.cash_rate:.2%}/yr]")
+    elif args.cash_yield:                             # credit idle cash at real ^IRX T-bill rate
         import yfinance as yf
         irx = yf.download("^IRX", period="max", interval="1wk", progress=False, auto_adjust=True)
         if irx is not None and len(irx):

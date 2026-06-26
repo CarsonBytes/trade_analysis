@@ -73,8 +73,12 @@ idle USD cash in SGOV recovers the FULL ~+1.5-2.5% (current rates) that IB direc
 throttle. So the cash lever is ~+2% even on a small account IF via SGOV (not IB interest). Caveat:
 needs HKD→USD + sell-SGOV-to-trade (T+1 friction) — do it MANUALLY at small size, don't auto-code
 yet. (Rejected refinements: weekly contribution-splitting = DCA drag, return-negative + moot vs
-signal-driven entries; rebalance dead-band = redundant, strategy already gates on trend-strength≥5.) So the all-in REAL expectation is ~+2-3% on a small
-live account, ~+3-3.5% real once NAV>$100k & cash USD-optimised. Value = low-DD low-stress real
+signal-driven entries; rebalance dead-band = redundant, strategy already gates on trend-strength≥5.) FORWARD total @ constant current rate (`--cash-rate 0.043`, IB USD rate; achievable on ANY
+account size via manual SGOV): @0.5% **+6.1% nominal / ~+3.6% real, maxDD −9.2%** (cash drip
+slightly REDUCES DD: −10.5→−9.2); recent OOS +11.2%/−5.9%; IS +4.5%. (+1.7% over strategy-only,
+> the +1.3% historical ^IRX figure since current rates aren't ZIRP-dragged.) So the all-in REAL
+expectation is **~+3.6% real @0.5% if cash is SGOV-parked at current rates** (~+2-3% if rates fall
+or cash left in HKD/throttled IB interest). Value = low-DD low-stress real
 positive return; the growth engine is CONTRIBUTIONS + capital, not overlays.
 
 **Universe selection (longweekly OOS @ 0.5%):** 10→16 = +2.8% OOS (the big win); 16-base 1.51,
