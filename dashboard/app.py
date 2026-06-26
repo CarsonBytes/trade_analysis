@@ -487,6 +487,8 @@ def portfolio_panel() -> None:
 
     sweep = service.STATE.get("cash_sweep") or {}
     sgov_base = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+    _tb = service.STATE.get("tbill_rate")               # live ^IRX = SGOV yield proxy
+    sgov_yld = f"~{_tb:.1f}%" if _tb else "~T-bill rate"
     invested = (gpv - sgov_base) if gpv is not None else None   # strategy deployment ex-SGOV
 
     ui.label("Portfolio").classes("text-lg font-bold")
@@ -507,7 +509,7 @@ def portfolio_panel() -> None:
                   "Un-parked cash kept available for the strategy")
         if sgov_base > 0:
             _stat("Cash in SGOV", _money(sgov_base), "text-green",
-                  "Idle cash parked in SGOV (0-3mo T-bill ETF) earning ~5% — auto-swept")
+                  f"Idle cash parked in SGOV (0-3mo T-bill ETF) yielding {sgov_yld} — auto-swept")
         fx = service.STATE.get("fx_usd") or {}
         if fx.get("enabled"):
             usd_c = fx.get("usd_cash", 0.0)
@@ -544,7 +546,7 @@ def portfolio_panel() -> None:
     sh, _shts = store.cache_get("sgov_history")
     sh = sh or []
     if sgov_base > 0 or len(sh) >= 2:
-        ui.label("Cash parked in SGOV (earning ~5%)").classes("text-sm font-bold mt-2")
+        ui.label(f"Cash parked in SGOV (yielding {sgov_yld})").classes("text-sm font-bold mt-2")
     if len(sh) >= 2:
         sxs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in sh]
         sys_ = [h[1] for h in sh]
@@ -568,7 +570,7 @@ def portfolio_panel() -> None:
         mv_usd = p["volume"] * p["open"] + p.get("profit", 0.0)
         raw.append((id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd))
     if sgov_base > 0:
-        raw.append(("SGOV ~5%", sgov_base, sgov_base * base_to_usd))
+        raw.append((f"SGOV {sgov_yld}", sgov_base, sgov_base * base_to_usd))
     if cash is not None and cash > 0:
         raw.append(("Cash buffer", cash, cash * base_to_usd))
     total_base = sum(b for _, b, _ in raw) or 1.0

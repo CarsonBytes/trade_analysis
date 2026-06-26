@@ -182,6 +182,23 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["cash_sweep"] = {"enabled": False}
         log.debug("cash sweep error: %s", e)
+    # current short-term T-bill rate (^IRX) = live SGOV-yield proxy; refreshed ~daily
+    try:
+        import time as _t3
+        cached, _ = store.cache_get("tbill_rate")
+        if not cached or (_t3.time() - cached[0]) > 86400:
+            import yfinance as yf
+            irx = yf.download("^IRX", period="5d", interval="1d", progress=False,
+                              auto_adjust=True)
+            if hasattr(irx.columns, "nlevels") and irx.columns.nlevels > 1:
+                irx.columns = irx.columns.get_level_values(0)
+            rate = float(irx["Close"].dropna().iloc[-1])
+            store.cache_set("tbill_rate", [int(_t3.time()), rate])
+            STATE["tbill_rate"] = rate
+        else:
+            STATE["tbill_rate"] = cached[1]
+    except Exception as e:
+        log.debug("tbill_rate fetch error: %s", e)
     # SGOV-value history for the dashboard chart (throttled ~10min, same cadence as equity)
     try:
         sv = (STATE.get("cash_sweep") or {}).get("sgov_value_base")
