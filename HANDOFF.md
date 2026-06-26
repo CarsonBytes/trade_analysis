@@ -44,7 +44,12 @@ bull-flattered slice; do NOT plan around it. The 20% figure = either that, or 1%
 
 **Everything else REJECTED (see detailed sections below):** vol-targeting (leverage trap),
 SPY/VIX regime overlays, pullback entry, all dynamic exits, MR sleeve (only +edge but sub-threshold),
-XSMOM, VIX-sentiment, macro/flows (no data), prop-firm fit (poor). Research COMPLETE.
+XSMOM, **momentum/relative-strength filter** (`--mom-filter`: top-5 by 13wk return → CAGR halves
+10%→4.1%, ratio 1.54→0.91; per-trade expR ticks up +0.389 but breadth loss dominates — same failure
+as pullback; 2026-06-25), VIX-sentiment, macro/flows (no data), prop-firm fit (poor). Research COMPLETE.
+**Actual Sharpe ≈ 0.9** (full-history, from monthly 0.58%/2.24%) — NOT 1.5 (that's the CAGR/maxDD
+ratio). Every "free-lunch overlay" pitch fails: there is no Sharpe improvement to be had here, only
+the leverage dial (risk %). Breadth across uncorrelated markets is THE edge; concentration guts it.
 
 ---
 

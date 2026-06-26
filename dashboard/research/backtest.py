@@ -476,6 +476,9 @@ def main():
     ap.add_argument("--voltarget", type=float, default=None, metavar="VOL",
                     help="annualised portfolio vol target (e.g. 0.12); adds a "
                          "vol-targeted vs fixed-risk comparison at 0.5%% risk")
+    ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
+                    help="relative-strength filter: only take trend signals for ETFs in the "
+                         "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
     ap.add_argument("--vix-entry", action="store_true",
                     help="VIX sentiment test: long index ETFs the week after ^VIX>=28 (buy fear)")
     ap.add_argument("--meanrev", action="store_true",
@@ -664,6 +667,23 @@ def main():
                   f"(n={len(REGIME)}wk, mean mult {REGIME.mean():.2f})]")
         else:
             print("[VIX-REGIME: ^VIX fetch failed -- overlay OFF]")
+    if args.mom_filter:                               # relative-strength (XSMOM) overlay
+        N, LB = args.mom_filter, 13                    # top-N by trailing ~3mo (13wk) return
+        rets = {k: df["close"].pct_change(LB) for k, df in data.items()}
+
+        def _topN(asof):
+            scored = []
+            for k, s in rets.items():
+                sub = s[s.index <= asof].dropna()
+                if len(sub):
+                    scored.append((float(sub.iloc[-1]), k))
+            scored.sort(reverse=True)
+            return {k for _, k in scored[:N]}
+
+        before = len(cands)
+        cands = [c for c in cands if c["key"] in _topN(c["entry_date"])]
+        print(f"[MOM-FILTER: keep only top-{N} by trailing {LB}wk return -> "
+              f"{before}->{len(cands)} signals]")
     span = max(df.index[-1] for df in data.values()) - min(df.index[0] for df in data.values())
     years = span.days / 365.25
     if args.horizon_curve:
