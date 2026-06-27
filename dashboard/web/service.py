@@ -126,10 +126,13 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["broker_conn"] = None
         log.debug("broker.connection error: %s", e)
+    # keep last-good account: a momentary gateway/connection hiccup returns None ->
+    # don't clobber the cached balances (the panel would flash "data unavailable").
     try:
-        STATE["account"] = broker.account_summary()      # balances for the header
+        _acct = broker.account_summary()
+        if _acct and _acct.get("NetLiquidation") is not None:
+            STATE["account"] = _acct
     except Exception as e:
-        STATE["account"] = None
         log.debug("account_summary error: %s", e)
     # record an equity (NetLiq) snapshot for the portfolio line chart (throttled ~10min)
     try:

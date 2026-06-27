@@ -498,15 +498,22 @@ def portfolio_panel() -> None:
     if not _bk.is_ib():
         return
     acct = service.STATE.get("account") or {}
+    positions = service.STATE.get("positions") or {}
+    # fall back to the last persisted snapshot if the live read is momentarily empty
+    if acct.get("NetLiquidation") is None:
+        snap, _snts = store.cache_get("portfolio_snapshot")
+        if snap and (snap.get("account") or {}).get("NetLiquidation") is not None:
+            acct = snap["account"]
+            positions = {int(k): v for k, v in (snap.get("positions") or {}).items()}
     ccy = acct.get("_ccy", "")
     nl = acct.get("NetLiquidation")
     cash = acct.get("TotalCashValue")
     gpv = acct.get("GrossPositionValue")
     if nl is None:
         ui.label("Portfolio").classes("text-lg font-bold")
-        ui.label("IBKR account data unavailable (gateway down?).").classes("text-sm text-grey")
+        ui.label("IBKR account data not loaded yet — connecting to gateway…")\
+            .classes("text-sm text-grey")
         return
-    positions = service.STATE.get("positions", {})
     usd_to_base = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)   # USD position vals -> base ccy
     upnl = sum(p.get("profit", 0.0) for p in positions.values()) * usd_to_base
     hist, _ts = store.cache_get("equity_history")
