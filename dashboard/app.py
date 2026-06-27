@@ -533,7 +533,15 @@ def portfolio_panel() -> None:
     sgov_yld = f"~{sgov_rate:.1f}%" if sgov_rate else "~T-bill rate"
     invested = (gpv - sgov_base) if gpv is not None else None   # strategy deployment ex-SGOV
 
-    ui.label("Portfolio").classes("text-lg font-bold")
+    with ui.row().classes("items-baseline gap-3"):
+        ui.label("Portfolio").classes("text-lg font-bold")
+        _lc = service.STATE.get("last_cheap")
+        if _lc is not None:
+            ui.label(f"updated {_ago(_lc)}").classes("text-xs text-grey-6")
+        elif service.STATE.get("portfolio_ts"):
+            _t = dt.datetime.fromtimestamp(service.STATE["portfolio_ts"])
+            ui.label(f"last refreshed {_t.strftime('%m-%d %H:%M')} · refreshing…")\
+                .classes("text-xs text-orange")
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
         _stat("Total value", _money(nl), "text-grey-9",
               "Net liquidation value of the IBKR paper account")

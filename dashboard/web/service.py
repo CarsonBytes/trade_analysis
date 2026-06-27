@@ -212,6 +212,21 @@ def refresh_cheap() -> None:
                 store.cache_set("sgov_history", sh[-3000:])
     except Exception as e:
         log.debug("sgov_history error: %s", e)
+    # persist a portfolio snapshot so a fresh restart shows last-known stats (not empty).
+    # GUARD: only save when we actually have account data -- never overwrite a good snapshot
+    # with an empty one from a cycle where the broker connection wasn't ready yet.
+    try:
+        if STATE.get("account") and STATE["account"].get("NetLiquidation") is not None:
+            import time as _t4
+            store.cache_set("portfolio_snapshot", {
+                "ts": int(_t4.time()),
+                "account": STATE.get("account"), "positions": STATE.get("positions"),
+                "cash_sweep": STATE.get("cash_sweep"), "fx_usd": STATE.get("fx_usd"),
+                "tbill_rate": STATE.get("tbill_rate"),
+                "broker_name": STATE.get("broker_name"),
+                "broker_conn": STATE.get("broker_conn")})
+    except Exception as e:
+        log.debug("portfolio_snapshot save error: %s", e)
 
 
 def refresh_news() -> None:
@@ -260,9 +275,22 @@ def refresh_llm(cap: int | None = None) -> str:
 
 
 def restore_cache() -> None:
-    """Load the last board scan from disk on startup (no LLM call)."""
+    """Load the last board scan + portfolio snapshot from disk on startup (no broker
+    call) so the dashboard shows last-known stats immediately instead of an empty section."""
     data, ts = store.cache_get("last_board_scan")
     if data:
         STATE["macro_note"] = data.get("macro_note", "")
         STATE["llm"] = {s["key"]: InstrumentSignal(**s) for s in data.get("signals", [])}
         STATE["last_status"] = f"restored cached scan from {ts}"
+    # portfolio snapshot: only fill keys the live refresh hasn't populated yet
+    snap, _sts = store.cache_get("portfolio_snapshot")
+    if snap:
+        for k in ("account", "cash_sweep", "fx_usd", "tbill_rate", "broker_name",
+                  "broker_conn"):
+            if snap.get(k) is not None and not STATE.get(k):
+                STATE[k] = snap[k]
+        pos = snap.get("positions")
+        if pos and not STATE.get("positions"):
+            STATE["positions"] = {int(k): v for k, v in pos.items()}   # JSON str keys -> int
+        if STATE.get("last_cheap") is None and snap.get("ts"):
+            STATE["portfolio_ts"] = snap["ts"]                         # data-as-of for the UI
