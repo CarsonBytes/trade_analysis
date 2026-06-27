@@ -99,16 +99,20 @@ def _score_one(inst):
 
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
+    # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
+    # dicts in place, or a UI panel iterating them races ("dict changed size during iteration").
+    _sources, _scores, _live, _spark = (dict(STATE["sources"]), dict(STATE["scores"]),
+                                        dict(STATE["live"]), dict(STATE["spark"]))
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for key, score, source, live_px, live_src, spread, age, spark in ex.map(_score_one, active_universe()):
-            STATE["sources"][key] = source
+        for key, score, source, live_px, live_src, spread, age, spark_v in ex.map(_score_one, active_universe()):
+            _sources[key] = source
             if score is not None:
-                STATE["scores"][key] = score
+                _scores[key] = score
             if live_px is not None:
-                STATE["live"][key] = {"price": live_px, "src": live_src,
-                                      "spread": spread, "age": age}
-            if spark:
-                STATE["spark"][key] = spark
+                _live[key] = {"price": live_px, "src": live_src, "spread": spread, "age": age}
+            if spark_v:
+                _spark[key] = spark_v
+    STATE["sources"], STATE["scores"], STATE["live"], STATE["spark"] = _sources, _scores, _live, _spark
     STATE["mt5_available"] = mt5_client.is_available()
     try:
         STATE["positions"] = broker.live_positions()   # paper_id -> real fill/P&L

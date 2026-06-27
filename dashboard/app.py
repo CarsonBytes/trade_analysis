@@ -124,7 +124,7 @@ def _fmt_age(secs: float) -> str:
 def _data_source_text() -> tuple[str, str]:
     """Return (label, css) describing the live price source / broker connection."""
     from dashboard.execution import broker
-    live = service.STATE.get("live", {})
+    live = dict(service.STATE.get("live") or {})        # snapshot: avoid iterating a live dict
     if broker.is_ib():
         ib_live = {k: v for k, v in live.items() if v.get("src") == "ib-tick"}
         n = len(ib_live)
