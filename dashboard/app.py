@@ -524,8 +524,9 @@ def portfolio_panel() -> None:
         if accrued is not None:
             _stat("Interest accrued", _money(accrued),
                   "text-green" if accrued >= 0 else "text-red",
-                  "Cash/SGOV interest accrued this period (IB pays it out monthly). "
-                  "Negative = net margin interest owed.")
+                  "IB interest accrued on CASH balances since the last monthly payout "
+                  "(running total, resets monthly). NOT from SGOV — SGOV pays separate monthly "
+                  "distributions. Negative = net margin interest owed.")
         # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB rate
         if sgov_rate is not None:
             sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
