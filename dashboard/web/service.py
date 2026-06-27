@@ -115,7 +115,9 @@ def refresh_cheap() -> None:
     STATE["sources"], STATE["scores"], STATE["live"], STATE["spark"] = _sources, _scores, _live, _spark
     STATE["mt5_available"] = mt5_client.is_available()
     try:
-        STATE["positions"] = broker.live_positions()   # paper_id -> real fill/P&L
+        _pos = broker.live_positions()                 # None on connection failure
+        if _pos is not None:                           # keep last-good on a failed read
+            STATE["positions"] = _pos
     except Exception as e:
         log.debug("live_positions error: %s", e)
     # broker-agnostic status for the header (computed here so the UI thread never
@@ -179,13 +181,17 @@ def refresh_cheap() -> None:
     # keep idle cash in USD (opt-in CASH_USD=1): clears the USD margin debit + earns
     # USD interest. Runs BEFORE the SGOV sweep so the debit is cleared first.
     try:
-        STATE["fx_usd"] = broker.keep_cash_usd()
-    except Exception as e:                              # keep last-good value, don't clobber to 0
+        _fx = broker.keep_cash_usd()                   # keep last-good unless the read succeeded
+        if _fx.get("enabled") is False or _fx.get("ok"):
+            STATE["fx_usd"] = _fx
+    except Exception as e:
         log.debug("keep-cash-usd error: %s", e)
     # park idle cash in SGOV (opt-in CASH_SWEEP=1); strategy always keeps a buffer
     try:
-        STATE["cash_sweep"] = broker.sweep_cash()
-    except Exception as e:                              # keep last-good value, don't clobber to 0
+        _cs = broker.sweep_cash()                       # keep last-good unless the read succeeded
+        if _cs.get("enabled") is False or _cs.get("ok"):
+            STATE["cash_sweep"] = _cs
+    except Exception as e:
         log.debug("cash sweep error: %s", e)
     # current short-term T-bill rate (^IRX) = live SGOV-yield proxy; refreshed ~daily
     try:

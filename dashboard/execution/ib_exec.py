@@ -333,18 +333,24 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
 
 # ---- read-only views (UI / analysis) ---------------------------------------
 
-def live_positions() -> dict:
-    """Map paper_id -> live IB position for OUR trades (matched via the
-    ib_mirror table's con_id). Mirrors executor.live_positions output shape."""
+def live_positions() -> dict | None:
+    """Map paper_id -> live IB position for OUR trades (matched via the ib_mirror
+    table's con_id). Returns None on a CONNECTION failure (so callers keep last-good)
+    vs {} when genuinely flat. Mirrors executor.live_positions output shape."""
     if not ib_client.is_available():
-        return {}
+        return None
     ib = ib_client._ensure_conn()
+    if ib is None:
+        return None
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, qty FROM ib_mirror "
                          "WHERE status='OPEN'").fetchall()
-    positions, portfolio = ib_client.call(lambda: (
-        {p.contract.conId: p for p in (ib.positions() or [])},
-        {i.contract.conId: i for i in (ib.portfolio() or [])}))
+    try:
+        positions, portfolio = ib_client.call(lambda: (
+            {p.contract.conId: p for p in (ib.positions() or [])},
+            {i.contract.conId: i for i in (ib.portfolio() or [])}))
+    except Exception:                                  # noqa: BLE001 -- read failed, keep last-good
+        return None
     out: dict[int, dict] = {}
     for paper_id, con_id, qty in rows:
         p = positions.get(con_id)
@@ -385,13 +391,16 @@ def keep_cash_usd() -> dict:
     debit, which costs ~5-6%). Opt-in via CASH_USD=1, paper-guarded. Converts HKD down to
     a small residual buffer. Returns status for the dashboard."""
     status = {"enabled": os.environ.get("CASH_USD", "").lower() in ("1", "true", "yes"),
-              "usd_cash": 0.0, "hkd_cash": 0.0, "log": ""}
+              "ok": False, "usd_cash": 0.0, "hkd_cash": 0.0, "log": ""}
     if not status["enabled"]:
         return status
     ib = _guard()
     if ib is None:
         return status
     led = _ledger_cash(ib)
+    if "USD" not in led and "HKD" not in led:            # ledger read failed -> keep last-good
+        return status
+    status["ok"] = True
     hkd = led.get("HKD", 0.0)
     status["usd_cash"] = led.get("USD", 0.0)
     status["hkd_cash"] = hkd
@@ -447,7 +456,7 @@ def sweep_cash() -> dict:
     + SGOV) each cycle. Paper-guarded + opt-in (CASH_SWEEP=1). Returns a status dict
     for the dashboard. NB: IB *paper* may not credit the actual distribution -- this
     runs the MECHANICS; the real yield materialises on a funded account."""
-    status = {"enabled": _sweep_on(), "sgov_qty": 0.0, "sgov_value_base": 0.0,
+    status = {"enabled": _sweep_on(), "ok": False, "sgov_qty": 0.0, "sgov_value_base": 0.0,
               "ccy": "", "log": ""}
     if not _sweep_on():
         return status
@@ -475,6 +484,7 @@ def sweep_cash() -> dict:
     status["ccy"] = ccy
     base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)    # USD -> base ccy
     sgov_usd = sgov_qty * px
+    status["ok"] = True                                          # SGOV holding read OK
     status["sgov_qty"] = sgov_qty
     status["sgov_value_base"] = sgov_usd * base_per_usd
     if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
