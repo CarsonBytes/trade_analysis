@@ -173,14 +173,12 @@ def refresh_cheap() -> None:
     # USD interest. Runs BEFORE the SGOV sweep so the debit is cleared first.
     try:
         STATE["fx_usd"] = broker.keep_cash_usd()
-    except Exception as e:
-        STATE["fx_usd"] = {"enabled": False}
+    except Exception as e:                              # keep last-good value, don't clobber to 0
         log.debug("keep-cash-usd error: %s", e)
     # park idle cash in SGOV (opt-in CASH_SWEEP=1); strategy always keeps a buffer
     try:
         STATE["cash_sweep"] = broker.sweep_cash()
-    except Exception as e:
-        STATE["cash_sweep"] = {"enabled": False}
+    except Exception as e:                              # keep last-good value, don't clobber to 0
         log.debug("cash sweep error: %s", e)
     # current short-term T-bill rate (^IRX) = live SGOV-yield proxy; refreshed ~daily
     try:

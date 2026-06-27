@@ -454,13 +454,6 @@ def sweep_cash() -> dict:
     ib = _guard()
     if ib is None:
         return status
-    summ = ib_client.account_summary()
-    if not summ or summ.get("TotalCashValue") is None:
-        return status
-    ccy = summ.get("_ccy", "")
-    status["ccy"] = ccy
-    base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)      # USD -> base ccy
-    cash_usd = float(summ["TotalCashValue"]) / base_per_usd
     contract = ib_client.stock_contract(SGOV_SYMBOL)
     if contract is None:
         status["log"] = "cash-sweep: SGOV contract unavailable, retry"
@@ -474,10 +467,19 @@ def sweep_cash() -> dict:
         px = float(pf.marketPrice) if (pf and pf.marketPrice and pf.marketPrice == pf.marketPrice
                                        and pf.marketPrice > 0) else SGOV_PX_EST
         return qty, px
+    # READ THE SGOV HOLDING FIRST (robust) so its value is ALWAYS reported, even if the
+    # account-summary read below fails on a flaky cycle -- otherwise the dashboard flickers to 0.
     sgov_qty, px = ib_client.call(_snap)
+    summ = ib_client.account_summary()
+    ccy = (summ or {}).get("_ccy", "") or "HKD"                  # default base = HKD
+    status["ccy"] = ccy
+    base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)    # USD -> base ccy
     sgov_usd = sgov_qty * px
     status["sgov_qty"] = sgov_qty
     status["sgov_value_base"] = sgov_usd * base_per_usd
+    if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
+        return status                                            # SGOV value, skip rebalancing
+    cash_usd = float(summ["TotalCashValue"]) / base_per_usd
 
     investable = max(cash_usd + sgov_usd, 0.0)
     target_usd = investable * CASH_SWEEP_TARGET
