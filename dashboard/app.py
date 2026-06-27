@@ -24,9 +24,49 @@ from dashboard.core.scoring import rank
 # ---- settings (live, editable from the UI) --------------------------------
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
-SETTINGS = {"cheap_min": 1, "llm_min": 30, "auto_pause": True,
+SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             "cap": 200, "grid_cols": 4}
 _busy = {"flag": False}
+
+
+def _save_settings() -> None:
+    """Persist UI settings so they survive a restart (the watchdog relaunches fresh)."""
+    try:
+        from dashboard.core import store
+        from dashboard.core import paper as _p
+        store.cache_set("ui_settings", {
+            "cheap_min": SETTINGS["cheap_min"], "llm_min": SETTINGS["llm_min"],
+            "auto_pause": SETTINGS["auto_pause"], "cap": SETTINGS["cap"],
+            "grid_cols": SETTINGS["grid_cols"],
+            "risk_per_trade": _p.RISK_PER_TRADE,
+            "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI})
+    except Exception:                                  # noqa: BLE001 -- settings are non-critical
+        pass
+
+
+def _load_settings() -> None:
+    """Restore persisted UI settings at startup (applied to SETTINGS + paper globals)."""
+    try:
+        from dashboard.core import store
+        from dashboard.core import paper as _p
+        saved, _ts = store.cache_get("ui_settings")
+        if not saved:
+            return
+        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols"):
+            if k in saved:
+                SETTINGS[k] = saved[k]
+        if "risk_per_trade" in saved:
+            _p.RISK_PER_TRADE = float(saved["risk_per_trade"])
+        if "overext_filter" in saved:
+            _p.OVEREXT_FILTER = bool(saved["overext_filter"])
+        if "overext_hi" in saved:
+            _p.OVEREXT_HI = float(saved["overext_hi"])
+            _p.OVEREXT_LO = float(100 - saved["overext_hi"])
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
+_load_settings()                                       # apply persisted settings at import
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -915,14 +955,17 @@ def main_page() -> None:
             ui.label("LLM scan:").classes("text-sm")
             ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
                       value=SETTINGS["llm_min"],
-                      on_change=lambda e: SETTINGS.update(llm_min=e.value)).props("dense")
+                      on_change=lambda e: (SETTINGS.update(llm_min=e.value),
+                                           _save_settings())).props("dense")
             ui.checkbox("Pause LLM on weekends",
                         value=SETTINGS["auto_pause"],
-                        on_change=lambda e: SETTINGS.update(auto_pause=e.value))
+                        on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
+                                             _save_settings()))
             ui.label("Columns:").classes("text-sm")
 
             def _set_cols(e) -> None:
                 SETTINGS.update(grid_cols=e.value)
+                _save_settings()
                 grid.refresh(); opportunities.refresh()
             ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
                       value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
@@ -931,11 +974,13 @@ def main_page() -> None:
 
             def _set_overext(e) -> None:
                 _paper.OVEREXT_FILTER = bool(e.value)
+                _save_settings()
                 gate_panel.refresh()
 
             def _set_band(e) -> None:
                 _paper.OVEREXT_HI = float(e.value)
                 _paper.OVEREXT_LO = float(100 - e.value)
+                _save_settings()
                 gate_panel.refresh()
             ui.checkbox("Block overextended", value=_paper.OVEREXT_FILTER,
                         on_change=_set_overext)\
@@ -943,11 +988,13 @@ def main_page() -> None:
             ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
                       value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
             ui.label("Risk/trade:").classes("text-sm")
+            def _set_risk(e) -> None:
+                setattr(_paper, "RISK_PER_TRADE", e.value)
+                _save_settings()
             ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
-                      value=_paper.RISK_PER_TRADE,
-                      on_change=lambda e: setattr(_paper, "RISK_PER_TRADE", e.value))\
+                      value=_paper.RISK_PER_TRADE, on_change=_set_risk)\
                 .props("dense").tooltip("% of demo equity risked per trade "
-                                        "(applied to real equity at order time)")
+                                        "(applied to real equity at order time); remembered across restarts")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
             ui.button("Restart", icon="restart_alt", on_click=_restart_server)\
