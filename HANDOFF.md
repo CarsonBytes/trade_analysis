@@ -239,6 +239,7 @@ data — do NOT pre-emptively re-open):
   > the $640 budget (unaffordable), and options-chain/IV data isn't in-stack to backtest properly.
   Verdict: negative-EV timing/vol bets in the no-edge space already falsified; put 100% of the
   30K/mo into the core ETF book — at this size the savings rate is the engine, not a -EV sleeve.
+- **Market-neutral pairs / stat-arb** — TESTED 2026-06-29 (`dashboard/research/pairs_test.py`): 10 economic ETF pairs (GLD/SLV, SPY/QQQ, IEF/TLT, EFA/EEM...), log-spread 60d z-score, enter|z|>=2 exit|z|<=0.5 stop|z|>=3.5, 0.20% round-trip cost. REJECTED: full-hist meanRet -0.18%/trade, OOS -0.13%, annSharpe -0.21 to -0.35, DSR 0%; 8/10 pairs -EV. 56% win is a trap (small wins, fat divergence losses + ~44 trades/yr x cost). The last 'short-term uncorrelated' candidate -- dead. CONFIRMS: no short-term/timing/stat-arb edge survives for us; only the slow trend + risk-dial + (modest) MR sleeve work.
 - **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
   one is untested but high overfit risk on this sample.
 - **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
