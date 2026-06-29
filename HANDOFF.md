@@ -228,6 +228,17 @@ data — do NOT pre-emptively re-open):
     testable in the current stack: both need a new external data feed (economic-calendar surprises;
     issuer creation/redemption data) we don't have. A separate data-acquisition project, not a quick
     backtest. Cited "macro Sharpe 1.6" etc. are cherry-picked from unrelated universes — not evidence.
+- **Options "lottery fund" (LEAPS state-machine + weekly debit spreads)** — PROPOSED 2026-06-29
+  (a "5K HKD/mo lottery" sleeve: buy SPY 9mo 10%-OTM puts on first 50MA break; weekly SPY debit
+  spreads on >5MA+ADX>25). REJECTED — signal-level test on SPY (1993-2025,
+  `scratchpad/spy_signal_test.py`): (a) after a first 50d-MA break SPY is UP 79% over 9mo (mean
+  +8.0%), falls >10% only 12% — buying puts there is shorting the equity-risk-premium, deeply
+  -EV (not the claimed 37% win/+112%); (b) >5MA+ADX>25 → next-week signed return −0.21%, win 47%
+  (below coin flip) before option theta/spread cost. Both the doc's "historical" tables were
+  FABRICATED (its own §7 lists the backtests as not-yet-run). Also: one SPY 9mo put ≈ $800-1500
+  > the $640 budget (unaffordable), and options-chain/IV data isn't in-stack to backtest properly.
+  Verdict: negative-EV timing/vol bets in the no-edge space already falsified; put 100% of the
+  30K/mo into the core ETF book — at this size the savings rate is the engine, not a -EV sleeve.
 - **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
   one is untested but high overfit risk on this sample.
 - **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
