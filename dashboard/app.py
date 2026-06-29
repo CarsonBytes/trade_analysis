@@ -592,6 +592,7 @@ def portfolio_panel() -> None:
                   f"USD cash {_money(cash_mo)} @ {ib_rate:.1f}% (live ^IRX-derived rates)")
 
     # equity line chart (account value over time, base ccy)
+    ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold mt-2")
     if len(hist) >= 2:
         xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in hist]
         ys = [h[1] for h in hist]
@@ -603,30 +604,40 @@ def portfolio_panel() -> None:
                         "lineStyle": {"width": 2},
                         "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"}}],
             "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
-        }).classes("w-full h-56").tooltip("Account value (NetLiq) over time")
+        }).classes("w-full h-56").tooltip(
+            "Net liquidation value over time. On the paper account (no deposits) this IS "
+            "the pure strategy P&L curve; on a funded account it'll be deposit-adjusted.")
     else:
-        ui.label("Equity curve builds as snapshots accrue (~one point / 10 min).")\
+        ui.label("Builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
 
-    # SGOV cash-parking value over time
-    sh, _shts = store.cache_get("sgov_history")
-    sh = sh or []
-    if sgov_base > 0 or len(sh) >= 2:
-        ui.label(f"Cash parked in SGOV (yielding {sgov_yld})").classes("text-sm font-bold mt-2")
-    if len(sh) >= 2:
-        sxs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in sh]
-        sys_ = [h[1] for h in sh]
+    # DRAWDOWN MONITOR — current % below the running peak (watch the -10.5% line)
+    if len(hist) >= 2:
+        _peak = hist[0][1]
+        dxs, dys, cur_dd = [], [], 0.0
+        for h in hist:
+            _peak = max(_peak, h[1])
+            cur_dd = (h[1] - _peak) / _peak * 100.0 if _peak else 0.0
+            dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
+            dys.append(round(cur_dd, 2))
+        ddcol = "#16a34a" if cur_dd > -5 else "#d97706" if cur_dd > -10.5 else "#dc2626"
+        with ui.row().classes("items-baseline gap-2 mt-2"):
+            ui.label("Drawdown from peak").classes("text-sm font-bold")
+            ui.label(f"now {cur_dd:+.1f}%").classes(
+                "text-sm font-bold " + ("text-green" if cur_dd > -5
+                                        else "text-orange" if cur_dd > -10.5 else "text-red"))
         ui.echart({
             "tooltip": {"trigger": "axis"},
-            "xAxis": {"type": "category", "data": sxs, "boundaryGap": False},
-            "yAxis": {"type": "value", "name": ccy, "scale": True},
-            "series": [{"type": "line", "data": sys_, "smooth": True, "areaStyle": {},
-                        "lineStyle": {"width": 2}, "itemStyle": {"color": "#0891b2"}}],
-            "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
-        }).classes("w-full h-44").tooltip(f"SGOV holding value ({ccy}) over time")
-    elif sgov_base > 0:
-        ui.label("SGOV value chart builds as snapshots accrue (~one point / 10 min).")\
-            .classes("text-sm text-grey mt-1")
+            "xAxis": {"type": "category", "data": dxs, "boundaryGap": False},
+            "yAxis": {"type": "value", "name": "% from peak", "max": 0, "scale": True},
+            "series": [{"type": "line", "data": dys, "smooth": True, "areaStyle": {},
+                        "lineStyle": {"width": 2}, "itemStyle": {"color": ddcol},
+                        "markLine": {"silent": True, "symbol": "none", "data": [
+                            {"yAxis": -10.5, "label": {"formatter": "backtest max DD -10.5%"},
+                             "lineStyle": {"color": "#dc2626", "type": "dashed"}}]}}],
+            "grid": {"left": 55, "right": 20, "top": 20, "bottom": 45},
+        }).classes("w-full h-44").tooltip(
+            "Current drawdown from the peak account value; dashed line = backtest worst case")
 
     # allocation pie: strategy positions + SGOV + buffer cash, dual-currency on hover
     id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
@@ -1020,13 +1031,15 @@ def main_page() -> None:
 
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")
+            t_signals = ui.tab("Signals & Gates", icon="traffic")
             t_trades = ui.tab("Paper Trades", icon="receipt_long")
             t_retro = ui.tab("Retrospective", icon="insights")
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
-            with ui.tab_panel(t_board):
+            with ui.tab_panel(t_board):                # statistics only
                 macro_banner()
                 portfolio_panel()
                 active_panel()
+            with ui.tab_panel(t_signals):              # why trades fire + what's ranking
                 gate_panel()
                 opportunities()
                 grid()
