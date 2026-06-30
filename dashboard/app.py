@@ -1070,7 +1070,8 @@ def main_page() -> None:
                                         "(applied to real equity at order time); remembered across restarts")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
-            if broker.is_ib():
+            from dashboard.execution import broker as _bk_hdr
+            if _bk_hdr.is_ib():
                 ui.button("Withdraw", icon="savings", on_click=_open_withdraw).props("flat")\
                     .tooltip("Prepare a cash withdrawal from SGOV/cash shield first (never Core); "
                              "you still transfer the money manually in IBKR")
