@@ -291,6 +291,16 @@ data — do NOT pre-emptively re-open):
   idiosyncratic risk (which the project already rejects, see "Funds/individual stocks: rejected");
   the +EV claim is unfalsifiable in-stack and the measurable parts are damning. Both REJECTED.
 - **Market-neutral pairs / stat-arb** — TESTED 2026-06-29 (`dashboard/research/pairs_test.py`): 10 economic ETF pairs (GLD/SLV, SPY/QQQ, IEF/TLT, EFA/EEM...), log-spread 60d z-score, enter|z|>=2 exit|z|<=0.5 stop|z|>=3.5, 0.20% round-trip cost. REJECTED: full-hist meanRet -0.18%/trade, OOS -0.13%, annSharpe -0.21 to -0.35, DSR 0%; 8/10 pairs -EV. 56% win is a trap (small wins, fat divergence losses + ~44 trades/yr x cost). The last 'short-term uncorrelated' candidate -- dead. CONFIRMS: no short-term/timing/stat-arb edge survives for us; only the slow trend + risk-dial + (modest) MR sleeve work.
+  **RE-CONFIRMED 2026-06-29 with a RIGOROUS refined test** (`refined_statarb_test.py`, after user asked
+  "stat-arb seems better, adopt its settings?" — premise is BACKWARDS, ours LOST): 29-ETF pool, 406 pairs,
+  IS-select top-10 by in-sample MR Sharpe → trade OOS. Top IS pairs are SAME-INDEX WRAPPERS (SPY/VOO 1.43,
+  IVV/VOO, SPY/IVV) — spread lives INSIDE the bid-ask, IS Sharpe is an illusion. OOS: @0.04% cost (fictional)
+  meanRet +0.13%/Sharpe 0.54/DSR 17%; @0.10% +0.07%/0.29/DSR 3%; @0.20% (realistic) −0.03%/−0.13/DSR 0%.
+  Win% collapses 61→38→32% as cost rises = the thin-margin-reversion death-by-cost. **DSR never clears 95%,
+  Sharpe ≤0.54 (< core 1.25).** Why reputational stat-arb (Medallion) "seems better": thousands of names +
+  HFT + EARNING the spread (rebates/co-lo, ~0 cost) + 12-20× leverage — NONE retail-replicable; the edge is
+  INFRASTRUCTURE, not the z-score concept. Transferable principles (breadth, MR) we ALREADY have: trend book
+  corr 0.26 + panic-MR sleeve (works as a 1-leg directional bounce, not a 4-leg spread). Don't adopt; dead end.
 - **Sector-rotation cross-sectional MR** — TESTED 2026-06-29 (`dashboard/research/sector_mr_test.py`):
   weekly, buy the WORST-2 of the SPDR sectors by trailing 1-wk return, hold 1wk. The raw worst-2
   basket looks fine (+7.6%/yr classic-9, +17.6% OOS user-list) but that is JUST equity beta. The
