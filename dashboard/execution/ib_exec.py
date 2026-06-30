@@ -491,7 +491,12 @@ def sweep_cash() -> dict:
         return status                                            # SGOV value, skip rebalancing
     cash_usd = float(summ["TotalCashValue"]) / base_per_usd
 
-    investable = max(cash_usd + sgov_usd, 0.0)
+    # exclude any cash earmarked for a pending manual withdrawal so the sweep does NOT
+    # re-buy SGOV with money you're about to take out (and will SELL SGOV to free it).
+    reserve_usd = _withdraw_reserve_usd()
+    investable = max(cash_usd + sgov_usd - reserve_usd, 0.0)
+    if reserve_usd > 0:
+        status["log"] = f"(withdrawal reserve ${reserve_usd:,.0f} held aside) "
     target_usd = investable * CASH_SWEEP_TARGET
     delta_usd = target_usd - sgov_usd
     if abs(delta_usd) < CASH_SWEEP_MIN_USD:
@@ -520,10 +525,104 @@ def sweep_cash() -> dict:
         return status
     status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
     status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
-    status["log"] = (f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
+    status["log"] = (status["log"] + f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
                      f"(idle cash parked at ~{CASH_SWEEP_TARGET:.0%})")
     log.info("ib_exec: %s", status["log"])
     return status
+
+
+# --- withdrawal helper: free cash from the CASH SHIELD (SGOV/idle), NEVER the Core book ---
+# Why this is minimal (vs the "3-layer lock" pitch): the sweep is STATELESS -- it reads live
+# IBKR cash + SGOV every cycle, so a withdrawal can't "desync" a ledger, and the strategy is
+# SIGNAL-driven (it never sells Core to raise cash). The ONLY real interaction is the sweep
+# re-buying SGOV with cash you've freed for a withdrawal -- so we just earmark a RESERVE the
+# sweep excludes. The actual money transfer stays a MANUAL IBKR action (never automated).
+WITHDRAW_RESERVE_KEY = "withdraw_reserve_usd"
+
+
+def _withdraw_reserve_usd() -> float:
+    from dashboard.core import store
+    try:
+        v, _ = store.cache_get(WITHDRAW_RESERVE_KEY)
+        return max(float(v), 0.0) if v is not None else 0.0
+    except Exception:                              # noqa: BLE001
+        return 0.0
+
+
+def set_withdraw_reserve(amount_usd: float) -> None:
+    from dashboard.core import store
+    store.cache_set(WITHDRAW_RESERVE_KEY, max(float(amount_usd), 0.0))
+
+
+def clear_withdraw_reserve() -> None:
+    set_withdraw_reserve(0.0)
+
+
+def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
+    """Prepare a manual cash withdrawal taking funds from the CASH SHIELD first (idle USD,
+    then SGOV), NEVER the Core ETF book. Earmarks `amount_usd` (so the sweep won't re-buy
+    SGOV with it) and sells just enough SGOV to cover any shortfall. Does NOT move money out
+    -- the actual withdrawal stays a manual IBKR action by design. Paper-guarded. Returns a
+    status dict for the UI/CLI. After you withdraw in IBKR, call clear_withdraw_reserve()."""
+    out = {"requested_usd": float(amount_usd), "reserved": False, "sgov_sold": 0,
+           "idle_usd_after": None, "ready": False, "log": ""}
+    if amount_usd <= 0:
+        out["log"] = "withdrawal: amount must be > 0"; return out
+    ib = _guard()
+    if ib is None:
+        out["log"] = "withdrawal: not a paper IB connection (guard refused)"; return out
+    summ = ib_client.account_summary()
+    if not summ or summ.get("TotalCashValue") is None:
+        out["log"] = "withdrawal: account read failed, retry"; return out
+    ccy = (summ or {}).get("_ccy", "") or "HKD"
+    base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)
+    idle_usd = float(summ["TotalCashValue"]) / base_per_usd
+    contract = ib_client.stock_contract(SGOV_SYMBOL)
+    con_id = getattr(contract, "conId", 0) if contract else 0
+
+    def _snap():
+        pos = next((p for p in (ib.positions() or []) if p.contract.conId == con_id), None)
+        pf = next((i for i in (ib.portfolio() or []) if i.contract.conId == con_id), None)
+        qty = float(pos.position) if pos else 0.0
+        mp = pf.marketPrice if pf else None
+        px = float(mp) if (mp and mp == mp and mp > 0) else SGOV_PX_EST
+        return qty, px
+    sgov_qty, px = ib_client.call(_snap) if con_id else (0.0, SGOV_PX_EST)
+
+    shortfall = amount_usd - idle_usd
+    sell_shares = 0
+    if shortfall > 0:                              # need to free cash from the shield (SGOV)
+        sell_shares = min(int(shortfall // px) + 1, int(sgov_qty))
+    out["idle_usd_after"] = idle_usd + sell_shares * px
+    out["ready"] = out["idle_usd_after"] + 1e-6 >= amount_usd
+    if not out["ready"]:
+        out["log"] = (f"withdrawal SHORT: idle ${idle_usd:,.0f} + sellable SGOV "
+                      f"${sgov_qty*px:,.0f} < ${amount_usd:,.0f}. Core is NOT touched -- "
+                      f"reduce the amount or top up the cash shield first.")
+        return out
+    if dry_run:
+        out["log"] = (f"withdrawal DRYRUN: would reserve ${amount_usd:,.0f} + sell {sell_shares} "
+                      f"SGOV @~{px:.2f} -> idle ~${out['idle_usd_after']:,.0f}; then withdraw "
+                      f"manually in IBKR. Core untouched.")
+        return out
+    set_withdraw_reserve(amount_usd); out["reserved"] = True
+    if sell_shares > 0 and contract is not None:
+        import ib_async
+
+        def _send():
+            o = ib_async.MarketOrder("SELL", sell_shares)
+            o.orderRef = "withdraw-sgov"; o.tif = "DAY"
+            return ib.placeOrder(contract, o)
+        try:
+            ib_client.call(_send); out["sgov_sold"] = sell_shares
+        except Exception as e:                     # noqa: BLE001
+            out["log"] = f"withdrawal: SGOV sell failed ({e}); reserve set, sell SGOV manually"
+            return out
+    out["log"] = (f"withdrawal READY: reserved ${amount_usd:,.0f}, sold {sell_shares} SGOV. "
+                  f"Now withdraw ${amount_usd:,.0f} MANUALLY in IBKR, then run --withdraw-clear. "
+                  f"Core ETF book untouched.")
+    log.info("ib_exec: %s", out["log"])
+    return out
 
 
 def reconcile() -> list[dict]:
@@ -570,6 +669,16 @@ def _parse_expiry(ymd: str) -> dt.date | None:
 
 
 def main() -> None:
+    import sys
+    if "--withdraw-clear" in sys.argv:
+        clear_withdraw_reserve(); print("withdraw reserve cleared (back to 0)."); return
+    if "--withdraw" in sys.argv:
+        i = sys.argv.index("--withdraw")
+        amt = float(sys.argv[i + 1]) if i + 1 < len(sys.argv) else 0.0
+        res = prepare_withdrawal(amt, dry_run="--dry" in sys.argv)
+        for k, v in res.items():
+            print(f"  {k}: {v}")
+        return
     if not ib_client.is_available():
         print("IB not available (TWS/Gateway running + API enabled?)."); return
     print(f"account={ib_client.account_id()}  paper={is_paper()}")

@@ -863,6 +863,53 @@ async def _log_trades_now() -> None:
     ui.notify(f"Logged {len(placed)} paper trade(s).")
 
 
+def _open_withdraw() -> None:
+    """Manual cash-withdrawal helper: free funds from the CASH SHIELD (idle USD -> SGOV)
+    first, NEVER the Core book, and earmark a reserve the sweep respects. The actual money
+    transfer stays a manual IBKR action by design — this only prepares the cash."""
+    from dashboard.execution import broker as _bk
+    if not _bk.is_ib():
+        ui.notify("Withdrawal helper is IBKR-only.", type="warning"); return
+    with ui.dialog() as dlg, ui.card().classes("min-w-[500px]"):
+        ui.label("Withdraw cash — from SGOV / cash shield first, never Core").classes("text-lg font-bold")
+        ui.label("Sells SGOV if idle cash is short and reserves the amount so the auto-sweep "
+                 "won't re-buy it. Does NOT move money out — withdraw in IBKR manually, then "
+                 "click Clear reserve.").classes("text-xs text-grey-7")
+        amt = ui.number("Amount (USD)", value=5000, min=0, step=1000)\
+            .props("dense outlined").classes("w-48")
+        out = ui.label("").classes("text-sm font-mono whitespace-pre-wrap mt-1")
+
+        async def _run_prep(dry: bool):
+            a = float(amt.value or 0)
+            if a <= 0:
+                out.set_text("Enter an amount > 0"); return
+            out.set_text("working…")
+            res = await run.io_bound(_bk.prepare_withdrawal, a, dry)
+            out.set_text(("✅ " if res.get("ready") else "⚠️ ") + str(res.get("log", "")))
+            if not dry:
+                portfolio_panel.refresh()
+
+        async def _prep_dry():
+            await _run_prep(True)
+
+        async def _prep_real():
+            await _run_prep(False)
+
+        async def _clear():
+            await run.io_bound(_bk.clear_withdraw_reserve)
+            out.set_text("Reserve cleared (back to 0)."); portfolio_panel.refresh()
+
+        with ui.row().classes("items-center gap-2 mt-2"):
+            ui.button("Preview (dry-run)", icon="visibility", on_click=_prep_dry).props("flat")
+            ui.button("Prepare (sell SGOV + reserve)", icon="savings", on_click=_prep_real)\
+                .props("color=primary")\
+                .tooltip("Sells SGOV to cover any shortfall and reserves the amount; "
+                         "then withdraw it in IBKR and Clear reserve")
+            ui.button("Clear reserve", icon="lock_open", on_click=_clear).props("flat")
+        ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+
+
 def _restart_server() -> None:
     """Exit the process so the watchdog (DashboardApp task / dashboard.ps1)
     relaunches it fresh with the latest code, ~10s later."""
@@ -1023,6 +1070,10 @@ def main_page() -> None:
                                         "(applied to real equity at order time); remembered across restarts")
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
+            if broker.is_ib():
+                ui.button("Withdraw", icon="savings", on_click=_open_withdraw).props("flat")\
+                    .tooltip("Prepare a cash withdrawal from SGOV/cash shield first (never Core); "
+                             "you still transfer the money manually in IBKR")
             ui.button("Restart", icon="restart_alt", on_click=_restart_server)\
                 .props("flat color=negative")\
                 .tooltip("exit the app so the watchdog relaunches it fresh (~10s)")

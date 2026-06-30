@@ -44,6 +44,23 @@ def sweep_cash() -> dict:
     return {"enabled": False}
 
 
+def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
+    """Free cash for a manual withdrawal from the cash shield (idle USD -> SGOV) FIRST,
+    never the Core book; earmarks a reserve the sweep respects. IB only. Does NOT move
+    money out (manual IBKR action by design)."""
+    b = _backend()
+    if hasattr(b, "prepare_withdrawal"):
+        return b.prepare_withdrawal(amount_usd, dry_run=dry_run)
+    return {"ready": False, "log": "withdrawal helper is IB-only"}
+
+
+def clear_withdraw_reserve() -> None:
+    """Clear the withdrawal reserve after you've withdrawn in IBKR (IB only)."""
+    b = _backend()
+    if hasattr(b, "clear_withdraw_reserve"):
+        b.clear_withdraw_reserve()
+
+
 def live_positions() -> dict:
     return _backend().live_positions()
 
