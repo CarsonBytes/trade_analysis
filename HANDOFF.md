@@ -8,7 +8,23 @@ Last updated 2026-06-25.
 ## ⭐⭐⭐ ADOPTED PLAN & FIGURES (single source of truth, 2026-06-25)
 
 **LIVE on IBKR paper since 2026-06-24** — `BROKER=ib` + `UNIVERSE=etf`, account DUK968178
-(~US$130k / 1.01M HKD), port 4002. Restart: `Stop/Start-ScheduledTask DashboardApp`.
+(~US$130k / 1.01M HKD PAPER default), port 4002. Restart: `Stop/Start-ScheduledTask DashboardApp`.
+
+**⚠️ REAL starting capital = 100K HKD (~$12.8k) + 30K/mo contributions** (NOT the 1M paper default;
+clarified 2026-06-29). Implications at this size: (1) **ENABLE FRACTIONAL SHARES on IBKR — mandatory**,
+else 0.5%-risk positions across 18 ETFs round to 0 shares & the book degrades; keep ALL 18 (don't
+shrink the universe — breadth IS the edge). (2) **Savings rate dominates:** 30K/mo on 100K = ~360%/yr
+contribution yield; investment return = only ~6% of yr-1 wealth growth (rising to ~21% by yr5). All
+strategy optimization adds ~+1,500 HKD/yr at 100K = rounding error vs contributions → the edge barely
+matters until the base grows. (3) **Panic-MR sleeve OPTIONAL until ~500K** (its +1.5pp ≈ +1,500 HKD/yr
+negligible early + adds commission-sensitive fills); run core-only first for simplicity. (4) Commissions
+~0.22-0.29% of yr1-avg balance (minor; IBKR fixed/tiered, don't over-trade). (5) **Cash: hold USD
+(auto ~3.1%), skip SGOV sweep until ~$75-100k NAV** (T+1 friction not worth it on a tiny contribution-fed
+acct). (6) **US estate-tax $60k line crossed at ~month 12** (~470K HKD) — US-domiciled ETFs >$60k =
+US-situs, up to 40% on a HK NRA's death; consider Irish-UCITS for long-held core equity then, but bonds/
+commodities/REITs have no clean UCITS equiv → "be aware, revisit ~$130k", not an immediate switch. (7)
+Account self-bootstraps to ~$130k (planned scale) in **~2.3y**, when the full sizing analysis applies.
+DD trivial early (−11% ≈ −11K < half a month's contribution). **Real lever = relentless contributions, not bps of edge.**
 
 **Strategy = 17-ETF long-only weekly TSMOM @ 0.5% risk.**
 - Universe (17): GLD·SLV·CPER / SPY·QQQ·DIA·IWM / IEF·TLT·SHY / HYG·TIP·EFA·EEM·DBC·VNQ·**PFF**
@@ -239,7 +255,168 @@ data — do NOT pre-emptively re-open):
   > the $640 budget (unaffordable), and options-chain/IV data isn't in-stack to backtest properly.
   Verdict: negative-EV timing/vol bets in the no-edge space already falsified; put 100% of the
   30K/mo into the core ETF book — at this size the savings rate is the engine, not a -EV sleeve.
+- **Short-vol / variance-risk-premium (weekly SPY iron condor)** — TESTED 2026-06-29
+  (`dashboard/research/short_vol_test.py`), the "last untested frontier" pitch (sell delta-0.25
+  condor every Mon, harvest theta). No options chain in-stack, so legs are **BS-modelled with
+  ^VIX as IV** (reproduces BOTH the VRP edge — IV>RV — AND the tail: a big weekly move blows
+  through the shorts → max loss). 33.4y, ~52/yr. RESULT: edge is REAL but TINY and FRAGILE.
+  base meanR **+0.017** (win **65%**, matches the pitch's 65-75% claim), OOS +0.029, **DSR only 60%**
+  (< 95% bar). Three things kill it: (1) **COST** — at 8%-of-maxloss frictions (realistic for a
+  4-leg weekly SPY condor on a small acct: bid/ask + commissions) meanR flips **−0.023**, totalR
+  +30R→−40R. The pitch's "+$10/wk / +3,700 HKD/yr" EV simply **ignores transaction costs**, which
+  dominate a weekly 4-leg structure. (2) **TAIL not controllable** — the pitch's "2x-credit stop"
+  produced IDENTICAL results to hold-to-expiry (weekly gap moves blow through short strike AND stop
+  in the same week; worst week −1.04R = full max loss). Refutes the central safety claim. cum
+  drawdown −22R vs +30R total over 33y = gives back ~9 months of premium per crash. (3) The pitch's
+  own strike math is wrong: **delta-0.25 WEEKLY ≈ ~2% OTM, not "5-8%"** (5-8% OTM weekly is
+  delta ~0.03, ~no premium); it conflates monthly w/ weekly. VERDICT: classic pennies-in-front-of-
+  steamroller — small positive carry, equity-like left tail, edge eaten by retail frictions, DSR
+  fail, "stop" doesn't protect. Same family verdict as CBOE PUT/PutWrite literature. **The "short
+  not long" reframe doesn't escape the no-edge space.** All option sleeves now falsified.
+- **Earnings vol-crush short strangle + 0DTE Friday "pin-risk" butterfly** — PROPOSED 2026-06-29
+  (sell single-name strangles pre-earnings to harvest the IV crush; sell 0DTE SPY butterflies
+  Friday afternoon for OpEx gamma-pin theta). DATA VERDICT FIRST: yfinance options = LIVE chain
+  only (no historical IV), intraday = 5m/60d & 1m/7d only. So (a) the earnings **crush MAGNITUDE**
+  (the whole edge) is NOT observable in-stack, and (b) **0DTE pin is NOT backtestable at all** (no
+  historical intraday underlying or 0DTE chains; 0DTE only existed ~2-3y; the "pin" anomaly is
+  contested — dealer gamma cuts both ways — and carries the fattest gamma tail). Earnings part
+  TESTED on the part we CAN measure (`dashboard/research/earnings_vol_crush_test.py`, 9 mega-caps,
+  earnings 2014+, 666 events): realized earnings gaps are HUGE (mean |move| 4.5-11.6%, 95th pct
+  11-26%, **max 35% NVDA / 52% AMD / 42% NFLX**); a 1.5×-expected-move short strike is breached
+  **12-31%** of the time (so "90% win" is really ~70-88%). Modelling the strangle and **GRANTING a
+  generous 10% IV-overpricing edge + only 6% friction**: meanR **+0.001** (dead flat), win 87% (the
+  trap), **worst single event −5.43R**, IS meanR NEGATIVE −0.017 / OOS +0.023 (unstable), **DSR
+  40%**. A NAKED single-name strangle = undefined risk; one 20-50% earnings gap is catastrophic on
+  a real acct. VERDICT: zero-EV-with-a-cliff even before honest costs/IV; pure single-name
+  idiosyncratic risk (which the project already rejects, see "Funds/individual stocks: rejected");
+  the +EV claim is unfalsifiable in-stack and the measurable parts are damning. Both REJECTED.
 - **Market-neutral pairs / stat-arb** — TESTED 2026-06-29 (`dashboard/research/pairs_test.py`): 10 economic ETF pairs (GLD/SLV, SPY/QQQ, IEF/TLT, EFA/EEM...), log-spread 60d z-score, enter|z|>=2 exit|z|<=0.5 stop|z|>=3.5, 0.20% round-trip cost. REJECTED: full-hist meanRet -0.18%/trade, OOS -0.13%, annSharpe -0.21 to -0.35, DSR 0%; 8/10 pairs -EV. 56% win is a trap (small wins, fat divergence losses + ~44 trades/yr x cost). The last 'short-term uncorrelated' candidate -- dead. CONFIRMS: no short-term/timing/stat-arb edge survives for us; only the slow trend + risk-dial + (modest) MR sleeve work.
+- **Sector-rotation cross-sectional MR** — TESTED 2026-06-29 (`dashboard/research/sector_mr_test.py`):
+  weekly, buy the WORST-2 of the SPDR sectors by trailing 1-wk return, hold 1wk. The raw worst-2
+  basket looks fine (+7.6%/yr classic-9, +17.6% OOS user-list) but that is JUST equity beta. The
+  proper control — ALPHA = worst-2 minus equal-weight-9 — is NEGATIVE everywhere: classic-9
+  (27.5y) full −2.9%/yr, OOS −7.8%, DSR 0%; user's 9-list (8y, XLRE/XLC) full −4.0%, OOS −0.9%,
+  DSR 1-7%; and it gets STRICTLY WORSE at realistic 0.10%/leg cost (full −7.8%, OOS −12.5%).
+  Buying losing sectors UNDERPERFORMS simply holding the basket — the diversification given up by
+  concentrating in 2 names dwarfs the tiny reversion tilt, and cost finishes it. REJECTED. The
+  "if this loses too, short-term is dead" candidate from the 2026-06-29 chat — it lost.
+- **Panic-MR SIZING + BLEND study** — 2026-06-29 (`dashboard/research/dipbuy_sizing.py` +
+  `dipbuy_blend.py`), answering "put more into the dip-buy since it's +EV?": YES lift off the token
+  2K to **risk-matched (~one core risk-unit: ~$650 risk ⇒ ~$10-13k / ~80-100K HKD per trade** at the
+  −5% stop, from the SGOV pool). **BLEND TEST (the real answer, 30.3y incl. 2008/2020, full 18-ETF
+  screened book = ETF_UNIVERSE+ETF_CANDIDATES, idle cash @4.3%):** core-only **+6.94% CAGR / −9.7% DD
+  / Sharpe 1.05 / ratio 0.72** → **core+dip +7.39% / −9.7% / 1.11 / 0.77**. i.e. **+0.45pp CAGR at
+  FLAT drawdown**, Sharpe up. (NB: a first blend run mistakenly used the bare 10-ETF `ETF_UNIVERSE`
+  base → too-low +4.95% core; the real book needs `+ETF_CANDIDATES`; dipbuy_blend.py fixed.)
+  **⚠️ CORRECTS an earlier wrong claim in this
+  doc that the dip-buy is "tail-correlated / stacks / concentrates"** — that was true of the slower
+  WEEKLY --meanrev sleeve (long hold, adds exposure through drawdowns), but the panic dip-buy is a
+  FAST ~3-day scalp of the BOUNCE off a VIX-spike low (tight −5% stop): on sleeve-active days
+  corr(core,sleeve) = **−0.25 (mildly DIVERSIFYING)** — it harvests the rebound near the core's
+  troughs, cushioning them. So at risk-matched size it is modestly accretive on BOTH return and risk,
+  not just 手癮. CAVEATS: gain is small (+0.44pp on ~5% base); only 103 trades/30y so the −0.25 corr
+  + Sharpe bump have wide error bars (read as "doesn't hurt, slightly helps", NOT a guaranteed
+  −1.1pp DD); risk-matched is the sweet spot (bigger erodes the favorable ratio — sleeve-alone DD
+  grows); adds a DAILY trigger-watch atop the weekly core. Capacity-limited (~3.2 trades/yr × ~3d =
+  ~2.6% of calendar deployed, pool ~97% idle in SGOV). Core 30K/mo stays the engine; the sleeve nudges.
+- **Panic-MR REFINEMENTS** — 2026-06-29 (`dashboard/research/dipbuy_refine.py`), testing the
+  pitch's tweaks (core 18-ETF +7.11%/−9.6%/Sharpe1.07 baseline). (A) SIZING SWEEP: Sharpe & ratio
+  rise MONOTONICALLY with size to 3% risk/trade (no interior optimum) — a LEVERAGE ILLUSION (the
+  backtest assumes the −5% stop always fills; real 2008/2020 GAPS through it, clustered at VIX>30).
+  So optimal ratio is risk-BOUNDED not Sharpe-maxed: **0.5% risk/trade (~90K HKD), up to 1% (~180K)**
+  — 0.5% captures ~95% of the ratio gain (0.74→0.79 vs 0.81 plateau) at unchanged −9.6% DD. (B)
+  **VIX-SCALING = VALIDATED, adopt**: dip edge is almost all in VIX>30 entries — meanR VIX<20 +0.48%
+  / 20-30 +0.32% / **>30 +2.28% (win 79%, n=47)**, ~5-7×. Rule: small/skip <30, size up (1-1.5%)
+  >30. (C) MULTI-ASSET QQQ/IWM/XLK: QQQ meanR +1.93%/XLK +1.77%/IWM +0.62% (weak); pooled 4-asset
+  blend @0.5% = +9.05%/−10.1%/Sharpe1.28 vs SPY-only +7.56%/−9.6%/1.13. BUT SPY/QQQ/XLK 0.85-0.95
+  corr ⇒ mostly CORRELATED SIZING-UP not diversification (don't double-count w/ (A)); worth it for
+  frequency (~3→~13/yr) + small Sharpe edge; drop IWM. (D) STAGED EXITS = REJECTED: base meanR
+  +1.21%/win75% → staged +1.10%/win66% (WORSE — same as trend book, the MR edge IS the snap to 5MA;
+  holding for a bigger bounce gives it back; pitch's "+1.5-1.8%" claim is false). REJECTED in pitches
+  (already-settled, not re-run): vol-targeting/risk-parity (book already ATR=risk-parity; --voltarget
+  = pure leverage, ratio flat), XSMOM "top-30%" (=--mom-filter top-5 ≈ top-30% of 18 → CAGR halves,
+  ratio 1.54→0.91; breadth IS the edge). Irish-domiciled ETFs (CSPX/VUAA/IDTL) = legit OPS not alpha:
+  dividend-withholding 30→15% is weak for a 3wk-hold book (matters on bond sleeves only); the REAL
+  point they miss = US ESTATE TAX (US-domiciled >$60k = US-situs, up to 40% on a HK NRA's death;
+  Irish UCITS avoid it) — worth it as the acct grows, offset by worse UCITS liquidity + no clean
+  CPER/PFF/DBC equivalents. NET RECO: SPY+QQQ+XLK, 0.5% base VIX-scaled (1-1.5% >30), base exit →
+  blend ~+8.5-9%/−10%/Sharpe~1.25 vs core +7.1%/−9.6%/1.07; real ~+1.5-2pp, but leans on clean stops
+  — size for the gap-through, hence cap ~1% though the optimizer screams 3%.
+- **Panic-MR ROUND-2 refinements** — 2026-06-29 (`dashboard/research/dipbuy_refine2.py`), critics'
+  round-2 ideas: (1) **Connors RSI(2)<10>200MA entry = LATERAL not better**: 8.6/yr but meanR only
+  +0.53% (vs vix_panic 3.5/yr +1.21%), same blend Sharpe 1.11≈1.12 (freq-for-quality swap; a 手癮
+  "more trades" dial, not a perf gain). (2) **ADX>20 filter = ADOPT (critic right, against my prior):**
+  meanR +1.21→**+1.40%**, win 74→78%, loses only 7/105 trades; ADX<20 trades are −0.25% (dead money).
+  Why (vs old --meanrev's ADX<20): this is buy-the-panic-dip-IN-A-TREND, needs a trend to snap back
+  into — different signal than z-score range-reversion. (3) **VIX-percentile ≈ absolute** (edge rises
+  vpct<50 +0.74%→ >90 +1.31%, same shape); percentile is more regime-robust, no extra alpha. (4)
+  **GAP-REAL stops (fill −5% at the actual gapped close) — settles the cap debate:** 0.5% risk DD
+  −9.8→−10.1 (fine), 1% −10.5→−11.1 (fine), **2% −13.5→−19.8 (blows out)** — empirical proof 0.5%
+  default/1% hard cap is right, 2%+ dangerous. CRITIC WRONG on "market-order stop when VIX>30":
+  a market order fills at the gapped-down OPEN = same loss; order type can't beat an overnight gap,
+  only SIZE can. **FINAL DIP SLEEVE SPEC:** SPY+QQQ+XLK (no IWM), entry >2.5% below 20MA + VIX↑>15%/5d
+  + RSI(14)<35 + **ADX>20**, size 0.5% base / 1.0% at VIX>30 (HARD CAP 1%), exit 5MA-touch|+3%|−5%soft|
+  10d (NO staging), funded from SGOV. Gap-real blend ≈ **+8.5-9% CAGR / −10 to −11% DD / Sharpe 1.23-1.29**
+  vs core +7.0%/−9.7%/1.06 (sleeve adds ~+1.5-2pp CAGR, ~+0.17 Sharpe, ~flat DD). Caveats: ADX split
+  n=98/19 (small), gap-real still understates flash-crash, SPY/QQQ/XLK 0.85-0.95 corr (concentrates) → cap 1%.
+- **Panic-MR ROUND-3 = ALL REJECTED, sleeve SATURATED** — 2026-06-29 (`dipbuy_refine3.py`), critic's
+  round-3 micro-carvings: (1) **rel-strength filter (SPY underperf RSP/VT>1%)** — directionally
+  suggestive (vs VT: underperf +2.98% vs +1.58%) but n=3 (RSP)/n=9 (VT) = UNUSABLE, decimates freq
+  to ~0.3/yr + loses pre-2003/08 history; already captured by VIX>30. (2) **deep-overshoot amplifier
+  (<−10% below 200MA)** — that bucket IS high-edge (+2.35%, n=29) but REDUNDANT with the VIX>30
+  scaling (a −10% 200MA break ≈ a VIX>30 panic; middle bucket −10..−5% is weakest +0.44% = noisy,
+  not a clean dim). (3) **VIX-crush early TP (exit VIX −20%/2d in profit)** — INERT: base exit already
+  faster (~2.7d), blend byte-IDENTICAL +8.72%/−8.9%/Sh1.27, per-trade marginally worse. Predicted
+  +0.1-0.5%/each → reality ~0. **DIP SLEEVE NOW SATURATED — round-2 spec is final; further tuning =
+  overfitting. STOP carving, DEPLOY.** (NB ADX-filtered blend DD −8.9% < core −9.7% — filter cleans it.)
+- **CORE/OPS proposals ROUND-4** — 2026-06-29 (`dashboard/research/core_ops_test.py`): (A)
+  **VOL-TARGETING re-tested on ETF book, REJECTED (critic's table fabricated):** critic claimed @12%
+  DD −9.6→−8.2 / Sharpe →1.15; REALITY fixed 0.5% +6.95%/−9.7%/Sh1.22/ratio0.72 → voltarget 12%
+  **+14.05%/−29.5%(TRIPLED)/Sh0.99/ratio0.48**, 15% +14.9%/−29.6%/0.96. It LEVERS UP ~3× (book runs
+  ~3-4% realized vol; "target 12%" = 3× leverage) → CAGR 2× DD 3×, ratio worse. Vol-target only cuts
+  DD if you target BELOW current vol (= just de-risk, which 0.5% already does). (B) **MONTHLY bars
+  REJECTED:** weekly +6.95%/−9.7%/Sh1.22 (~38rt/yr) vs monthly +4.09%/−11.1%/**Sh0.70** (~10/yr) —
+  coarsening the signal crushes it; critic's "monthly only −0.3% CAGR" off ~10×; premise wrong anyway
+  (signal-driven ~32-38rt/yr, NOT 52× rebalance; costs already in R). (C) **VIX-SCALED CONTRIBUTIONS
+  = CLAIM RETRACTED after a FAIR test.** The fwd-12mo SPY +23.8%@VIX>30 vs +12.0% all (n=32) is real
+  but MISLEADING — it ignores the opportunity cost of holding cash while waiting. Equal-total-contribution
+  sim (bank cash, deploy at VIX>30, 34y SPY, reserve@3.6%): tilt UNDERPERFORMS pure DCA by **−3.9%
+  (bank30%) to −6.6% (bank50%)** terminal — time-in-market beats timing even WITH a +EV panic signal,
+  because the market's up ~80% of months @~10% vs reserve 3.6%. So DON'T hold back the regular 30K/mo
+  flow. The ONLY +EV form: deploy GENUINELY-IDLE emergency cash (earning ~0) opportunistically at
+  VIX>30 — +EV only vs 0%, a bounded one-off, NOT a CAGR lever. NET PERFORMANCE CHANGE this round = 0.
+  Ops endorsed (not backtested): FX via IDEALPRO (already live via CASH_USD), automate+rule-gate the
+  sleeve & don't override on streaks & review monthly, Irish-UCITS at $200k+ for long-held core (estate
+  -tax driver). **RESEARCH FULLY CLOSED; remaining edge is purely behavioral — contribute relentlessly,
+  do NOT hold cash to time the market, opportunistically deploy idle cash in panics, don't touch the red sleeve.**
+- **"5 engineering layers" ROUND-5 = ALL REJECTED** — 2026-06-29 (`corr_penalty_test.py`): (1) VIX
+  CLOSE>30 trigger — directionally right (fwd-4wk SPY close>30 +2.47% vs intraday-only +1.45% vs calm
+  +0.70%) & already how signals work; but serves the DCA-losing contribution-timing idea → minor exec
+  detail only (use weekly close for opportunistic idle-cash deploy), "+0.5-1% IRR" fabricated. (2) ATR
+  override 1.5× risk at VIX>30 = LEVERAGE-IN-DISGUISE (ATR shrinking notional in high vol is the FEATURE
+  = constant risk; 1.5× = the tail we proved dangerous, gap-real 2%→−19.8% DD) → REJECT. (3) Correlation
+  penalty TESTED — INERT (byte-identical 6.97%/−9.7%/Sh1.24 at every threshold) + premise FALSE: book
+  avg pairwise corr median **0.26**/90th 0.51 (genuinely multi-asset, only ~4/18 US equity, NOT "17
+  equities @0.85"); "-35% DD" refuted by 30y incl 2008/2020 = −9.7% (trend EXITS in crashes). Same as
+  prior regime-overlay rejections. (4) Tax-loss/STCG/wash-sale = WRONG JURISDICTION: user is **HK = ZERO
+  cap-gains tax**; US doesn't tax NRA cap gains (only divs, 30%→15% via Irish UCITS already). DELETE the
+  layer entirely (it'd add churn for 0 benefit). (5) Override circuit-breaker — principle (precommit) good
+  but specifics broken: "200d-MA of the sleeve" nonsensical (sparse ~3d holds, no price series); "cut risk
+  after 4 losing wks / VIX>40 falling" DE-RISKS when fwd returns are HIGHEST (backwards). Correct precommit
+  = the EXISTING tripwire (realized DD >−13% → halt NEW entries; expR-sign at n≥30); no risk-cuts on streaks.
+  **NET: 0 adopted; 2 factual errors (corr, tax), 1 re-rejected leverage, 1 polish of a dead idea, 1 broken-
+  specifics. System FINISHED — further "suggestions" are re-treads/errors. Deploy; collect n≥30 broker-truth.**
+- **SPY panic dip-buy entry** — TESTED 2026-06-29 (`dashboard/research/spy_dipbuy_test.py`), the
+  proposal's specific rules (close >2.5% below 20d-MA + VIX up >15%/5d + RSI(14)<35; exit at 5d-MA
+  / +3% / −5% / 10d cap, 0.10% round-trip). VERDICT: genuinely **positive-EV** — 33.4y, 106
+  triggers (~3.2/yr), expR **+1.21%/trade** cost-adj, win **75%**, holds OOS (+0.89%/trade, win
+  73%). (Proposal under-stated win 62-65% & over-stated avg loss −4.2%; real avg win +2.6% / loss
+  −3.0%.) This is NOT a new edge — it's the same oversold-reversion family as the validated MR
+  sleeve (expR +0.451, §Multi-strategy blend). It works but is IRRELEVANT to wealth: ~3 fires/yr ×
+  tiny capital = the proposal's own ~+300 HKD/yr "entertainment rebate." Honest framing = a
+  psychologically-satisfying hobby sleeve that won't destroy capital, NOT a return driver. The 30K/mo
+  contributions + the core 17-ETF book remain the engine. If the user wants the手癮 sleeve, fund it
+  small (2K) from cash and gate on these (validated) conditions; do not divert from the core.
 - **Finer regime-dependent sizing** — prior coarse version was rejected; a better-specified
   one is untested but high overfit risk on this sample.
 - **Multi-strategy blend** — TESTED 2026-06-23 (mean-reversion sleeve, `--meanrev`/`--meanrev-blend`).
