@@ -112,6 +112,10 @@ def mirror_new() -> list[str]:
     done = _mirrored_ids()
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
+    # PHASE auto-switch: Phase 1 = core only; Phase 2 (equity >= PHASE2_NAV_USD) also runs the
+    # panic-MR sleeve. The sleeve's order path is a separate build; when added it gates on
+    # paper.sleeve_active(equity) so it turns on automatically at the threshold (no manual step).
+    phase = paper.account_phase(equity)
     from dashboard.instruments import ETF_TRADED_BY_KEY
     for t in paper.open_trades():
         if t["method"] != MIRROR_METHOD or t["id"] in done:
@@ -202,10 +206,10 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
     # $12.8k acct). Cap notional to a fraction of equity. Backtest (research.backtest --pos-cap):
     # 20% cap costs ~-1pp CAGR but cuts maxDD -9.4%->-6.3% and lifts Sharpe 1.19->1.29. Env
     # ETF_POS_CAP overrides (0 disables). Matches the backtest's cap+risk-scaling.
-    # NB the cap is a DE-LEVERAGING dial, not alpha: strategy-only Sharpe is flat ~0.88 at every
-    # cap (the higher blended Sharpe at tight caps is just idle-cash yield). Default 0.15 = a
-    # conservative safety setting (no single low-vol ETF can over-lever the account).
-    pos_cap = float(os.environ.get("ETF_POS_CAP", "0.15"))
+    # The cap is the real return/DD dial (strategy-only Sharpe is flat ~0.88 at every cap; the
+    # higher blended Sharpe at tight caps is just idle-cash yield). ADOPTED 0.25 @ 1% risk =
+    # ~7.5% CAGR / -8.8% DD blended (fills the cap on high-vol names, mild safe leverage).
+    pos_cap = float(os.environ.get("ETF_POS_CAP", "0.25"))
     price = float(t["entry"])
     if pos_cap > 0 and price > 0:
         qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))

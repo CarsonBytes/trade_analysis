@@ -52,6 +52,22 @@ deliberate real-money decision). **API can't verify LIVE permissions** (gateway 
 permissions-list endpoint) — run `preflight_check.py` against the live gateway at go-live + place ONE real
 fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
 
+### ⭐ ADOPTED PLAN + 2-PHASE AUTO-SWITCH (2026-07-01) — the live config
+**Settings: `RISK_PER_TRADE=0.01` (1%) + `ETF_POS_CAP=0.25`** (both live defaults; risk% also
+persisted in ui_settings). 1% risk "fills" the 25% cap on high-vol names; the CAP is the real
+return/DD dial (risk% is inert once the cap binds; strategy-only Sharpe flat ~0.88 at any cap).
+Expected @25%: **~7.5% CAGR / −8.8% DD blended (SGOV cash)**, strategy-only ~5.7% / −10.5%.
+**Two phases, auto-switched by equity** (`paper.account_phase()` / `sleeve_active()`, threshold
+`PHASE2_NAV_USD`=$64k ≈ 500K HKD; UI shows a Phase badge):
+- **Phase 1 (<500K): core 17-ETF only**, 1% + 25% cap. (100K start is here for ~1.1y.)
+- **Phase 2 (≥500K): core + panic-MR sleeve** (SPY/QQQ/XLK, ADX>20, 0.5%/1%@VIX>30), same cap/risk.
+- **Phase 3 REJECTED** (loosening the cap = pure leverage: worse ratio 0.85→0.66, DD −8.8→−14%,
+  trips the −13% halt tripwire; not worth ~+1.5pp nominal).
+**⚠️ Sleeve ORDER EXECUTION is NOT built yet** — only the auto-switch GATE is wired (`mirror_new`
+computes phase; the sleeve, when built, checks `sleeve_active(equity)` and turns on automatically at
+500K, no manual step). Sleeve build is the remaining TODO, due before the account nears ~500K (~1yr).
+Loosen the cap toward 25→33% later only as a conscious risk-appetite choice (raise the tripwire if so).
+
 ### ⭐ PER-POSITION NOTIONAL CAP (2026-07-01) — a REQUIRED safety fix + a de-leveraging dial (NOT alpha)
 Found at go-live sizing: risk-based `size_shares` (risk÷stop) buys a huge share count on low-vol
 ETFs to risk 0.5% — **SHY = 168sh / $13,793 = 108% of a $12.8k acct in ONE position**; all-18 =

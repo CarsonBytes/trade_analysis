@@ -40,7 +40,8 @@ HORIZON_CAL = 35           # live horizon window in calendar days (5 weeks) -- m
                            # HORIZON_DAYS=5 weekly bars. Reconciled 2026-06-21: was 49
                            # (7wk), which the horizon curve showed is OUTSIDE the robust
                            # 4-6wk plateau (CAGR/DD 0.76 vs ~1.0). Live now == backtest.
-RISK_PER_TRADE = 0.005     # 0.5% notional risk per trade (for size only)
+RISK_PER_TRADE = 0.01      # 1% risk/trade -- with ETF_POS_CAP=0.25 this "fills" the cap on
+                           # the high-vol names; the cap (not risk%) is the real return/DD dial.
 ACCOUNT = 10_000.0
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
                            # for calibration but no longer gates entries
@@ -89,6 +90,27 @@ WEEKLY_TREND_CLASSES = _default_trend_classes()
 # one-per-instrument/de-correlation gates. MT5/spot keeps both directions.
 import os as _os
 LONG_ONLY = _os.environ.get("BROKER", "mt5").lower() == "ib"
+
+# --- account PHASE (auto-switch by equity) ----------------------------------------
+# Phase 1 (<PHASE2_NAV_USD): core 17-ETF only, 1% risk + 25% notional cap.
+# Phase 2 (>=PHASE2_NAV_USD): core + the panic-MR dip sleeve (SPY/QQQ/XLK). Same cap/risk.
+# (Phase 3 / cap-loosening was REJECTED -- pure leverage, worse ratio, trips the DD tripwire.)
+# The sleeve's ORDER EXECUTION is a separate build; sleeve_active() is the gate it plugs into,
+# so it turns on AUTOMATICALLY when the account crosses the threshold -- no manual step.
+PHASE2_NAV_USD = float(_os.environ.get("PHASE2_NAV_USD", "64000"))   # ~500K HKD at 7.8
+
+
+def account_phase(equity_usd: float | None) -> int:
+    """1 or 2 by live equity (USD). Auto-switches the plan; see sleeve_active()."""
+    try:
+        return 2 if equity_usd and float(equity_usd) >= PHASE2_NAV_USD else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def sleeve_active(equity_usd: float | None) -> bool:
+    """True once the account is big enough (Phase 2) to run the panic-MR sleeve."""
+    return account_phase(equity_usd) >= 2
 MIN_STRENGTH = 5           # only the strongest (5/5) trend alignment. Strength-4
                            # regimes (esp. s4-low, +0.018R) are barely-positive
                            # and noisy -- excluded by choice. The objective edge
