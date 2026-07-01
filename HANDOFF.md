@@ -90,7 +90,22 @@ w/ SGOV cash ~5.9% / −4.6%. Rationale: 15% removes over-leverage (safety) AND 
 de-lever (lower DD for less return) — fine at 100K where contributions dominate & DD is trivial.
 Loosen toward 20-25% later for more return once the base grows (all safe; ≤~40% prevents over-leverage).
 
-### ⭐ CONCURRENT PAPER + LIVE (2026-06-30) — two ISOLATED instances, not one dual-connection process
+### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
+User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
+quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:
+ONE dashboard on :8080, connected to ONE account at a time, chosen by a persisted **`dash_mode`**
+(store key). `app._resolve_mode()` runs at startup: mode=live → sets `IB_PORT=4001`,
+`IB_ACCOUNT=U12991898`, `IB_ALLOW_LIVE=1` (arms the guard); mode=paper → paper .env defaults +
+pop IB_ALLOW_LIVE. UI header **"⇄ Switch to LIVE/PAPER"** button: live needs a RED confirmation
+dialog, then persists dash_mode + `os._exit(0)` so the watchdog relaunches THIS process into the
+new mode (~10s). Cloudflare needs **NO change** — :8080 serves whichever mode is active, so
+quant.carsonng.com shows live after switching. Guard unchanged (paper-only unless live acct+port+flag).
+**Requires BOTH gateways running** (paper 4002 + live 4001) so the target mode can connect; live
+gateway (C:\IBC-Live, 4001) still not started (only 4002 up as of 2026-07-01). NOT concurrent (one
+account at a time; switch = ~10s restart) — the trade for a single URL. `run_dashboard_live.ps1` +
+`DASH_PORT`/two-instance bits are now SUPERSEDED (kept, harmless).
+
+### (superseded) CONCURRENT PAPER + LIVE (2026-06-30) — two ISOLATED instances, not one dual-connection process
 Chosen design: run the live book as a SEPARATE dashboard process, not by multiplexing two IB
 connections in one (that would thread two accounts through ib_client's single global loop = the
 fragile ib_async↔nicegui path, one bug from the live account). Everything is env-driven, so a
