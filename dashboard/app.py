@@ -1042,6 +1042,19 @@ def main_page() -> None:
                              "Phase 2 adds the panic-MR sleeve")
             except Exception:                                      # never break the header
                 pass
+            # Switch to the OTHER isolated instance (paper<->live are separate processes/ports).
+            _dash_port = int(os.environ.get("DASH_PORT", "8080"))
+            _other_port = int(os.environ.get("OTHER_DASH_PORT",
+                                             "8081" if _dash_port == 8080 else "8080"))
+            _other = "PAPER" if _live else "LIVE"
+
+            async def _switch_instance():
+                await ui.run_javascript(
+                    "window.location.href = window.location.protocol+'//'+"
+                    f"window.location.hostname+':{_other_port}/'")
+            ui.button(f"⇄ {_other}", on_click=_switch_instance)\
+                .props("outline " + ("color=green" if _other == "PAPER" else "color=red"))\
+                .tooltip(f"open the {_other} dashboard (separate isolated instance on port {_other_port})")
         ui.label("Decision support, not auto-execution. Verify before risking money.")\
             .classes("text-sm text-grey-6")
         clock_row()

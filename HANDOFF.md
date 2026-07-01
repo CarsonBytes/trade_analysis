@@ -105,6 +105,13 @@ second instance just needs its own launch env. Enablers added:
 - **Needs a 2nd IB Gateway** logged into LIVE on port 4001 (separate IBC/config) alongside the
   paper gateway on 4002. Paper instance keeps `C:\Scripts\dashboard.ps1` on 8080 untouched.
 Verdict: paper on :8080 (DU…, guard paper-only), live on :8081 (U…, IB_ALLOW_LIVE) — fully isolated.
+**UI SWITCH (2026-07-01):** header button "⇄ LIVE"/"⇄ PAPER" navigates the browser to the OTHER
+instance (JS `window.location` host + `OTHER_DASH_PORT`, default swaps 8080↔8081) — a *navigation*
+switch, NOT an in-process connection toggle (that would collapse the isolation). Live account =
+**U12991898** (currently ~40 HKD, unfunded). Balance detection needs NO new code — the header already
+reads NetLiquidation from the connected account, so the live instance shows the live balance
+automatically once its gateway (4001) is up. As of 2026-07-01 only the paper gateway (4002) + paper
+dash (8080) run; the live gateway (4001) / C:\IBC-Live / live dash (8081) are NOT started yet.
 
 **Strategy = 17-ETF long-only weekly TSMOM @ 0.5% risk.**
 - Universe (17): GLD·SLV·CPER / SPY·QQQ·DIA·IWM / IEF·TLT·SHY / HYG·TIP·EFA·EEM·DBC·VNQ·**PFF**
