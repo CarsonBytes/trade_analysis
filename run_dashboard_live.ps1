@@ -20,7 +20,7 @@ $env:UNIVERSE      = "etf"
 $env:IB_HOST       = "127.0.0.1"
 $env:IB_PORT       = "4001"            # LIVE gateway port (paper is 4002)
 $env:IB_CLIENT_ID  = "21"             # distinct from the paper instance (7)
-$env:IB_ACCOUNT    = "U0000000"       # <-- your LIVE account id (Uxxxxxxx)
+$env:IB_ACCOUNT    = "U12991898"      # LIVE account id
 $env:IB_ALLOW_LIVE = "1"             # <-- THE real-money switch (paper instance never sets this)
 $env:DASH_PORT     = "8081"           # LIVE UI on a separate port (paper is 8080)
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
