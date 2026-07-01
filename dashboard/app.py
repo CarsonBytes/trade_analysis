@@ -14,6 +14,7 @@ from __future__ import annotations
 from dashboard.core import net  # noqa: F401  -- TLS bootstrap first
 
 import datetime as dt
+import os
 from nicegui import ui, run
 
 from dashboard.web import service
@@ -1018,8 +1019,15 @@ async def _archive_reset() -> None:
 @ui.page("/")
 def main_page() -> None:
     service.restore_cache()
+    _live = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
     with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-4"):
-        ui.label("Trade Analysis — all popular signals").classes("text-2xl font-bold")
+        with ui.row().classes("items-center gap-3 w-full"):
+            ui.label("Trade Analysis — all popular signals").classes("text-2xl font-bold")
+            # Unmistakable mode badge so concurrent PAPER/LIVE windows are never confused.
+            if _live:
+                ui.badge("● LIVE — REAL MONEY", color="red").classes("text-sm px-3 py-1")
+            else:
+                ui.badge("● PAPER", color="green").classes("text-sm px-3 py-1")
         ui.label("Decision support, not auto-execution. Verify before risking money.")\
             .classes("text-sm text-grey-6")
         clock_row()
@@ -1118,4 +1126,9 @@ from dashboard.execution import link_monitor, broker as _bk0  # noqa: E402
 if not _bk0.is_ib():
     link_monitor.start()
 
-ui.run(title="Trade Analysis", port=8080, reload=False, show=False)
+# Port + title are env-configurable so a LIVE instance can run concurrently with the PAPER
+# one (isolated processes): e.g. paper on DASH_PORT=8080 (default), live on 8081.
+_DASH_PORT = int(os.environ.get("DASH_PORT", "8080"))
+_LIVE = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
+_MODE = "LIVE" if _LIVE else "PAPER"
+ui.run(title=f"Trade Analysis [{_MODE}]", port=_DASH_PORT, reload=False, show=False)

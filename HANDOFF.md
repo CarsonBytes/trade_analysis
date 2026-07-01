@@ -52,6 +52,22 @@ deliberate real-money decision). **API can't verify LIVE permissions** (gateway 
 permissions-list endpoint) — run `preflight_check.py` against the live gateway at go-live + place ONE real
 fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
 
+### ⭐ CONCURRENT PAPER + LIVE (2026-06-30) — two ISOLATED instances, not one dual-connection process
+Chosen design: run the live book as a SEPARATE dashboard process, not by multiplexing two IB
+connections in one (that would thread two accounts through ib_client's single global loop = the
+fragile ib_async↔nicegui path, one bug from the live account). Everything is env-driven, so a
+second instance just needs its own launch env. Enablers added:
+- `ib_exec._guard()` — DEFAULT paper-only (unchanged). LIVE opt-in ONLY when **`IB_ALLOW_LIVE=1`**
+  AND connected account == `IB_ACCOUNT` AND live port (4001/7496). Named-account match = a mis-set
+  port/login refuses rather than trading the wrong book. Paper instance never sets the flag.
+- `app.py` — `DASH_PORT` env (default 8080) + window title `[PAPER]`/`[LIVE]` + a prominent header
+  badge (green PAPER / red "LIVE — REAL MONEY"). So concurrent windows are unmistakable.
+- `run_dashboard_live.ps1` (repo template) — copy to C:\Scripts, fill in live acct; sets
+  IB_PORT=4001, IB_CLIENT_ID=21, IB_ACCOUNT=U…, IB_ALLOW_LIVE=1, DASH_PORT=8081; watchdog loop.
+- **Needs a 2nd IB Gateway** logged into LIVE on port 4001 (separate IBC/config) alongside the
+  paper gateway on 4002. Paper instance keeps `C:\Scripts\dashboard.ps1` on 8080 untouched.
+Verdict: paper on :8080 (DU…, guard paper-only), live on :8081 (U…, IB_ALLOW_LIVE) — fully isolated.
+
 **Strategy = 17-ETF long-only weekly TSMOM @ 0.5% risk.**
 - Universe (17): GLD·SLV·CPER / SPY·QQQ·DIA·IWM / IEF·TLT·SHY / HYG·TIP·EFA·EEM·DBC·VNQ·**PFF**
   (EMB dropped — redundant vs HYG+TLT).

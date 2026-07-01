@@ -48,17 +48,38 @@ def is_paper() -> bool:
 
 
 def _guard():
-    """Return the connected IB handle iff we're on a paper account, else None."""
+    """Return the connected IB handle iff safe to trade, else None.
+
+    DEFAULT (safe): paper accounts only (DU… id matching IB_ACCOUNT, reached via a paper
+    port). Unchanged behaviour -- this is what the running system uses.
+
+    LIVE opt-in (real money): ONLY when IB_ALLOW_LIVE=1 is EXPLICITLY set AND the connected
+    account exactly equals IB_ACCOUNT AND we're on a live port. This lets a SEPARATE, isolated
+    dashboard instance trade the live account while the paper instance keeps running untouched.
+    The named-account match means a mis-set port/login can never trade the wrong account."""
     if not ib_client.is_available():
         return None
-    if not is_paper():
-        log.warning("ib_exec: connected account is NOT paper -- refusing to trade")
-        return None
-    # belt-and-suspenders: a paper account must also be reached via a paper port.
     port = int(os.environ.get("IB_PORT", "7497"))
-    if port not in (7497, 4002):
-        log.warning("ib_exec: IB_PORT %s is not a paper port -- refusing to trade", port)
-        return None
+    live_ok = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
+    if not live_ok:                                    # ---- paper-only (default) ----
+        if not is_paper():
+            log.warning("ib_exec: connected account is NOT paper -- refusing to trade")
+            return None
+        if port not in (7497, 4002):
+            log.warning("ib_exec: IB_PORT %s is not a paper port -- refusing to trade", port)
+            return None
+    else:                                              # ---- explicit LIVE opt-in ----
+        want = os.environ.get("IB_ACCOUNT")
+        acct = ib_client.account_id()
+        if not want or acct != want:
+            log.warning("ib_exec: IB_ALLOW_LIVE set but account %s != IB_ACCOUNT %s -- refusing",
+                        acct, want)
+            return None
+        if port not in (7496, 4001):
+            log.warning("ib_exec: IB_ALLOW_LIVE set but IB_PORT %s is not a live port -- refusing",
+                        port)
+            return None
+        log.warning("ib_exec: LIVE trading ENABLED for %s (IB_ALLOW_LIVE) -- REAL MONEY", acct)
     with ib_client._LOCK:
         return ib_client._ensure_conn()
 
