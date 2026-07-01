@@ -1,42 +1,58 @@
 # Quantitative Trade-Analysis Platform
 
-A research platform for Gold, Oil and FX with three parts:
+A research + paper-trading platform for a diversified multi-asset ETF book, with three parts:
 
 1. **Anti-self-deception backtester** — proves whether a strategy idea actually has an edge (walk-forward, deflated Sharpe, noise test). See [backtester details](#backtester) below.
 2. **Multi-agent analyst** (`analyst/`) — deterministic facts feed LLM agents (regime / technical / sentiment) → a head-trader decision → deterministic risk gate. Decision support, not auto-execution. See [analyst/README.md](analyst/README.md).
-3. **Real-time dashboard + paper trading** (`dashboard/`) — NiceGUI board for Gold/Oil/FX, ranks the most obvious trends, runs a batched LLM scan, and forward-tests SL/TP setups to track success rate. See [dashboard/README.md](dashboard/README.md).
+3. **Real-time dashboard + paper trading** (`dashboard/`) — NiceGUI board that scores a 17-ETF weekly-trend universe, mirrors signals to an **IBKR paper account** (`BROKER=ib UNIVERSE=etf`), auto-manages idle cash (USD → SGOV), and forward-tests fills against the backtest. See [dashboard/README.md](dashboard/README.md).
 
-> **Honest framing:** this measures whether ideas work; it does not manufacture an edge. Everything is decision support — it never places a real trade.
+> **Honest framing:** this measures whether ideas work; it does not manufacture an edge. It runs on a **paper** account (hard-guarded) and never moves real money.
 
 ---
 
-## Key research findings (2026-06)
+## Key research findings (as of 2026-06-30)
 
-A full out-of-sample, deflated-Sharpe-penalised study across 31 instruments (metals,
-energy, FX, indices, crypto). The honest conclusions:
+Exhaustive out-of-sample, deflated-Sharpe-penalised study. The platform pivoted MT5 spot →
+IBKR futures → **17 ETFs** (ETFs trade in *shares*, so 0.5% risk is expressible on a small
+account, unlike futures). ~25+ ideas tested; the honest conclusions:
 
-- **Daily-timeframe technical strategies have NO edge.** Trend-following and
-  mean-reversion both came out ~breakeven (deflated Sharpe 53–58%, i.e. no
-  statistical confidence) with ~24% drawdowns. The daily strategy space on liquid
-  spot/CFD instruments is fully arbitraged.
-- **Weekly time-series momentum DOES have an edge.** Re-validated on 20+ years with a
-  real OOS split: **OOS expectancy +0.11 R/trade, DSR 100%, ~+3% CAGR at 0.5% risk,
-  −9% max drawdown.** This rediscovers the published TSMOM result (Moskowitz-Ooi-
-  Pedersen): momentum works at weekly/monthly horizons, not daily/intraday.
-- **It's an asset-class effect.** Breadth test: strongly positive in **metals**
-  (gold +0.50R, silver +0.34R) and **equity indices** (S&P +0.28R, Nikkei +0.19R);
-  **FX is negative** (AUDUSD −0.36R) — FX mean-reverts at the weekly scale. So the
-  trend strategy is restricted to commodities + indices (`paper.WEEKLY_TREND_CLASSES`).
-- **Validated filters:** overextension (skip longs RSI>70 / shorts RSI<30) and the
-  objective regime-edge gate. The **ADX regime filter helps daily but HURTS weekly**
-  (weekly signal is already slow/clean). **Order-flow / Volume-Profile is infeasible**
-  here — spot FX/CFD have no real exchange volume (MT5 "volume" is tick-count).
-- **Frequency is the point, not a bug.** The weekly edge fires ~1 trade every 1–2
-  weeks (≪1/day), held ~7 weeks. Frequent trading = the no-edge daily game. The
-  patience IS the alpha.
+- **Exactly ONE edge: weekly time-series momentum (TSMOM) across many uncorrelated ETFs.**
+  Long-only, 5-week hold, fixed ATR-stop + 3:1 RR, equal-risk sizing, 0.5% risk. The single
+  lever that ever helped is **breadth** — adding uncorrelated positive-edge markets (10→16
+  ETFs was +2.8% OOS, the big win); the book's avg pairwise correlation is **0.26**, so it is
+  genuinely diversified, not leveraged beta.
+- **Universe (17):** metals GLD/SLV/CPER · equity SPY/QQQ/DIA/IWM · rates IEF/TLT/SHY ·
+  credit HYG · inflation TIP · intl EFA/EEM · commodity DBC · REIT VNQ · preferred PFF.
+- **Performance (33y full history, the anchor):** strategy-only **+4.4% CAGR / −11% DD**;
+  with idle cash swept to SGOV at current rates **~+7.0% CAGR / −9.7% DD / Sharpe ~1.22**.
+  Recent ~13y OOS is bull-flattered (~+10–12%) — do **not** plan around it. Risk is a pure
+  leverage dial (CAGR/DD ratio ~constant): 0.25%→~−5% DD, 0.5%→~−10%, 1%→~−20%.
+- **One positive-EV satellite: a "panic-MR" dip-buy sleeve.** Buy SPY/QQQ/XLK on a VIX-spike
+  oversold (>2.5% below 20-day MA + VIX↑>15%/5d + RSI<35 + **ADX>20**), exit at the 5-day MA;
+  size 0.5%, up to 1% when VIX>30 (hard cap 1%). +1.21%/trade, 75% win, holds OOS. Blended
+  with the core it adds **~+1.5–2pp CAGR at ~flat drawdown → ~+8.7% / −10% / Sharpe ~1.25**.
+  (Deferred until the account is larger; at a small size contributions dwarf it.)
+- **Everything else REJECTED, with data (DSR/OOS discipline):** daily technicals (no edge,
+  DSR 53–58%); vol-targeting (pure leverage — DD *tripled* to −29% at 12% target); monthly
+  rebalance (Sharpe 1.22→0.70); pullback/dynamic/staged exits; cross-sectional momentum &
+  relative-strength filters (breadth loss halves CAGR); regime overlays — SPY-MA, VIX-ladder,
+  and a correlation penalty (all **redundant** — a long-only trend book de-risks itself by
+  exiting in crashes); **pairs / stat-arb** (even proper cointegration/OOS: DSR ≤17%, negative
+  after cost — the "best" pairs are same-index wrappers); **all option sleeves** (LEAPS, weekly
+  debit spreads, iron condors, single-name earnings strangles, 0DTE pin — either −EV, tail-
+  uncontrollable, or unaffordable/unbacktestable); sector-rotation MR (−EV vs equal-weight);
+  VIX-timed contributions (lose to plain DCA on cash-drag).
+- **Execution layer:** costs already modeled (~1 bp round-trip on liquid ETFs); a market→limit
+  switch is worth ~+0.1–0.2%/yr at most. Idle cash: convert HKD→USD (~3.1%) and sweep 60% to
+  **SGOV** (~T-bill yield), keeping a 40% buffer — free, slightly *reduces* DD.
+- **Frequency is the point, not a bug.** ~32 core round-trips/yr (~3.3-week holds) → ~1–2
+  fills/week. Frequent trading = the no-edge daily game; patience IS the alpha.
 
-The live system (`dashboard/`) trades the **weekly** configuration: strength-5 signals
-on weekly bars, overextension filter, commodities+indices only, 0.5% risk, ~7-week hold.
+**Research is closed** — the price-technical + option + stat-arb search space is exhausted;
+the remaining edge is behavioral (contribute relentlessly, stay invested, don't override).
+
+The live system (`dashboard/`) runs the core config on IBKR paper: 17-ETF weekly TSMOM,
+0.5% risk, `CASH_USD`/`CASH_SWEEP` on, with a SGOV-first manual-withdrawal helper in the UI.
 
 ---
 
