@@ -26,6 +26,32 @@ commodities/REITs have no clean UCITS equiv → "be aware, revisit ~$130k", not 
 Account self-bootstraps to ~$130k (planned scale) in **~2.3y**, when the full sizing analysis applies.
 DD trivial early (−11% ≈ −11K < half a month's contribution). **Real lever = relentless contributions, not bps of edge.**
 
+### ⭐ FINAL SYSTEM + PERFORMANCE + GO-LIVE (2026-06-30, session close)
+**Performance (30.3y, cash@4.3%):** core 18/17-ETF **+7.0% CAGR / −9.7% DD / Sharpe 1.22**; + optional
+panic-MR sleeve (SPY+QQQ+XLK) **~+8.7% / −10 to −11% / ~1.25**. % is scale-invariant (holds at 100K).
+**Layers:** (1) core weekly TSMOM 0.5%, weekly bars, ATR-SL+RR3-TP, long-only; (2) cash shield idle→USD
+(~3.1%)→SGOV (`CASH_USD`/`CASH_SWEEP` live); (3) panic-MR sleeve — **DEFERRED until ~500K** (core-only at
+100K; +1.5-2pp but ~rounding-error vs contributions); (4) contribute 30K/mo, stay fully invested (do NOT
+hold cash to time market — proven to lose); (5) guardrail: halt new entries if DD>−13%, expR-sign at n≥30.
+**Backtests done this session (all in `dashboard/research/`, verdicts in the sections below):** sector_mr
+(REJ), spy_dipbuy (the survivor), short_vol iron-condor (REJ), earnings_vol_crush (REJ), dipbuy_sizing/
+blend/refine/refine2/refine3 (sleeve tuned→SATURATED: SPY+QQQ+XLK, ADX>20, 0.5%/1%@VIX>30 cap 1%, base
+exit), core_ops (vol-target+monthly REJ; VIX-timed contributions REJ on cash-drag), corr_penalty (INERT),
+refined_statarb (REJ, DSR≤17%), cost_sensitivity (cost already modeled; limit-orders ~+0.1-0.2% max).
+**NEW FEATURE — SGOV-first withdrawal helper** (`ib_exec.prepare_withdrawal` + `broker` dispatch + app.py
+header **Withdraw** button/dialog, commits 457a68d/1272a11/05f35a6): frees cash from cash-shield (idle USD→
+SGOV) FIRST never Core; earmarks a **reserve** `sweep_cash` excludes (so it won't re-buy); does NOT move
+money out (manual IBKR action). Paper dry-run verified ($5k→0 SGOV; $35k→99 SGOV, Core untouched).
+**GO-LIVE checklist (real acct, 100K HKD):** ✅ MUST: **enable fractional shares** (user HAS "Global
+(小數股) - Stocks" ✓), **US-Stocks permission** ✓, **API write** (`ReadOnlyApi=no` ✅ set), **FX/Forex
+permission** for HKD→USD IDEALPRO conversion (⚠️ NOT in user's stock-only list — verify), **Margin (Pro)
+account** (avoids T+2 settlement friction). The three NEW US-stock sub-requests (Algo venues / T+0 / T+1
+settlement) are **NOT required** by this strategy (simple bracket orders, multi-day holds) — tick for free
+optionality or skip. Then flip config to live (port 4001, live login, relax the ib_exec paper guard — a
+deliberate real-money decision). **API can't verify LIVE permissions** (gateway is paper-only + IBKR has no
+permissions-list endpoint) — run `preflight_check.py` against the live gateway at go-live + place ONE real
+fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
+
 **Strategy = 17-ETF long-only weekly TSMOM @ 0.5% risk.**
 - Universe (17): GLD·SLV·CPER / SPY·QQQ·DIA·IWM / IEF·TLT·SHY / HYG·TIP·EFA·EEM·DBC·VNQ·**PFF**
   (EMB dropped — redundant vs HYG+TLT).
