@@ -52,6 +52,28 @@ deliberate real-money decision). **API can't verify LIVE permissions** (gateway 
 permissions-list endpoint) — run `preflight_check.py` against the live gateway at go-live + place ONE real
 fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
 
+### ⭐ PER-POSITION NOTIONAL CAP (2026-07-01) — a REQUIRED safety fix + a de-leveraging dial (NOT alpha)
+Found at go-live sizing: risk-based `size_shares` (risk÷stop) buys a huge share count on low-vol
+ETFs to risk 0.5% — **SHY = 168sh / $13,793 = 108% of a $12.8k acct in ONE position**; all-18 =
+376% notional = 3.8× leverage. Live path `_place_etf_bracket` had NO notional cap (backtest capped
+`dep` at equity only for cash-interest, still booked full-0.5% risk). FIX: cap per-position notional
+at a fraction of equity + scale risk down when it binds. Implemented `ETF_POS_CAP` env (**default
+0.15**, 0=disable) in `_place_etf_bracket`; `research.backtest --pos-cap FRAC` reproduces. Verified:
+SHY 168sh→31sh (20%) / →23sh (15%); SPY unaffected.
+**⚠️ VERIFIED it is NOT a Sharpe win (retracts an earlier claim).** Sweep with cash@4.3% shows Sharpe
+rising as cap tightens (none 1.19 → 15% 1.45 → 5% 2.27) — but that is a **cash-yield ARTIFACT**:
+tighter cap = less deployed = more idle cash @4.3% (steady, ~0 vol) inflating the BLENDED Sharpe
+toward the T-bill Sharpe. **Strategy-only (cash@0%) Sharpe is FLAT ~0.88 at every cap** (none 0.90,
+20% 0.87, 15% 0.89, 10% 0.89, 5% 0.87) while CAGR & DD shrink proportionally (5% cap = 1.19% CAGR /
+−2.2% DD strategy-only = engine mostly off). So the cap is a **leverage dial like risk%**, not alpha.
+10%/5% = "T-bill fund + sprinkle", capital-inefficient — do NOT chase the pretty Sharpe.
+**1% risk ≈ 0.5% once the cap binds** (1%+15% strat-only 3.52%/−6.4%/0.88 ≈ 0.5%+15% 3.35%/−6.4%/0.89
+— cap dominates all but the few high-vol names) → keep **0.5% risk**.
+**ADOPTED: ETF_POS_CAP=0.15 @ 0.5% risk.** Numbers: strategy-only ~3.35% CAGR / −6.4% DD; blended
+w/ SGOV cash ~5.9% / −4.6%. Rationale: 15% removes over-leverage (safety) AND is a conservative
+de-lever (lower DD for less return) — fine at 100K where contributions dominate & DD is trivial.
+Loosen toward 20-25% later for more return once the base grows (all safe; ≤~40% prevents over-leverage).
+
 ### ⭐ CONCURRENT PAPER + LIVE (2026-06-30) — two ISOLATED instances, not one dual-connection process
 Chosen design: run the live book as a SEPARATE dashboard process, not by multiplexing two IB
 connections in one (that would thread two accounts through ib_client's single global loop = the

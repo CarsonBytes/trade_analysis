@@ -43,6 +43,10 @@ CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): p
                                  # entries when portfolio DD >= stop, resume when DD <= resume
 REGIME: object = None            # --regime: SPY 40wk-MA bull/bear Series; scale size in bears
 REGIME_BEAR_SIZE = 0.40          # position size in a SPY-bear regime (vs 1.0 in bull)
+POS_CAP: float | None = None     # --pos-cap: max per-position NOTIONAL as a fraction of equity.
+                                 # None = legacy (cap dep at 100% equity, full 0.5% risk always).
+                                 # A float caps notional AND scales risk down when a low-vol ETF's
+                                 # full-risk notional exceeds the cap (models a small-account limit).
 CASH_YIELD = None                # --cash-yield: annualised rate Series (decimal) by date;
                                  # credits idle (un-deployed) equity = execution-layer realism
 PULLBACK: bool = False           # --pullback: don't enter on the breakout bar; wait up to
@@ -372,10 +376,16 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         cls = active_by_key(c["key"]).asset_class
         risk_money = (equity * risk * _vol_factor() * _class_factor(cls, c["entry_date"])
                       * _regime_factor(c["entry_date"]) * c.get("risk_mult", 1.0))
-        notional = min(risk_money * c.get("nmult", 0.0), equity)   # cash tied up (capped)
-        dep[0] += notional
+        desired = risk_money * c.get("nmult", 0.0)                 # full-risk notional
+        if POS_CAP is None:                                        # legacy: dep capped at equity
+            notional = min(desired, equity)
+            eff_risk = risk_money                                  # full 0.5% risk always taken
+        else:                                                      # small-account notional cap:
+            notional = min(desired, equity * POS_CAP)              # cap notional per position...
+            eff_risk = risk_money * (notional / desired) if desired > 0 else risk_money
+        dep[0] += notional                                        # ...and scale risk to what fits
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"], "cls": cls,
-                         "buckets": buckets, "pnl": c["r"] * risk_money, "r": c["r"],
+                         "buckets": buckets, "pnl": c["r"] * eff_risk, "r": c["r"],
                          "notional": notional}
         open_keys.add(c["key"])
         for b in buckets:
@@ -508,6 +518,11 @@ def main():
     ap.add_argument("--cash-rate", type=float, default=None, metavar="R",
                     help="credit idle cash at a CONSTANT annual rate (e.g. 0.043 for today's IB "
                          "USD rate) instead of historical ^IRX -- forward total-return estimate")
+    ap.add_argument("--pos-cap", type=float, default=None, metavar="FRAC",
+                    help="cap per-position NOTIONAL at FRAC of equity (+ scale risk down when a "
+                         "low-vol ETF's full-risk notional exceeds it). Prevents small-account "
+                         "over-leverage; ~0.20 costs ~-1pp CAGR but cuts maxDD & lifts Sharpe. "
+                         "LIVE default = 0.20 (ETF_POS_CAP env).")
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
@@ -594,6 +609,10 @@ def main():
     if args.circuit:
         CIRCUIT_DD = (0.15, 0.10)
         print("[CIRCUIT BREAKER: pause new entries when DD>=15%, resume when DD<=10%]")
+    if args.pos_cap is not None:
+        global POS_CAP
+        POS_CAP = args.pos_cap
+        print(f"[POS-CAP: per-position notional <= {POS_CAP:.0%} of equity (+risk-scaled)]")
     if args.direction:                            # explicit override; else keep config default
         _DIRECTIONS = {"both": ("long", "short"), "long": ("long",),
                        "short": ("short",)}[args.direction]

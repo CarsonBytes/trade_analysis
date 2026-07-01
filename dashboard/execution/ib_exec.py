@@ -26,6 +26,7 @@ from __future__ import annotations
 from dashboard.core import net  # noqa: F401
 
 import os
+import math
 import sqlite3
 import datetime as dt
 
@@ -196,8 +197,20 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
         return f"{t['instrument']}: no stock contract (market data?), retry"
     stop_per_share = abs(float(t["entry"]) - float(t["sl"]))
     qty = contracts.size_shares(equity_usd, stop_per_share, paper.RISK_PER_TRADE)
+    # Per-position NOTIONAL cap: risk-based sizing on a low-vol ETF (e.g. SHY) buys a huge
+    # share count to risk 0.5%, which on a small account over-levers (SHY alone > 100% of a
+    # $12.8k acct). Cap notional to a fraction of equity. Backtest (research.backtest --pos-cap):
+    # 20% cap costs ~-1pp CAGR but cuts maxDD -9.4%->-6.3% and lifts Sharpe 1.19->1.29. Env
+    # ETF_POS_CAP overrides (0 disables). Matches the backtest's cap+risk-scaling.
+    # NB the cap is a DE-LEVERAGING dial, not alpha: strategy-only Sharpe is flat ~0.88 at every
+    # cap (the higher blended Sharpe at tight caps is just idle-cash yield). Default 0.15 = a
+    # conservative safety setting (no single low-vol ETF can over-lever the account).
+    pos_cap = float(os.environ.get("ETF_POS_CAP", "0.15"))
+    price = float(t["entry"])
+    if pos_cap > 0 and price > 0:
+        qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))
     if qty < 1:
-        return f"{t['instrument']}: <1 share at the risk budget, SKIP"
+        return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
     action = "BUY" if t["direction"] == "long" else "SELL"
     risk_money = equity_usd * paper.RISK_PER_TRADE
     # US ETFs trade on a $0.01 tick; IB rejects (Error 110) child legs whose price
