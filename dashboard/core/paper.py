@@ -129,8 +129,22 @@ COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
 # subpackage. paper.py lives in dashboard/core/, so parents[1] == dashboard/.
 # (Keeps the live journal at dashboard/dashboard.db across the reorg; tying it to
 # parent/ would have silently pointed at a new empty dashboard/core/dashboard.db.)
-_DB = pathlib.Path(__file__).resolve().parents[1] / "dashboard.db"
+# DASH_DB_NAME picks the file: PAPER and LIVE mode get SEPARATE databases (journal, ib_mirror,
+# cache/settings) so switching modes never shows the other account's trade history/stats.
+# `_DB` is LAZY (module __getattr__ below), computed fresh from the env var on every access --
+# NOT fixed at import time -- so it's correct regardless of when/whether the mode was resolved
+# before this module was first imported (robust for other entrypoints: research/tests/etc.).
 _LOCK = threading.Lock()
+
+
+def _dbpath() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[1] / _os.environ.get("DASH_DB_NAME", "dashboard.db")
+
+
+def __getattr__(name):     # PEP 562: makes `paper._DB` a live property, not an import-time constant
+    if name == "_DB":
+        return _dbpath()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---- SL/TP computation -----------------------------------------------------
@@ -296,7 +310,7 @@ class Trade:
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(_DB, check_same_thread=False)
+    c = sqlite3.connect(_dbpath(), check_same_thread=False)
     c.execute("""CREATE TABLE IF NOT EXISTS paper_trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, instrument TEXT, direction TEXT,
         method TEXT, entry REAL, sl REAL, tp REAL, rr REAL, size_units REAL,

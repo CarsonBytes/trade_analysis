@@ -90,6 +90,21 @@ w/ SGOV cash ~5.9% / −4.6%. Rationale: 15% removes over-leverage (safety) AND 
 de-lever (lower DD for less return) — fine at 100K where contributions dominate & DD is trivial.
 Loosen toward 20-25% later for more return once the base grows (all safe; ≤~40% prevents over-leverage).
 
+### 🐞 FIXED 2026-07-02: mode-switch showed PAPER trade history/stats after switching to LIVE
+Root cause: `paper._DB`/`store._DB` (journal `paper_trades`, `ib_mirror`, cache/settings incl.
+`ui_settings`, `withdraw_reserve_usd`, `equity_history`) were ONE fixed file (`dashboard.db`) —
+switching mode only relabelled the UI, both modes read/wrote the SAME database. FIX: separate
+databases per mode — `dashboard.db` (paper, existing/untouched) vs `dashboard_live.db` (live, fresh/
+empty). `DASH_DB_NAME` env picks the file; `app._resolve_mode()` sets it BEFORE importing anything
+DB-touching. The mode POINTER itself (which mode is active) lives in an ALWAYS-FIXED separate file
+(`dashboard_mode.db`, via new `store.get_mode()`/`set_mode()`) — otherwise there's a chicken-and-egg
+(need to know the mode to find the file that says the mode). Also made `paper._DB`/`store._DB` LAZY
+(module `__getattr__`, PEP 562) instead of import-time constants, so the path is always correct
+regardless of import order (robust for other entrypoints too, not just app.py's exact sequence).
+Verified: mode='live' -> both `paper._DB` and `store._DB` -> `dashboard_live.db` (fresh, empty);
+mode='paper' (the real persisted state) -> `dashboard.db` (existing, untouched, all history intact).
+Dashboard restarted clean (HTTP 200, paper mode, no errors). Live mode now starts with a CLEAN slate.
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:
