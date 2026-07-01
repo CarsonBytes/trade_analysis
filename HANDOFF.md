@@ -100,8 +100,14 @@ pop IB_ALLOW_LIVE. UI header **"⇄ Switch to LIVE/PAPER"** button: live needs a
 dialog, then persists dash_mode + `os._exit(0)` so the watchdog relaunches THIS process into the
 new mode (~10s). Cloudflare needs **NO change** — :8080 serves whichever mode is active, so
 quant.carsonng.com shows live after switching. Guard unchanged (paper-only unless live acct+port+flag).
-**Requires BOTH gateways running** (paper 4002 + live 4001) so the target mode can connect; live
-gateway (C:\IBC-Live, 4001) still not started (only 4002 up as of 2026-07-01). NOT concurrent (one
+**Requires the active mode's gateway running** (paper 4002 or live 4001). **LIVE GATEWAY CONFIGURED
+2026-07-01:** copied C:\IBC → C:\IBC-Live, then StartGateway.bat CONFIG=C:\IBC-Live\config.ini,
+TRADING_MODE=live, IBC_PATH=C:\IBC-Live, TWS_SETTINGS_PATH=**C:\Jts-Live** (separate settings, created);
+config.ini TradingMode=live, OverrideTwsApiPort=4001, IbLoginId=carsonng2000, **IbPassword=BLANK**
+(user fills live pw); start_hidden.vbs → C:\IBC-Live\StartGateway.bat. NOT yet logged in (needs pw +
+first 2FA). ⚠️ SAME-USER caveat: carsonng2000 on BOTH 4001+4002 simultaneously may get one kicked by
+IBKR — with the mode-switch (one account at a time) run only the active mode's gateway, OR get a 2nd
+paper username for true concurrency. Live autostart/watchdog NOT set up yet (start manually first). NOT concurrent (one
 account at a time; switch = ~10s restart) — the trade for a single URL. `run_dashboard_live.ps1` +
 `DASH_PORT`/two-instance bits are now SUPERSEDED (kept, harmless).
 
