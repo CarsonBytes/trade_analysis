@@ -107,7 +107,9 @@ config.ini TradingMode=live, OverrideTwsApiPort=4001, IbLoginId=carsonng2000, **
 (user fills live pw); start_hidden.vbs → C:\IBC-Live\StartGateway.bat. NOT yet logged in (needs pw +
 first 2FA). ⚠️ SAME-USER caveat: carsonng2000 on BOTH 4001+4002 simultaneously may get one kicked by
 IBKR — with the mode-switch (one account at a time) run only the active mode's gateway, OR get a 2nd
-paper username for true concurrency. Live autostart/watchdog NOT set up yet (start manually first). NOT concurrent (one
+paper username for true concurrency. Live autostart/watchdog NOT set up yet (start manually first). **AutoRestartTime=08:00 (HKT)** set
+in C:\IBC-Live\config.ini (AutoLogoffTime blank → auto-restart mode) → daily restart is session-
+preserving, NO 2FA; 2FA still needed on first login, reboot/crash cold-start, and ~weekly forced re-auth. NOT concurrent (one
 account at a time; switch = ~10s restart) — the trade for a single URL. `run_dashboard_live.ps1` +
 `DASH_PORT`/two-instance bits are now SUPERSEDED (kept, harmless).
 
