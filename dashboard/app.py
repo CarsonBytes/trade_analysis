@@ -747,6 +747,10 @@ def active_panel() -> None:
                     ui.badge(t["direction"],
                              color="positive" if t["direction"] == "long" else "negative")
                 ui.label(f"{price:,.4f}").classes("text-base")
+                spark = service.STATE.get("spark", {}).get(key)
+                if spark:                                  # same sparkline as Top Opportunities
+                    up = spark[-1] >= spark[0]
+                    ui.html(_sparkline_svg(spark, up, h=32)).classes("w-full")
                 if pos:                                   # P&L in account base ccy (HKD)
                     from dashboard.data import ib_client
                     _acct = service.STATE.get("account") or {}
