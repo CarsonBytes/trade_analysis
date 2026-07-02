@@ -105,6 +105,25 @@ Verified: mode='live' -> both `paper._DB` and `store._DB` -> `dashboard_live.db`
 mode='paper' (the real persisted state) -> `dashboard.db` (existing, untouched, all history intact).
 Dashboard restarted clean (HTTP 200, paper mode, no errors). Live mode now starts with a CLEAN slate.
 
+### 🐞 FOLLOW-UP FIX 2026-07-02: PAPER endpoint could self-flip to LIVE via the shared mode pointer
+Even after the DB-separation fix above, `quant.carsonng.com` (port 8080) briefly showed the LIVE
+account's near-empty state ("stats gone") because: the shared `store.get_mode()`/`set_mode()`
+pointer (`dashboard_mode.db`) had been set to `'live'` by an earlier test click, and `dashboard.ps1`'s
+new `$env:DASH_FIXED_MODE = "paper"` pin (added to the FILE on disk) had NOT yet taken effect — the
+scheduled task's OUTER PowerShell process was still the one from BEFORE that edit (only its INNER
+`python -m dashboard.app` child gets relaunched by the watchdog loop; the outer process's env is fixed
+for its own lifetime and doesn't re-read the .ps1 file). So the next Python restart fell through to
+the shared pointer (`'live'`) instead of the intended hard pin. **FIX: restarted the actual scheduled
+task** (`Stop/Start-ScheduledTask DashboardApp`, not just the inner loop) so the outer process re-runs
+`dashboard.ps1` top-to-bottom and `DASH_FIXED_MODE=paper` is set BEFORE Python ever starts — this
+pin now takes ABSOLUTE priority over the shared pointer in `app._resolve_mode()`, so a stray click or
+leftover pointer value can never again flip the paper endpoint. **VERIFIED:** `dashboard.db` mtime
+advancing every refresh cycle (paper data live/growing) while `dashboard_live.db` mtime is FROZEN (no
+leakage); `portfolio_snapshot` cache shows NetLiq **HKD 1,008,554** (matches paper DUK968178), not the
+live account's ~HKD 40. **Lesson: after editing dashboard.ps1 / run_dashboard_live.ps1, the SCHEDULED
+TASK itself must be restarted (Stop/Start-ScheduledTask), not just the app** — env vars set at the top
+of a long-running watchdog script only take effect once, at that process's own startup.
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:

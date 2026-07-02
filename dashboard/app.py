@@ -17,32 +17,37 @@ import datetime as dt
 import os
 from nicegui import ui, run
 
-from dashboard.web import service
+# Mode MUST be resolved before importing anything that touches the DB (service -> paper/store
+# compute their DB path at IMPORT time from DASH_DB_NAME). `store` itself is lightweight/self-
+# contained (stdlib only), so it's safe to import this early.
 from dashboard.core import store
-from dashboard.instruments import BY_KEY, active_by_key
-from dashboard.core.scoring import rank
 
 
 def _resolve_mode() -> str:
-    """SINGLE-ENDPOINT paper/live switch: one dashboard on one port (→ quant.carsonng.com),
-    connected to ONE account at a time. The persisted 'dash_mode' picks which IB gateway/account
-    this process uses; the UI switch flips it and restarts (watchdog relaunches into the new mode).
-    Requires BOTH gateways running (paper 4002 + live 4001). Set env before any IB connect."""
-    try:
-        m, _ = store.cache_get("dash_mode")
-    except Exception:                                    # noqa: BLE001
-        m = None
-    mode = (m or "paper").lower()
+    """CONCURRENT paper+live: TWO separate long-running processes, each PINNED to one mode via
+    DASH_FIXED_MODE (set by its launch script -- dashboard.ps1 sets 'paper', run_dashboard_live.ps1
+    sets 'live'). Each has its own port, IB gateway/account, and database (DASH_DB_NAME) -- fully
+    isolated, no shared state except the read-only fact of which Cloudflare hostname reaches which.
+    (The old single-endpoint restart-switch via store.get_mode()/set_mode() still works as a
+    fallback for a process that does NOT set DASH_FIXED_MODE, but concurrent operation should
+    always pin it explicitly -- this avoids two processes ever racing on the same shared pointer.)"""
+    mode = (os.environ.get("DASH_FIXED_MODE") or store.get_mode() or "paper").lower()
     if mode == "live":                                   # override the paper .env defaults
         os.environ["IB_PORT"] = os.environ.get("LIVE_IB_PORT", "4001")
         os.environ["IB_ACCOUNT"] = os.environ.get("LIVE_IB_ACCOUNT", "U12991898")
         os.environ["IB_ALLOW_LIVE"] = "1"                # arms the ib_exec guard for the live acct
+        os.environ["DASH_DB_NAME"] = "dashboard_live.db"  # SEPARATE journal/history from paper
     else:
         os.environ.pop("IB_ALLOW_LIVE", None)            # paper: guard stays paper-only
+        os.environ["DASH_DB_NAME"] = "dashboard.db"       # the original/paper journal
     return mode
 
 
 DASH_MODE = _resolve_mode()
+
+from dashboard.web import service                          # noqa: E402 -- AFTER mode resolution
+from dashboard.instruments import BY_KEY, active_by_key     # noqa: E402
+from dashboard.core.scoring import rank                     # noqa: E402
 
 # ---- settings (live, editable from the UI) --------------------------------
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
@@ -886,18 +891,6 @@ async def _log_trades_now() -> None:
     ui.notify(f"Logged {len(placed)} paper trade(s).")
 
 
-def _set_mode_and_restart(mode: str) -> None:
-    """Persist the target paper/live mode and exit so the watchdog relaunches this ONE dashboard
-    into that mode (single endpoint; Cloudflare/quant.carsonng.com follows automatically)."""
-    import threading
-    store.cache_set("dash_mode", mode)
-    ui.notify(f"Switching to {mode.upper()} — restarting (~10s). Reload the page shortly.",
-              type="warning", timeout=9000)
-    from dashboard.core.log import log
-    log.info("dash mode switch -> %s; exiting for watchdog relaunch", mode)
-    threading.Timer(1.2, lambda: os._exit(0)).start()
-
-
 def _open_withdraw() -> None:
     """Manual cash-withdrawal helper: free funds from the CASH SHIELD (idle USD -> SGOV)
     first, NEVER the Core book, and earmark a reserve the sweep respects. The actual money
@@ -1076,26 +1069,20 @@ def main_page() -> None:
                              "Phase 2 adds the panic-MR sleeve")
             except Exception:                                      # never break the header
                 pass
-            # Single-endpoint mode switch: restart THIS dashboard into the other account.
+            # CONCURRENT paper+live: both processes run continuously, each on its own Cloudflare
+            # hostname (same apex domain, real HTTPS, no reverse-proxy path/websocket rewriting
+            # issues). This is a plain NAVIGATION link to the sibling instance -- NOT a mode-flip/
+            # restart -- because both are already live and trading independently. Configurable via
+            # PAPER_URL/LIVE_URL env (defaults match the Cloudflare tunnel's two hostnames).
             _other = "PAPER" if _live else "LIVE"
-
-            def _switch_mode():
-                if _other == "PAPER":                    # live -> paper: no confirmation needed
-                    _set_mode_and_restart("paper"); return
-                with ui.dialog() as _d, ui.card().classes("min-w-[480px]"):
-                    ui.label("⚠️ Switch to LIVE — REAL MONEY").classes("text-lg font-bold text-red")
-                    ui.label("This dashboard will RESTART and connect to live account U12991898 "
-                             "(port 4001). Real orders will be placed on live signals. The live IB "
-                             "gateway must be running.").classes("text-sm")
-                    with ui.row().classes("gap-2 mt-2"):
-                        ui.button("Cancel", on_click=_d.close).props("flat")
-                        ui.button("Switch to LIVE", on_click=lambda: (_d.close(),
-                                  _set_mode_and_restart("live"))).props("color=red")
-                _d.open()
-            ui.button(f"⇄ Switch to {_other}", on_click=_switch_mode)\
-                .props("outline " + ("color=green" if _other == "PAPER" else "color=red"))\
-                .tooltip(f"restart this one dashboard in {_other} mode (single URL; "
-                         f"needs the {_other} gateway running)")
+            _other_url = (os.environ.get("PAPER_URL", "https://quant.carsonng.com") if _other == "PAPER"
+                          else os.environ.get("LIVE_URL", "https://live.quant.carsonng.com"))
+            ui.link(f"⇄ Open {_other}", _other_url, new_tab=True)\
+                .classes("text-sm px-3 py-1 rounded border "
+                         + ("border-green-600 text-green-700" if _other == "PAPER"
+                            else "border-red-600 text-red-700"))\
+                .tooltip(f"opens the {_other} dashboard (separate always-on instance, own gateway "
+                         "+ account + database; both trade concurrently)")
         ui.label("Decision support, not auto-execution. Verify before risking money.")\
             .classes("text-sm text-grey-6")
         clock_row()
