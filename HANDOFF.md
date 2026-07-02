@@ -105,6 +105,33 @@ Verified: mode='live' -> both `paper._DB` and `store._DB` -> `dashboard_live.db`
 mode='paper' (the real persisted state) -> `dashboard.db` (existing, untouched, all history intact).
 Dashboard restarted clean (HTTP 200, paper mode, no errors). Live mode now starts with a CLEAN slate.
 
+### 🐞 FIXED 2026-07-02: allocation pie chart was missing all 4 real ETF position slices
+User reported the pie chart looked wrong. Root cause found via ground-truth IBKR query: **all 4
+open positions (EEM/DBC/VNQ/CPER) were genuinely still held on the real account (confirmed
+matching conIds/qty/avgCost), but `ib_mirror.status` had been incorrectly set to `'CLOSED'` for
+all 4 rows**, while `paper_trades.status` correctly stayed `'OPEN'` — an inconsistent state.
+`live_positions()` only queries `ib_mirror WHERE status='OPEN'`, so it returned `{}`, and the pie's
+`positions` dict (sourced from it) silently dropped all 4 real positions -- showing only SGOV +
+cash buffer, missing ~HKD 512K of actual holdings.
+**Root cause in `sync_closures()` (ib_exec.py):** when a broker position-read comes back empty, the
+old code marked `ib_mirror.status='CLOSED'` **unconditionally**, BEFORE checking whether
+`_resolve_from_broker()` actually found a confirming closing fill. If the fill lookup returned
+`None` (e.g. a TRANSIENT/incomplete `ib.positions()`/`ib.fills()` read right after a reconnect --
+this session had several during testing/restarts) the mirror row was permanently orphaned as
+CLOSED with no code path to ever reopen it, silently breaking `live_positions()` for that trade
+forever, even though the account still held it and `paper_trades` still (correctly) said OPEN.
+**FIX:** only commit `ib_mirror.status='CLOSED'` once resolution is actually confirmed (a real
+closing fill found, `_resolve_from_broker()` returns a message) OR the paper side had already
+resolved some other way; otherwise leave the mirror row OPEN and retry next cycle -- same
+"uncertain -> don't commit, re-check" philosophy already used for the pending-order guard just
+above it. **Data repair:** the 4 corrupted rows were reset `ib_mirror.status='OPEN'` (verified
+safe via a direct ground-truth query against the live IBKR paper account first). **VERIFIED
+end-to-end:** `ib_exec.live_positions()` now returns all 4 positions correctly; the dashboard's
+own cached `portfolio_snapshot` picked them up on its next refresh after reconnecting (its own IB
+connection had also transiently dropped/reconnected during this testing, WinError 1225 ->
+recovered, clientId=7); pie-chart math reconciles (4 ETFs ~HKD 512K + SGOV ~HKD 294K + cash ~HKD
+196K ≈ NetLiq ~HKD 1.01M, matching GrossPositionValue within FX-rounding).
+
 ### 🐞 FOLLOW-UP FIX 2026-07-02: PAPER endpoint could self-flip to LIVE via the shared mode pointer
 Even after the DB-separation fix above, `quant.carsonng.com` (port 8080) briefly showed the LIVE
 account's near-empty state ("stats gone") because: the shared `store.get_mode()`/`set_mode()`

@@ -281,14 +281,30 @@ def sync_closures() -> list[str]:
             continue
         # (a) position closed at broker (SL/TP filled) while paper still OPEN ->
         #     resolve the paper trade from the broker's actual exit.
+        # BUG FIXED 2026-07-02: this used to mark ib_mirror CLOSED unconditionally, even when
+        # _resolve_from_broker() found no matching closing fill (returns None) -- e.g. a
+        # TRANSIENT/incomplete ib.positions() read right after a reconnect can look identical
+        # to "genuinely flat". That permanently orphaned the mirror row as CLOSED while the
+        # paper journal correctly stayed OPEN, so live_positions() (WHERE status='OPEN') would
+        # silently drop a still-open position forever -- broke the portfolio pie/allocation.
+        # Fix: only commit CLOSED once we've actually confirmed it (a real closing fill found,
+        # OR the paper side already resolved some other way) -- same "uncertain -> retry next
+        # cycle, don't commit" philosophy as the working-order guard above.
         if open_pos is None or open_pos.position == 0:
-            with paper._LOCK, _conn() as c:
-                c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
-                          (paper_id,))
             if pt["status"] == "OPEN":
                 msg = _resolve_from_broker(ib, pt, con_id)
                 if msg:
+                    with paper._LOCK, _conn() as c:
+                        c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
+                                  (paper_id,))
                     logs.append(msg); log.info("ib_exec: %s", msg)
+                # else: no confirming fill yet -- leave ib_mirror OPEN, re-check next cycle.
+            else:
+                # paper already resolved (e.g. via the deterministic tick path); nothing left
+                # to resolve, safe to mark the mirror row closed now.
+                with paper._LOCK, _conn() as c:
+                    c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
+                              (paper_id,))
             continue
         # (b) roll: open position inside its contract's roll window -> close front,
         #     re-open next month carrying the same paper trade.
