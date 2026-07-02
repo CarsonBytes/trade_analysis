@@ -105,6 +105,27 @@ Verified: mode='live' -> both `paper._DB` and `store._DB` -> `dashboard_live.db`
 mode='paper' (the real persisted state) -> `dashboard.db` (existing, untouched, all history intact).
 Dashboard restarted clean (HTTP 200, paper mode, no errors). Live mode now starts with a CLEAN slate.
 
+### ⭐ FEATURE 2026-07-02: reset button for the Constraint scorecard (rejected_signals)
+User request: "Constraint scorecard" (Retrospective tab) was showing 6,617 rows dating back to
+2026-06-14 — mixing STALE pre-ETF-cutover reasons (e.g. "long-only: short side disabled" from the
+old futures/FX config, now meaningless since LONG_ONLY is always true) with current ETF-era data,
+making it useless for judging the LIVE config. NOTE: checked first whether the KPI cards (Expectancy/
+Win-rate/etc, driven by CLOSED trades) also needed resetting — they didn't: 0 closed trades exist
+(strategy holds 3-5wk, only 9 days live), so those were already at their zero starting state.
+**Deliberately did NOT reuse the existing "Archive & reset" button** (`paper.archive_and_reset()`)
+— that does `DELETE FROM paper_trades` unconditionally, which would have wiped the 4 REAL open
+positions' journal rows too, orphaning them from `ib_mirror` and hiding them from Active Trades /
+the dedup check (risk of the funnel placing DUPLICATE trades on the same 4 ETFs next cycle, right
+after fixing the related ib_mirror-orphan bug above). Built a SCOPED equivalent instead:
+`journal.archive_and_reset_rejections()` — same "archive, never delete" pattern (copies to
+`rejected_signals_archive` tagged with a batch timestamp, then clears the live table) but touches
+ONLY the audit log, never `paper_trades`/`ib_mirror` — open positions completely unaffected.
+UI: "Reset" button next to the "Constraint scorecard" label (confirmation dialog, same style as
+Archive & reset). **VERIFIED end-to-end:** archived 6,617 rows (recoverable in the archive table),
+live table -> 0; then ran a REAL placement funnel cycle and confirmed 6 NEW rows recorded correctly
+into clean current-era buckets only ("overextended entry", "trend strength below MIN_STRENGTH") —
+confirms constraints keep updating live after a reset, no stale reasons leaking back in.
+
 ### 🐞 FIXED 2026-07-02: allocation pie chart was missing all 4 real ETF position slices
 User reported the pie chart looked wrong. Root cause found via ground-truth IBKR query: **all 4
 open positions (EEM/DBC/VNQ/CPER) were genuinely still held on the real account (confirmed

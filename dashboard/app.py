@@ -830,7 +830,12 @@ def retrospective_panel() -> None:
             .classes("text-sm text-grey")
 
     # constraint scorecard
-    ui.label("Constraint scorecard").classes("text-sm font-bold mt-2")
+    with ui.row().classes("items-center gap-2 mt-2"):
+        ui.label("Constraint scorecard").classes("text-sm font-bold")
+        ui.button("Reset", icon="restart_alt", on_click=_reset_scorecard)\
+            .props("flat dense size=sm")\
+            .tooltip("Archives the current tally (nothing lost) and starts the "
+                     "scorecard at zero. Does NOT touch open positions or trade history.")
     counts = journal.rejection_counts()
     if counts:
         rows = [{"constraint": reason, "blocked": n} for reason, n in counts]
@@ -1043,6 +1048,29 @@ def _open_archive() -> None:
 
             ui.button("Unarchive selected", icon="unarchive", on_click=_unarch).props("color=primary")
         ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+
+
+async def _reset_scorecard() -> None:
+    """Archive + clear the Constraint-scorecard log (rejected_signals). Purely an
+    audit/display log -- does NOT touch paper_trades/ib_mirror, so open positions
+    and trade history are completely unaffected."""
+    from dashboard.core import journal
+    with ui.dialog() as dlg, ui.card():
+        ui.label("Reset constraint scorecard?").classes("text-lg font-bold")
+        ui.label("Archives the current tally, then starts the scorecard at zero. "
+                 "Nothing is deleted — query rejected_signals_archive to see prior "
+                 "counts. Open positions and trade history are untouched; new "
+                 "rejections keep being tallied as board scans run.").classes("text-sm")
+        with ui.row():
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            async def _go():
+                dlg.close()
+                r = await run.io_bound(journal.archive_and_reset_rejections)
+                retrospective_panel.refresh()
+                ui.notify(f"Archived {r['archived']} record(s) as {r['batch']}. "
+                          f"Scorecard reset.")
+            ui.button("Reset", on_click=_go).props("color=negative")
     dlg.open()
 
 

@@ -138,6 +138,27 @@ def _canon(reason: str) -> str:
     return r  # unknown reason: keep verbatim so it's still visible
 
 
+def archive_and_reset_rejections() -> dict:
+    """Snapshot + clear the rejected_signals log so the Constraint scorecard restarts
+    at zero (e.g. after a strategy/universe change makes old reasons stale/mixed-in).
+    Same 'archive, never delete' pattern as paper.archive_and_reset(): copies every row
+    into rejected_signals_archive tagged with a batch timestamp, THEN clears the live
+    table. Nothing is lost -- query rejected_signals_archive to see prior batches.
+    Does NOT touch paper_trades/ib_mirror -- open positions are entirely unaffected."""
+    batch = _now()
+    with _LOCK, _conn() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS rejected_signals_archive (archive_batch TEXT, "
+                  "ts TEXT, instrument TEXT, direction TEXT, det_strength INTEGER, "
+                  "confidence REAL, reasons TEXT)")
+        n = c.execute("SELECT COUNT(*) FROM rejected_signals").fetchone()[0]
+        c.execute("INSERT INTO rejected_signals_archive "
+                  "(archive_batch, ts, instrument, direction, det_strength, confidence, reasons) "
+                  "SELECT ?, ts, instrument, direction, det_strength, confidence, reasons "
+                  "FROM rejected_signals", (batch,))
+        c.execute("DELETE FROM rejected_signals")
+    return {"archived": n, "batch": batch}
+
+
 def rejection_counts() -> list[tuple[str, int]]:
     """How often each GATE blocked a directional candidate -- the constraint
     scorecard. Numeric values are normalised so a gate aggregates to one row."""
