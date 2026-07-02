@@ -53,7 +53,8 @@ from dashboard.core.scoring import rank                     # noqa: E402
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
 SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
-            "cap": 200, "grid_cols": 4}
+            "cap": 200, "grid_cols": 4, "chart_period": "All"}
+CHART_PERIODS = {"1W": 7, "1M": 30, "3M": 90, "All": None}   # label -> lookback days (None = all)
 _busy = {"flag": False}
 
 
@@ -65,7 +66,7 @@ def _save_settings() -> None:
         store.cache_set("ui_settings", {
             "cheap_min": SETTINGS["cheap_min"], "llm_min": SETTINGS["llm_min"],
             "auto_pause": SETTINGS["auto_pause"], "cap": SETTINGS["cap"],
-            "grid_cols": SETTINGS["grid_cols"],
+            "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI})
     except Exception:                                  # noqa: BLE001 -- settings are non-critical
@@ -80,7 +81,7 @@ def _load_settings() -> None:
         saved, _ts = store.cache_get("ui_settings")
         if not saved:
             return
-        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols"):
+        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -619,11 +620,27 @@ def portfolio_panel() -> None:
                   f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
                   f"USD cash {_money(cash_mo)} @ {ib_rate:.1f}% (live ^IRX-derived rates)")
 
+    # Period control: governs BOTH charts below. The drawdown "now" badge + the peak-tracking
+    # always use the FULL history (correctness -- a window can't hide the true current DD from
+    # the all-time peak); the period only trims which POINTS are plotted, for readability.
+    def _set_chart_period(e) -> None:
+        SETTINGS["chart_period"] = e.value
+        _save_settings()
+        portfolio_panel.refresh()
+    with ui.row().classes("items-center gap-2 mt-2"):
+        ui.label("Period:").classes("text-xs text-grey-6")
+        ui.toggle(list(CHART_PERIODS), value=SETTINGS["chart_period"], on_change=_set_chart_period)\
+            .props("dense").tooltip("window shown in the charts below (both value & drawdown)")
+
+    _lookback_days = CHART_PERIODS.get(SETTINGS["chart_period"])
+    _cutoff = (hist[-1][0] - _lookback_days * 86400) if (_lookback_days and hist) else None
+
     # equity line chart (account value over time, base ccy)
     ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold mt-2")
+    _whist = [h for h in hist if _cutoff is None or h[0] >= _cutoff]
     if len(hist) >= 2:
-        xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in hist]
-        ys = [h[1] for h in hist]
+        xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in _whist]
+        ys = [h[1] for h in _whist]
         ui.echart({
             "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
@@ -643,17 +660,20 @@ def portfolio_panel() -> None:
     if len(hist) >= 2:
         _peak = hist[0][1]
         dxs, dys, cur_dd = [], [], 0.0
-        for h in hist:
+        for h in hist:                        # ALWAYS the full series -- true peak, never windowed
             _peak = max(_peak, h[1])
             cur_dd = (h[1] - _peak) / _peak * 100.0 if _peak else 0.0
-            dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
-            dys.append(round(cur_dd, 2))
+            if _cutoff is None or h[0] >= _cutoff:
+                dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
+                dys.append(round(cur_dd, 2))
         ddcol = "#16a34a" if cur_dd > -5 else "#d97706" if cur_dd > -10.5 else "#dc2626"
         with ui.row().classes("items-baseline gap-2 mt-2"):
             ui.label("Drawdown from peak").classes("text-sm font-bold")
             ui.label(f"now {cur_dd:+.1f}%").classes(
                 "text-sm font-bold " + ("text-green" if cur_dd > -5
-                                        else "text-orange" if cur_dd > -10.5 else "text-red"))
+                                        else "text-orange" if cur_dd > -10.5 else "text-red"))\
+                .tooltip("Always the TRUE current drawdown from the all-time peak, "
+                         "regardless of the period selected above")
         ui.echart({
             "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "category", "data": dxs, "boundaryGap": False},
