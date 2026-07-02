@@ -113,18 +113,25 @@ def mirror_new() -> list[str]:
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
     # PHASE auto-switch: Phase 1 = core only; Phase 2 (equity >= PHASE2_NAV_USD) also runs the
-    # panic-MR sleeve. The sleeve's order path is a separate build; when added it gates on
-    # paper.sleeve_active(equity) so it turns on automatically at the threshold (no manual step).
-    phase = paper.account_phase(equity)
+    # panic-MR sleeve, IF ALSO explicitly enabled (sleeve.sleeve_enabled(), paper-only by
+    # default -- see sleeve.py). Both gates independent so the sleeve never silently activates.
     from dashboard.instruments import ETF_TRADED_BY_KEY
+    from dashboard.core import sleeve
     for t in paper.open_trades():
-        if t["method"] != MIRROR_METHOD or t["id"] in done:
+        if t["id"] in done:
             continue
-        spec = contracts.SPECS.get(t["instrument"])
-        if spec is not None:
-            msg = _place_bracket(ib, t, spec, equity)                  # futures
-        elif t["instrument"] in ETF_TRADED_BY_KEY:
-            msg = _place_etf_bracket(ib, t, equity)                    # ETF (shares)
+        if t["method"] == sleeve.SLEEVE_METHOD:
+            if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
+                continue
+            msg = _place_sleeve_bracket(ib, t, equity)                  # sleeve (SPY/QQQ/XLK)
+        elif t["method"] == MIRROR_METHOD:
+            spec = contracts.SPECS.get(t["instrument"])
+            if spec is not None:
+                msg = _place_bracket(ib, t, spec, equity)               # futures
+            elif t["instrument"] in ETF_TRADED_BY_KEY:
+                msg = _place_etf_bracket(ib, t, equity)                 # ETF (shares)
+            else:
+                continue
         else:
             continue
         if msg:
@@ -143,6 +150,16 @@ def _equity_usd(ib) -> float:
         if rate:
             return nl * rate
     return paper.ACCOUNT
+
+
+def current_equity_usd() -> float | None:
+    """PUBLIC equity accessor for callers outside this module (e.g. sleeve signal
+    generation, which needs equity for phase-gating but must stay broker-agnostic in
+    dashboard.core). Paper-guarded like everything else here; None if not connected."""
+    ib = _guard()
+    if ib is None:
+        return None
+    return _equity_usd(ib)
 
 
 def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> str | None:
@@ -245,6 +262,96 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
                    "OPEN", "etf"))
     return (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
             f"SL {sl_px} TP {tp_px}")
+
+
+def _place_sleeve_bracket(ib, t: dict, equity_usd: float) -> str | None:
+    """Panic-MR sleeve order: SAME bracket mechanics as _place_etf_bracket (a real broker
+    STP -5% / LMT +3% pair protects the position even if this app is offline), but sized at
+    the SLEEVE's own risk_pct (0.5% base / 1.0% at VIX>30), read from entry_facts -- NOT the
+    core's global paper.RISK_PER_TRADE. The dynamic 5MA-touch/10-day exits are separate
+    (sleeve.close_expired_sleeves), since a static broker order can't express them."""
+    import json
+    try:
+        risk_pct = json.loads(t.get("entry_facts") or "{}").get("risk_pct")
+    except Exception:                                   # noqa: BLE001
+        risk_pct = None
+    if risk_pct is None:
+        return f"{t['instrument']}: sleeve trade missing risk_pct in entry_facts, SKIP"
+    contract = ib_client.stock_contract(t["instrument"])
+    if contract is None:
+        return f"{t['instrument']}: no stock contract (market data?), retry"
+    stop_per_share = abs(float(t["entry"]) - float(t["sl"]))
+    qty = contracts.size_shares(equity_usd, stop_per_share, risk_pct)
+    pos_cap = float(os.environ.get("ETF_POS_CAP", "0.25"))   # same safety cap as the core
+    price = float(t["entry"])
+    if pos_cap > 0 and price > 0:
+        qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))
+    if qty < 1:
+        return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
+    action = "BUY"                                       # sleeve is long-only
+    risk_money = equity_usd * risk_pct
+    tp_px = round(float(t["tp"]), 2)
+    sl_px = round(float(t["sl"]), 2)
+
+    def send():
+        bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
+                                  takeProfitPrice=tp_px, stopLossPrice=sl_px)
+        bracket.parent.orderType = "MKT"
+        bracket.parent.lmtPrice = 0.0
+        for o in bracket:
+            o.tif = "GTC"
+            o.orderRef = f"sleeve#{t['id']}"
+        return [ib.placeOrder(contract, o) for o in bracket]
+    try:
+        trades = ib_client.call(send, timeout=15)
+    except Exception as e:                     # noqa: BLE001
+        return f"{t['instrument']}: sleeve order send failed ({e}), retry"
+    perm_id = getattr(trades[0].order, "permId", 0)
+    with paper._LOCK, _conn() as c:
+        c.execute("INSERT OR IGNORE INTO ib_mirror VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (t["id"], perm_id, getattr(contract, "conId", 0), t["instrument"],
+                   qty, risk_money, "",
+                   dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "OPEN", "sleeve"))
+    return (f"{t['instrument']}: SLEEVE bracket placed {action} {qty}sh "
+            f"SL {sl_px} TP {tp_px} (risk {risk_pct:.1%})")
+
+
+def manual_close_sleeve(trade: dict, reason: str) -> str | None:
+    """Flatten a sleeve position for a DYNAMIC exit (5MA-touch / time-cap) that a static
+    broker bracket can't express: cancel the outstanding STP+LMT children, then submit a
+    market SELL to flatten. Does NOT resolve the paper trade itself -- the next
+    sync_closures() cycle picks up the resulting broker-truth closing fill exactly like any
+    other exit (that code path is method-agnostic, already reused as-is)."""
+    ib = _guard()
+    if ib is None:
+        return None
+    with paper._LOCK, _conn() as c:
+        row = c.execute("SELECT con_id, qty, status FROM ib_mirror WHERE paper_id=?",
+                        (trade["id"],)).fetchone()
+    if row is None or row[2] != "OPEN":
+        return None
+    con_id, qty, _ = row
+
+    def _do():
+        contract = next((p.contract for p in (ib.positions() or [])
+                         if p.contract.conId == con_id), None)
+        if contract is None:
+            return None                                  # already flat; sync_closures handles it
+        for o in (ib.reqAllOpenOrders() or []):
+            if o.contract.conId == con_id:
+                ib.cancelOrder(o.order)
+        import ib_async
+        market = ib_async.MarketOrder("SELL", abs(qty))
+        market.orderRef = f"sleeve-exit#{trade['id']}"
+        return ib.placeOrder(contract, market)
+    try:
+        sent = ib_client.call(_do, timeout=15)
+    except Exception as e:                     # noqa: BLE001
+        return f"{trade['instrument']}: sleeve exit send failed ({e}), retry"
+    if sent is None:
+        return None
+    return f"{trade['instrument']}: sleeve DYNAMIC EXIT ({reason}) -- flatten order sent"
 
 
 def sync_closures() -> list[str]:

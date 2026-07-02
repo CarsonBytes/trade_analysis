@@ -1,0 +1,223 @@
+"""Panic-MR dip-buy SLEEVE — the one validated satellite strategy (see HANDOFF.md "FINAL DIP
+SLEEVE SPEC"). Signal math replicated EXACTLY from the validated backtest
+(dashboard/research/dipbuy_refine2.py) so the live version is provably the same strategy that
+was backtested, not a similar-looking variant.
+
+Universe: SPY, QQQ, XLK (no IWM -- weakest edge, dropped in research).
+Entry (ALL, daily close): close < 20dMA*0.975  AND  VIX/VIX[-5] - 1 > 0.15  AND  RSI14 < 35
+                           AND ADX14 > 20.
+Size: 0.5% risk base, 1.0% at VIX>30 (hard cap 1%) -- risk_pct stored in entry_facts so
+      ib_exec._place_sleeve_bracket sizes correctly without re-deriving it.
+Exit: FOUR conditions, first true wins:
+   - +3% target        -> a REAL broker LMT order (works even if this app is offline)
+   - -5% stop           -> a REAL broker STP order (ditto)
+   - close >= 5-day MA  -> DYNAMIC, checked daily here; broker can't express this statically
+   - 10 trading days    -> DYNAMIC, checked daily here
+No staging/partial exits (tested and rejected -- see HANDOFF).
+
+SLEEVE_ENABLED gates everything (default OFF): only the paper launch script sets it, so this
+never silently activates on the live account. sleeve_active(equity) (paper.py) is the SECOND,
+independent gate (account-size phase) -- BOTH must be true to trade.
+"""
+from __future__ import annotations
+
+import os
+import datetime as dt
+import numpy as np
+import pandas as pd
+
+from dashboard.core.log import log
+from dashboard.core import paper
+
+SLEEVE_UNIVERSE = ["SPY", "QQQ", "XLK"]
+SLEEVE_METHOD = "dipbuy-sleeve"
+# Signal is DAILY-bar based; the app's cheap-refresh runs every ~1min by default, but
+# re-fetching yfinance for 3 tickers that often is wasteful and pointless (the underlying
+# daily bar hasn't changed). Throttle to once per CHECK_INTERVAL_MIN; in-memory only (resets
+# on restart -- harmless, just means one extra check right after a restart).
+CHECK_INTERVAL_MIN = 60
+_last_check: dict[str, dt.datetime] = {}
+
+
+def _throttled(name: str) -> bool:
+    now = dt.datetime.now(dt.timezone.utc)
+    last = _last_check.get(name)
+    if last is not None and (now - last).total_seconds() < CHECK_INTERVAL_MIN * 60:
+        return True
+    _last_check[name] = now
+    return False
+VIX_HIGH = 30.0
+RISK_BASE = 0.005
+RISK_HIGH = 0.01
+STOP_FRAC = 0.05
+TARGET_FRAC = 0.03
+TIME_CAP_DAYS = 10
+
+
+def sleeve_enabled() -> bool:
+    """Explicit opt-in, independent of account-size phase. Only dashboard.ps1 (paper) sets
+    this -- run_dashboard_live.ps1 deliberately does NOT, so the sleeve never runs on the
+    live account without a separate, deliberate decision later."""
+    return os.environ.get("SLEEVE_ENABLED", "").lower() in ("1", "true", "yes")
+
+
+def _load_daily(ticker: str) -> dict | None:
+    """Daily OHLC + VIX + indicators, computed IDENTICALLY to the validated backtest
+    (dipbuy_refine2.load()). Returns None on a data-fetch failure (caller skips this cycle)."""
+    import yfinance as yf
+    try:
+        p = yf.download([ticker, "^VIX"], period="1y", interval="1d",
+                        progress=False, auto_adjust=True)
+    except Exception as e:                              # noqa: BLE001
+        log.warning("sleeve: yfinance fetch failed for %s: %s", ticker, e)
+        return None
+    if p is None or len(p) == 0 or ticker not in p["Close"].columns:
+        return None
+    s = p["Close"][ticker].dropna()
+    v = p["Close"]["^VIX"].reindex(s.index).ffill()
+    h = p["High"][ticker].reindex(s.index)
+    lo = p["Low"][ticker].reindex(s.index)
+    if len(s) < 200:
+        return None
+
+    def rsi(n):
+        d = s.diff()
+        g = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+        l = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+        return 100 - 100 / (1 + g / l.replace(0, np.nan))
+
+    tr = pd.concat([(h - lo), (h - s.shift()).abs(), (lo - s.shift()).abs()], axis=1).max(axis=1)
+    up = h.diff()
+    dn = -lo.diff()
+    pl = ((up > dn) & (up > 0)) * up
+    mi = ((dn > up) & (dn > 0)) * dn
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    pdi = 100 * pl.ewm(alpha=1 / 14, adjust=False).mean() / atr
+    mdi = 100 * mi.ewm(alpha=1 / 14, adjust=False).mean() / atr
+    adx = (100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)).ewm(alpha=1 / 14, adjust=False).mean()
+    return {
+        "close": float(s.iloc[-1]), "vix": float(v.iloc[-1]),
+        "vix_5ago": float(v.iloc[-6]) if len(v) > 5 else float("nan"),
+        "ma5": float(s.rolling(5).mean().iloc[-1]),
+        "ma20": float(s.rolling(20).mean().iloc[-1]),
+        "rsi14": float(rsi(14).iloc[-1]),
+        "adx14": float(adx.iloc[-1]),
+        "asof": s.index[-1],
+    }
+
+
+def entry_signal(ticker: str) -> dict | None:
+    """The exact backtest entry rule. Returns a candidate dict if ALL conditions hold, else
+    None. Caller still must check _has_open()/cooldown before acting on this."""
+    d = _load_daily(ticker)
+    if d is None:
+        return None
+    if not all(np.isfinite(x) for x in (d["close"], d["ma20"], d["rsi14"], d["adx14"],
+                                        d["vix"], d["vix_5ago"])) or d["vix_5ago"] <= 0:
+        return None
+    vix_up = d["vix"] / d["vix_5ago"] - 1.0
+    ok = (d["close"] < d["ma20"] * 0.975) and (vix_up > 0.15) and \
+         (d["rsi14"] < 35) and (d["adx14"] > 20)
+    if not ok:
+        return None
+    entry = d["close"]
+    risk_pct = RISK_HIGH if d["vix"] > VIX_HIGH else RISK_BASE
+    return {
+        "instrument": ticker, "entry": entry,
+        "sl": round(entry * (1 - STOP_FRAC), 4), "tp": round(entry * (1 + TARGET_FRAC), 4),
+        "risk_pct": risk_pct, "vix_at_entry": d["vix"], "asof": d["asof"],
+        "rationale": (f"panic dip-buy: close {entry:.2f} < 20MA*0.975 "
+                      f"({d['ma20']*0.975:.2f}), VIX {d['vix']:.1f} (+{vix_up:.0%}/5d), "
+                      f"RSI14 {d['rsi14']:.0f}, ADX14 {d['adx14']:.0f}"),
+    }
+
+
+def should_exit_dynamic(trade: dict) -> tuple[bool, str] | tuple[bool, None]:
+    """Checks ONLY the two conditions a static broker bracket can't express (5MA-touch,
+    10-trading-day cap). The +3%/-5% legs are real broker orders, already enforced. Returns
+    (True, reason) or (False, None)."""
+    d = _load_daily(trade["instrument"])
+    if d is None:
+        return False, None
+    if d["close"] >= d["ma5"]:
+        return True, f"5-day MA touch (close {d['close']:.2f} >= MA5 {d['ma5']:.2f})"
+    try:
+        entry_dt = pd.Timestamp(trade["ts"])
+        if entry_dt.tz is None:
+            entry_dt = entry_dt.tz_localize("UTC")
+        asof = d["asof"]
+        if asof.tz is None:
+            asof = asof.tz_localize("UTC")
+        # trading days elapsed ~ business days between entry and now (daily-bar granularity,
+        # matches the backtest's bar-count time cap closely enough for a daily-checked sleeve)
+        days = len(pd.bdate_range(entry_dt.normalize(), asof.normalize())) - 1
+        if days >= TIME_CAP_DAYS:
+            return True, f"{TIME_CAP_DAYS}-trading-day time cap ({days}d elapsed)"
+    except Exception as e:                              # noqa: BLE001
+        log.warning("sleeve: time-cap check failed for #%s: %s", trade.get("id"), e)
+    return False, None
+
+
+def place_sleeve_signals(equity_usd: float | None) -> list[str]:
+    """Entry side: for each universe ticker, if the sleeve is enabled+in-phase and the
+    signal fires and we don't already hold it, log a new paper trade (method=dipbuy-sleeve).
+    Mirrors the SAME Trade/_insert path the core funnel uses -- ib_exec.mirror_new() then
+    places the real bracket on its next cycle, exactly like a core signal."""
+    logs: list[str] = []
+    if not sleeve_enabled():
+        return logs
+    if not paper.sleeve_active(equity_usd):
+        return logs
+    if _throttled("entries"):
+        return logs
+    now = dt.datetime.now(dt.timezone.utc)
+    for ticker in SLEEVE_UNIVERSE:
+        if paper._has_open(ticker, SLEEVE_METHOD) or paper._recent_close(ticker):
+            continue
+        cand = entry_signal(ticker)
+        if cand is None:
+            continue
+        import json
+        entry_facts = json.dumps({
+            "risk_pct": cand["risk_pct"], "vix_at_entry": cand["vix_at_entry"],
+            "sleeve": True,
+        })
+        t = paper.Trade(
+            ts=now.isoformat(timespec="seconds"), instrument=ticker, direction="long",
+            method=SLEEVE_METHOD, entry=cand["entry"], sl=cand["sl"], tp=cand["tp"],
+            rr=round(TARGET_FRAC / STOP_FRAC, 2), size_units=0.0,
+            horizon_end=(now + dt.timedelta(days=TIME_CAP_DAYS * 1.5)).isoformat(timespec="seconds"),
+            confidence=0.0, rationale=cand["rationale"][:300], entry_facts=entry_facts)
+        paper._insert(t)
+        msg = (f"{ticker} {SLEEVE_METHOD}: PLACED long entry {cand['entry']:.2f} "
+              f"SL {cand['sl']:.2f} TP {cand['tp']:.2f} (risk {cand['risk_pct']:.1%}, "
+              f"VIX {cand['vix_at_entry']:.1f})")
+        logs.append(msg)
+        log.info("sleeve: %s", msg)
+    return logs
+
+
+def close_expired_sleeves() -> list[str]:
+    """Exit side (dynamic legs only): for each OPEN sleeve trade, check the 5MA-touch /
+    time-cap conditions and, if triggered, ask the broker layer to flatten it. The static
+    +3%/-5% legs are already-live broker orders and need no action here."""
+    logs: list[str] = []
+    if not sleeve_enabled():
+        return logs
+    if _throttled("exits"):
+        return logs
+    with paper._LOCK, paper._conn() as c:
+        rows = c.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND method=?",
+                         (SLEEVE_METHOD,)).fetchall()
+        cols = [d[0] for d in c.execute(
+            "SELECT * FROM paper_trades WHERE 1=0").description]
+    for r in rows:
+        trade = dict(zip(cols, r))
+        should, reason = should_exit_dynamic(trade)
+        if not should:
+            continue
+        from dashboard.execution import ib_exec
+        msg = ib_exec.manual_close_sleeve(trade, reason)
+        if msg:
+            logs.append(msg); log.info("sleeve: %s", msg)
+    return logs

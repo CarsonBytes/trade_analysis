@@ -105,6 +105,68 @@ Verified: mode='live' -> both `paper._DB` and `store._DB` -> `dashboard_live.db`
 mode='paper' (the real persisted state) -> `dashboard.db` (existing, untouched, all history intact).
 Dashboard restarted clean (HTTP 200, paper mode, no errors). Live mode now starts with a CLEAN slate.
 
+### ⭐⭐ BUILT 2026-07-02: panic-MR sleeve EXECUTION for PAPER (was gate-only before)
+User asked (a) fix the misleading "Phase 2 · core + MR sleeve" badge (it only reflected the
+equity threshold, not that anything was actually built/running) and (b) build the real sleeve
+for the PAPER account specifically. Both done.
+
+**(a) Badge fix:** now shows 3 honest states — "Phase 1 · core-only" / "Phase 2 threshold ·
+sleeve NOT enabled" (equity qualifies but `SLEEVE_ENABLED` isn't set) / "Phase 2 · sleeve
+ACTIVE" (both gates true). Can never again claim something isn't really running.
+
+**(b) New module `dashboard/core/sleeve.py`** — the FINAL DIP SLEEVE SPEC (above), ported from
+`dashboard/research/dipbuy_refine2.py` bit-for-bit:
+- `entry_signal(ticker)`: close<20MA*0.975 & VIX/VIX[-5]-1>0.15 & RSI14<35 & ADX14>20 (SPY/QQQ/
+  XLK). **Cross-validated against the backtest over FULL 33y SPY history: 182/182 entry dates
+  identical, zero discrepancies** (`/tmp/entry_crosscheck2.py`, formulas copied verbatim from
+  dipbuy_refine2.py). Also verified the live 1y-lookback window (vs the backtest's full-history
+  EWM) produces numerically negligible drift (RSI diff 0.0, ADX diff 0.000003) — the shorter
+  window used for live speed doesn't change the signal.
+- Sizing: 0.5% base / 1.0% at VIX>30, stored in `entry_facts` JSON (NOT a global, since it
+  differs per-trade and per-VIX-level unlike the core's flat RISK_PER_TRADE).
+- **Exit design (hybrid, the key architectural insight):** +3%/-5% are REAL broker STP/LMT
+  orders placed at entry (protects the position even if the app is offline — reuses
+  `_place_etf_bracket`'s exact bracket mechanics via a new `_place_sleeve_bracket`). Only the
+  two DYNAMIC conditions a static order can't express (5-day-MA touch, 10-trading-day cap) are
+  checked daily by `should_exit_dynamic()`/`close_expired_sleeves()`, which cancels the
+  outstanding bracket children and submits a market flatten (`ib_exec.manual_close_sleeve`) —
+  the resulting close is then picked up by the EXISTING, already-fixed `sync_closures()`
+  (method-agnostic, no changes needed there).
+- Reuses core plumbing throughout: `paper.Trade`/`_insert`/`_has_open`/`_recent_close` for the
+  journal (tagged `method="dipbuy-sleeve"`), `ib_mirror`, `sync_closures()` — new code is ONLY
+  the signal math + the two sleeve-specific order functions.
+- Independent double-gate: `SLEEVE_ENABLED` env (explicit opt-in, default OFF) AND
+  `paper.sleeve_active(equity)` (size threshold) — BOTH required. `SLEEVE_ENABLED=1` set ONLY in
+  `C:\Scripts\dashboard.ps1` (paper) — deliberately NOT in `run_dashboard_live.ps1`, so live
+  needs its own separate go-live decision later, per the user's explicit "for paper" scope.
+- Throttled to once/60min (`CHECK_INTERVAL_MIN`) — daily-bar signal, no need to hit yfinance on
+  the 1-min cheap-refresh cadence. Wired into `refresh_cheap()` (LLM-independent — the sleeve
+  needs no LLM), right after `sync_closures()`, exits-before-entries each cycle.
+- `mirror_new()` routing fixed to actually dispatch sleeve trades: it previously filtered
+  `t["method"] != MIRROR_METHOD` unconditionally, which would have SILENTLY DROPPED every
+  sleeve trade (never mirrored to the broker) had this not been caught before shipping.
+
+**Live-verified end-to-end (not just compiled):** (1) `broker.equity_usd()`/`sleeve_enabled()`/
+`sleeve_active()` all correct against the real paper account ($129,326, Phase 2, enabled). (2)
+`entry_signal()` for SPY/QQQ/XLK all correctly return None under current calm conditions
+(matches the earlier live `evaluate_signal` check showing SPY/QQQ overextended, not oversold).
+(3) **Placed ONE real tiny test order** (3sh SPY, 0.1% risk, clearly tagged "MECHANICAL TEST" in
+rationale) via the actual `mirror_new()`→`_place_sleeve_bracket()` path — verified on IBKR: SL
+$708.47 (exact -5%), TP $768.13 (exact +3%), qty correct for the risk budget, sitting
+`PreSubmitted` (market closed at test time, same state as the 4 real core positions' resting
+orders — expected, not a bug). Confirmed `manual_close_sleeve`'s cancel logic is correctly
+scoped to the app's own persistent connection (cross-client-ID cancel friction during ad hoc
+debugging was a test-script artifact, not a code bug). **Cleaned up completely**: cancelled the
+3 test orders, removed the test `ib_mirror` row, archived+removed the test `paper_trades` row
+(`paper.archive_trades([130])`, recoverable) — real account back to exactly the 4 genuine
+positions, verified. Dashboard restarted (the actual scheduled TASK, not just the inner loop —
+see the mode-switch lesson above) and confirmed badge shows "Phase 2 · sleeve ACTIVE", no errors
+across multiple live refresh cycles.
+
+**Status: LIVE on paper now.** Next real signal (SPY/QQQ/XLK panic dip, ~3-4x/yr per ticker per
+backtest) will be placed automatically. Live-account activation is a SEPARATE, deliberate future
+decision (add `SLEEVE_ENABLED=1` to `run_dashboard_live.ps1` only when ready).
+
 ### ⭐ FEATURE 2026-07-02: reset button for the Constraint scorecard (rejected_signals)
 User request: "Constraint scorecard" (Retrospective tab) was showing 6,617 rows dating back to
 2026-06-14 — mixing STALE pre-ETF-cutover reasons (e.g. "long-only: short side disabled" from the

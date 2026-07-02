@@ -1107,18 +1107,28 @@ def main_page() -> None:
                 ui.badge("● LIVE — REAL MONEY", color="red").classes("text-sm px-3 py-1")
             else:
                 ui.badge("● PAPER", color="green").classes("text-sm px-3 py-1")
-            # Account PHASE (auto-switches by equity): P1 core-only -> P2 adds the MR sleeve.
+            # Account PHASE (auto-switches by equity) x sleeve ENABLED (explicit opt-in, see
+            # sleeve.py) -- BOTH must be true for the sleeve to genuinely be trading. Badge
+            # text distinguishes "threshold reached, not built/enabled" from "actually active"
+            # so it can never again claim something that isn't really running.
             try:
                 from dashboard.core import paper as _pp
+                from dashboard.core import sleeve as _sl
                 _acct = service.STATE.get("account") or {}
                 _nl = _acct.get("NetLiquidation")
                 _eq_usd = (float(_nl) / 7.8) if _nl else None      # HKD->USD peg (display only)
                 _ph = _pp.account_phase(_eq_usd)
-                _txt = ("Phase 1 · core-only" if _ph == 1
-                        else "Phase 2 · core + MR sleeve")
-                ui.badge(_txt, color=("blue" if _ph == 1 else "purple")).classes("text-sm px-3 py-1")\
-                    .tooltip(f"auto-switch at ~US${_pp.PHASE2_NAV_USD:,.0f} NetLiq (~500K HKD); "
-                             "Phase 2 adds the panic-MR sleeve")
+                _sleeve_on = _sl.sleeve_enabled() and _pp.sleeve_active(_eq_usd)
+                if _ph == 1:
+                    _txt, _color = "Phase 1 · core-only", "blue"
+                elif _sleeve_on:
+                    _txt, _color = "Phase 2 · sleeve ACTIVE", "purple"
+                else:
+                    _txt, _color = "Phase 2 threshold · sleeve NOT enabled", "grey"
+                ui.badge(_txt, color=_color).classes("text-sm px-3 py-1")\
+                    .tooltip(f"equity threshold ~US${_pp.PHASE2_NAV_USD:,.0f} (~500K HKD); "
+                             "sleeve also needs SLEEVE_ENABLED=1 (paper launcher only) to "
+                             "actually place orders")
             except Exception:                                      # never break the header
                 pass
             # CONCURRENT paper+live: both processes run continuously, each on its own Cloudflare

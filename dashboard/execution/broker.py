@@ -44,6 +44,15 @@ def sweep_cash() -> dict:
     return {"enabled": False}
 
 
+def equity_usd() -> float | None:
+    """Current account equity in USD (IB only; used for sleeve phase/risk sizing). None if
+    not connected or the backend doesn't support it (e.g. MT5)."""
+    b = _backend()
+    if hasattr(b, "current_equity_usd"):
+        return b.current_equity_usd()
+    return None
+
+
 def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     """Free cash for a manual withdrawal from the cash shield (idle USD -> SGOV) FIRST,
     never the Core book; earmarks a reserve the sweep respects. IB only. Does NOT move

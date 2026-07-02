@@ -22,6 +22,7 @@ from dashboard.data.providers import get_ohlc
 from dashboard.core import store
 from dashboard.core import paper
 from dashboard.core import journal
+from dashboard.core import sleeve
 from dashboard.execution import executor
 from dashboard.execution import broker          # BROKER-aware dispatch (mt5 executor | ib_exec)
 from dashboard.data import mt5_client
@@ -178,6 +179,17 @@ def refresh_cheap() -> None:
         broker.sync_closures()
     except Exception as e:
         log.exception("executor closure sync error: %s", e)
+    # Panic-MR sleeve (SLEEVE_ENABLED + Phase-2 equity gated; no-ops otherwise). Runs here
+    # (LLM-independent cycle), not the board-scan block -- the sleeve's signal is pure
+    # price/VIX/RSI/ADX, no LLM involved. Exits checked BEFORE new entries each cycle.
+    try:
+        dyn_logs = sleeve.close_expired_sleeves()
+        sig_logs = sleeve.place_sleeve_signals(broker.equity_usd())
+        if dyn_logs or sig_logs:
+            STATE["sleeve_logs"] = dyn_logs + sig_logs
+            broker.mirror_new()                       # place the new entry's bracket promptly
+    except Exception as e:
+        log.exception("sleeve error: %s", e)
     # keep idle cash in USD (opt-in CASH_USD=1): clears the USD margin debit + earns
     # USD interest. Runs BEFORE the SGOV sweep so the debit is cleared first.
     try:
