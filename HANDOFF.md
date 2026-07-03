@@ -234,6 +234,43 @@ live account's ~HKD 40. **Lesson: after editing dashboard.ps1 / run_dashboard_li
 TASK itself must be restarted (Stop/Start-ScheduledTask), not just the app** — env vars set at the top
 of a long-running watchdog script only take effect once, at that process's own startup.
 
+### ⭐⭐⭐ FINAL WORKING STATE (2026-07-03) — concurrent paper+live, BOTH publicly reachable
+Superseded the single-endpoint idea below (2026-07-01) back to full concurrency (see "CONCURRENT
+PAPER + LIVE" further down) — both run simultaneously, isolated, each on its own hostname:
+
+| | Paper | Live |
+|---|---|---|
+| Local port | 8080 | 8081 |
+| Public URL | https://quant.carsonng.com | **https://quant-live.carsonng.com** |
+| IB port / account | 4002 / DUK968178 | 4001 / U12991898 |
+| Database | dashboard.db | dashboard_live.db |
+| Launcher | `C:\Scripts\dashboard.ps1` (task `DashboardApp`) | `run_dashboard_live.ps1` (task `DashboardAppLive` — ⚠️ registration pending: needs an ELEVATED PowerShell to run `Register-ScheduledTask -TaskName 'DashboardAppLive' -Xml (Get-Content 'C:\Scripts\DashboardAppLive.xml' -Raw) -Force`; running as a plain background process meanwhile, survives until next reboot/logoff only) |
+
+**Public hostname is `quant-live.carsonng.com` (2nd-level), NOT `live.quant.carsonng.com` (3rd-level)
+— the latter is PERMANENTLY BROKEN, do not use it.** Root cause: Cloudflare's automatic Universal
+SSL wildcard only covers `*.carsonng.com` (one level) — a 3rd-level subdomain gets NO certificate
+(`SSL alert 40 handshake_failure`, confirmed not a propagation issue after 35+ min). A 2nd-level
+name fits the existing wildcard and works immediately (`CN=carsonng.com`, verified `Verify return
+code: 0`). Fixed everywhere: `~/.cloudflared/config.yml` ingress + DNS route, `run_dashboard_live.
+ps1`'s `LIVE_URL`, `C:\Scripts\dashboard.ps1`'s `LIVE_URL`, `app.py`'s `LIVE_URL` default. (The old
+`live.quant.carsonng.com` DNS CNAME still exists, unrouted/pointless — harmless, not cleaned up.)
+
+**Live gateway 2FA gotcha (2026-07-03):** first attempt's push notification wasn't approved within
+IBKR's ~6min window → the Gateway silently reset to a blank, unauthenticated login screen (NOT an
+error dialog — `open_application`+screenshot was needed to see this, logs alone were ambiguous:
+"Re-login... not required" sounds like success but isn't). IBC's credential auto-fill only runs
+ONCE per launch and does not retry after a timeout. Fix: kill the whole process tree (java + its
+DisplayBannerAndLaunch.bat wrapper) and relaunch `C:\IBC-Live\StartGateway.bat` fresh for a new
+push — worked on the second attempt (verified: connected, account=U12991898, NetLiq=HKD 40).
+**Lesson for next cold-start:** if the Gateway doesn't come up within ~2min of launching, assume
+the push timed out/wasn't seen — don't keep waiting, kill and relaunch immediately.
+
+**Lesson reinforced:** editing a .ps1 launcher file does NOT affect an already-running process
+spawned from it (env vars are fixed at that process's own startup) — restarting the SCHEDULED TASK
+(or, for the live process, killing the FULL tree down to the outer wrapper before relaunching) is
+required every time. A python.exe's ps1-parent chain can be 2-3 processes deep; killing only the
+innermost child just gets it relaunched by the (still-stale-env) outer loop.
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:

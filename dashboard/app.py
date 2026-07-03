@@ -53,7 +53,7 @@ from dashboard.core.scoring import rank                     # noqa: E402
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
 SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
-            "cap": 200, "grid_cols": 4, "chart_period": "All"}
+            "cap": 200, "grid_cols": 4, "chart_period": "All", "chart_scale": "Truncated"}
 CHART_PERIODS = {"1W": 7, "1M": 30, "3M": 90, "All": None}   # label -> lookback days (None = all)
 _busy = {"flag": False}
 
@@ -67,6 +67,7 @@ def _save_settings() -> None:
             "cheap_min": SETTINGS["cheap_min"], "llm_min": SETTINGS["llm_min"],
             "auto_pause": SETTINGS["auto_pause"], "cap": SETTINGS["cap"],
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
+            "chart_scale": SETTINGS["chart_scale"],
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI})
     except Exception:                                  # noqa: BLE001 -- settings are non-critical
@@ -81,7 +82,7 @@ def _load_settings() -> None:
         saved, _ts = store.cache_get("ui_settings")
         if not saved:
             return
-        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period"):
+        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period", "chart_scale"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -636,15 +637,28 @@ def portfolio_panel() -> None:
     _cutoff = (hist[-1][0] - _lookback_days * 86400) if (_lookback_days and hist) else None
 
     # equity line chart (account value over time, base ccy)
-    ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold mt-2")
+    def _set_chart_scale(e) -> None:
+        SETTINGS["chart_scale"] = e.value
+        _save_settings()
+        portfolio_panel.refresh()
+    with ui.row().classes("items-center justify-between w-full mt-2"):
+        ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold")
+        with ui.row().classes("items-center gap-2"):
+            ui.label("Scale:").classes("text-xs text-grey-6")
+            ui.toggle(["Truncated", "Zero-baseline"], value=SETTINGS["chart_scale"],
+                     on_change=_set_chart_scale).props("dense")\
+                .tooltip("Truncated = zoomed to the data range (shows fine detail); "
+                         "Zero-baseline = y-axis starts at 0 (shows true relative scale)")
     _whist = [h for h in hist if _cutoff is None or h[0] >= _cutoff]
     if len(hist) >= 2:
         xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in _whist]
         ys = [h[1] for h in _whist]
+        _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
         ui.echart({
             "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
-            "yAxis": {"type": "value", "name": ccy, "scale": True},
+            "yAxis": ({"type": "value", "name": ccy, "min": 0}
+                     if _zero_base else {"type": "value", "name": ccy, "scale": True}),
             "series": [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
                         "lineStyle": {"width": 2},
                         "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"}}],
@@ -1138,7 +1152,7 @@ def main_page() -> None:
             # PAPER_URL/LIVE_URL env (defaults match the Cloudflare tunnel's two hostnames).
             _other = "PAPER" if _live else "LIVE"
             _other_url = (os.environ.get("PAPER_URL", "https://quant.carsonng.com") if _other == "PAPER"
-                          else os.environ.get("LIVE_URL", "https://live.quant.carsonng.com"))
+                          else os.environ.get("LIVE_URL", "https://quant-live.carsonng.com"))
             ui.link(f"⇄ Open {_other}", _other_url, new_tab=True)\
                 .classes("text-sm px-3 py-1 rounded border "
                          + ("border-green-600 text-green-700" if _other == "PAPER"

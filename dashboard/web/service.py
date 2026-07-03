@@ -145,9 +145,20 @@ def refresh_cheap() -> None:
             hist, _ts = store.cache_get("equity_history")
             hist = hist or []
             now_s = int(_time.time())
-            if not hist or now_s - hist[-1][0] >= 600:
-                hist.append([now_s, round(float(acct["NetLiquidation"]), 2),
-                             acct.get("_ccy", "")])
+            new_val = round(float(acct["NetLiquidation"]), 2)
+            # SANITY GUARD: reject an implausible single-snapshot jump (>50% either way in one
+            # ~10min interval -- the strategy cannot move the account anywhere near that fast).
+            # Root-caused 2026-07-02: a stray value of 40 (the LIVE account's balance, ~HKD 1M
+            # vs the correct paper value) got recorded here during the mode-isolation bug (now
+            # fixed -- see HANDOFF), corrupting both the equity chart and the drawdown-from-peak
+            # line at that point. This guard stops any FUTURE bad reading (this class of bug or
+            # any other transient glitch) from ever writing a spurious point into the history again.
+            implausible = hist and new_val > 0 and not (0.5 <= new_val / hist[-1][1] <= 2.0)
+            if implausible:
+                log.warning("equity_history: rejected implausible snapshot %.2f "
+                           "(prev %.2f) -- not recorded", new_val, hist[-1][1])
+            elif not hist or now_s - hist[-1][0] >= 600:
+                hist.append([now_s, new_val, acct.get("_ccy", "")])
                 store.cache_set("equity_history", hist[-3000:])
     except Exception as e:
         log.debug("equity_history error: %s", e)

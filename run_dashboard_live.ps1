@@ -15,8 +15,11 @@
 #     your live password in C:\IBC-Live\config.ini + a 2FA phone approval).
 #   - Fractional shares + US-Stocks + Forex permissions on the live account.
 #   - Paper-test one real fractional bracket order before funding meaningfully.
-#   - Cloudflare: live.quant.carsonng.com routed to http://localhost:8081
-#     (see ~/.cloudflared/config.yml).
+#   - Cloudflare: quant-live.carsonng.com routed to http://localhost:8081 (see
+#     ~/.cloudflared/config.yml). NOTE: live.quant.carsonng.com (a 3rd-level
+#     subdomain) does NOT work -- no cert covers it (Cloudflare's automatic
+#     wildcard only covers *.carsonng.com, one level). quant-live.carsonng.com
+#     is a 2nd-level subdomain that fits the existing wildcard -- works immediately.
 # ============================================================================
 
 $mutex = New-Object System.Threading.Mutex($false, "Global\DashboardAppLiveMutex")
@@ -32,7 +35,7 @@ $env:IB_ACCOUNT      = "U12991898"     # LIVE account id
 $env:IB_ALLOW_LIVE   = "1"             # THE real-money switch (paper instance never sets this)
 $env:DASH_PORT       = "8081"          # LIVE UI on its own local port
 $env:PAPER_URL       = "https://quant.carsonng.com"
-$env:LIVE_URL        = "https://live.quant.carsonng.com"
+$env:LIVE_URL        = "https://quant-live.carsonng.com"
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
 $env:CASH_USD        = "1"
 $env:CASH_SWEEP      = "1"
