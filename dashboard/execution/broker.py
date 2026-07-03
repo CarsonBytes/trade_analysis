@@ -90,9 +90,18 @@ def is_ib() -> bool:
     return os.environ.get("BROKER", "mt5").lower() == "ib"
 
 
+def is_live() -> bool:
+    """True iff the LIVE (real-money) account is armed -- see ib_exec._guard()'s
+    IB_ALLOW_LIVE gate, which this must match exactly (never diverge from the
+    actual safety check, or this label could lie about which account is live)."""
+    return os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
+
+
 def name() -> str:
     """Human label for the active broker/account type."""
-    return "IBKR Paper" if is_ib() else "MT5 Demo"
+    if not is_ib():
+        return "MT5 Demo"
+    return "IBKR LIVE" if is_live() else "IBKR Paper"
 
 
 def mirror_table() -> str:

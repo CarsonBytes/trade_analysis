@@ -222,10 +222,12 @@ def header_status() -> None:
                 dot = "●" if up else "○"
                 css = ("text-green" if up and ok else "text-orange" if up
                        else "text-red")
-                ui.label(f"IBKR Paper: {bc.get('detail', 'gateway down')} {dot}")\
+                ui.label(f"{_broker.name()}: {bc.get('detail', 'gateway down')} {dot}")\
                     .classes(f"text-sm {css}")\
-                    .tooltip("BROKER=ib — orders go to the IBKR paper account; "
-                             "guard requires a DU… paper account on a paper port")
+                    .tooltip("BROKER=ib — orders go to the IBKR paper account (guard requires a "
+                             "DU… paper account on a paper port), or the LIVE account when "
+                             "IB_ALLOW_LIVE is armed (guard requires the exact configured "
+                             "live account on a live port)")
                 acct = service.STATE.get("account") or {}
                 if acct:
                     cc = acct.get("_ccy", "")
@@ -238,7 +240,7 @@ def header_status() -> None:
                     if upnl:             parts.append(f"uPnL {cc} {upnl:+,.0f}")
                     ui.label(" · ".join(parts)).classes(
                         "text-sm " + ("text-green" if (upnl or 0) >= 0 else "text-red"))\
-                        .tooltip("IBKR paper account (base ccy): net liquidation, cash, "
+                        .tooltip(f"{_broker.name()} account (base ccy): net liquidation, cash, "
                                  "buying power, unrealized P&L")
                 ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
                 return
@@ -581,7 +583,7 @@ def portfolio_panel() -> None:
                 .classes("text-xs text-orange")
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
         _stat("Total value", _money(nl), "text-grey-9",
-              "Net liquidation value of the IBKR paper account")
+              f"Net liquidation value of the {_bk.name()} account")
         _stat("Total P&L", f"{_money(total_pl)}  ({pct:+.2f}%)",
               "text-green" if total_pl >= 0 else "text-red",
               "Account value now minus when tracking began (realized + unrealized)")
@@ -664,8 +666,8 @@ def portfolio_panel() -> None:
                         "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"}}],
             "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
         }).classes("w-full h-56").tooltip(
-            "Net liquidation value over time. On the paper account (no deposits) this IS "
-            "the pure strategy P&L curve; on a funded account it'll be deposit-adjusted.")
+            "Net liquidation value over time. With no ongoing deposits this IS the pure "
+            "strategy P&L curve; once you're actively depositing it'll be deposit-adjusted.")
     else:
         ui.label("Builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
