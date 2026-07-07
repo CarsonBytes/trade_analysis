@@ -271,6 +271,33 @@ spawned from it (env vars are fixed at that process's own startup) — restartin
 required every time. A python.exe's ps1-parent chain can be 2-3 processes deep; killing only the
 innermost child just gets it relaunched by the (still-stale-env) outer loop.
 
+### ⭐⭐ FIXED 2026-07-06: "Active Trades (3)" misleading + 502 on quant-live.carsonng.com
+**Problem:** the LIVE account (HK$40 balance) had 3 signals fire and get logged to the journal that
+never actually sized to ≥1 share (too small to fund), yet the header just said "Active Trades (3)"
+identically to a real position — no way to tell a phantom trade from a real one.
+
+**Fix — confirmed/pending split (app.py):** `active_panel()` now splits `paper.open_trades()` into
+`confirmed` (has a matching row in `positions`/the broker mirror) vs `pending` (logged, never
+mirrored). Header reads `"Active Trades (N open · M pending)"`; pending cards render with a dashed
+grey border, a "⏳ PENDING" badge, and a computed reason via the new `contracts.min_equity_for_1_share
+(stop_per_share, risk_pct)` (inverse of `size_shares`) — e.g. "needs ~$1,220 to size (you have ~$40)".
+Same "⏳ PENDING" badge now also mirrors onto the matching card in **Top Opportunities / Other
+instruments** (`_signal_card` gained a `pending_keys` param; `_pending_keys()` computes the set once
+per render from open trades with no broker mirror) — so a pending signal looks consistent everywhere
+it appears, not just in Active Trades. Verified on the running live dashboard: "Active Trades (0 open
+· 3 pending)" with 3 dashed PENDING cards, and 3 matching PENDING badges on the same instruments'
+cards in the grid section.
+
+**Separately, 502 Bad Gateway on quant-live.carsonng.com:** root cause was both port 8081 (live
+dashboard) and port 4001 (live IB gateway) down — `DashboardAppLive` still isn't a registered
+scheduled task (see the pending elevated-PowerShell step above), so nothing auto-restarted it after
+whatever killed the process. Fixed by relaunching `run_dashboard_live.ps1` and `StartGateway.bat`
+fresh; the Gateway reconnected without needing a new 2FA push this time (verified: no "gateway down"/
+"connecting" text, `IBKR LIVE` label present, NetLiq loaded). Public URL confirmed back to a normal
+302 (Cloudflare Access redirect) instead of 502.
+**Until `DashboardAppLive` is registered as a real scheduled task, this will keep recurring on any
+crash/reboot** — that PowerShell command is still the top pending action item for the user.
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:

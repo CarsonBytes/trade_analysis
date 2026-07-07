@@ -303,7 +303,17 @@ def _sparkline_svg(series: list[float], up: bool, w: int = 240, h: int = 40) -> 
         f'</svg>')
 
 
-def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260px] grow"):
+def _pending_keys() -> set:
+    """Instrument keys with an OPEN journal trade that was never actually mirrored to
+    the broker (see active_panel's confirmed/pending split). Computed once per panel
+    render and passed into _signal_card, rather than re-querying per card."""
+    from dashboard.core import paper
+    positions = service.STATE.get("positions", {})
+    return {t["instrument"] for t in paper.open_trades() if not positions.get(t["id"])}
+
+
+def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260px] grow",
+                 pending_keys: set | None = None):
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
     inst = active_by_key(key)
@@ -326,6 +336,10 @@ def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260
                         .props("outline").classes("text-xs").tooltip(
                             f"trend strength (need ≥{paper.MIN_STRENGTH} to trade)")
                 ui.badge(action, color=SIG_COLOR.get(action, "grey")).classes("text-sm")
+        if pending_keys and key in pending_keys:
+            ui.badge("⏳ PENDING", color="grey-7").classes("text-xs").tooltip(
+                "A signal fired and was logged, but never got sized/placed on the "
+                "broker (e.g. account too small) -- this is not a real position.")
         if price is not None:
             with ui.row().classes("items-baseline gap-2"):
                 ui.label(f"{price:,.4f}").classes("text-lg")
@@ -362,11 +376,12 @@ def opportunities() -> None:
     if not obvious:
         ui.label("No obviously aligned trends right now — mostly WATCH/WAIT.").classes("text-sm text-grey")
         return
+    pending = _pending_keys()
     n = SETTINGS.get("grid_cols", 3)
     with ui.element("div").classes("w-full items-stretch").style(
             f"display:grid; grid-template-columns: repeat({n}, minmax(0,1fr)); gap:0.75rem;"):
         for s in obvious:
-            _signal_card(s.key, compact=True, width_class="w-full")
+            _signal_card(s.key, compact=True, width_class="w-full", pending_keys=pending)
 
 
 @ui.refreshable
@@ -379,12 +394,13 @@ def grid() -> None:
         ui.label("All current signals are shown in Top Opportunities above.")\
             .classes("text-sm text-grey")
         return
+    pending = _pending_keys()
     # inline CSS grid (not Tailwind grid-cols-N, which Tailwind purges when the
     # column count is dynamic) so any chosen column count always renders.
     with ui.element("div").classes("w-full items-stretch").style(
             f"display:grid; grid-template-columns: repeat({n}, minmax(0,1fr)); gap:0.75rem;"):
         for s in others:
-            _signal_card(s.key, width_class="w-full")
+            _signal_card(s.key, width_class="w-full", pending_keys=pending)
 
 
 @ui.refreshable
@@ -733,57 +749,106 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
+def _pending_reason(t: dict) -> str:
+    """Why a qualifying signal never became a real broker position -- e.g. an
+    account too small to size even 1 share at the configured risk. Returns '' if
+    unknown/inapplicable (non-IB broker, or a rare non-funding failure)."""
+    from dashboard.execution import broker as _bk
+    if not _bk.is_ib():
+        return "not yet mirrored to the broker"
+    from dashboard.core import paper
+    from dashboard.data import contracts
+    eq = _bk.equity_usd()
+    stop_per_share = abs(t["entry"] - t["sl"])
+    if eq is None or stop_per_share <= 0:
+        return "not yet mirrored to the broker"
+    needed = contracts.min_equity_for_1_share(stop_per_share, paper.RISK_PER_TRADE)
+    if eq < needed:
+        return f"needs ~${needed:,.0f} to size (you have ~${eq:,.0f})"
+    return "awaiting the next mirror cycle"
+
+
+def _trade_card(t: dict, pos: dict | None) -> None:
+    key = t["instrument"]
+    live = service.STATE.get("live", {}).get(key)
+    price = live["price"] if live else t["entry"]
+    # prefer the REAL MT5 fill price when this trade is on the demo, so
+    # the card matches what the MT5 terminal shows (not the paper entry).
+    entry = pos["open"] if pos else t["entry"]
+    risk = abs(entry - t["sl"]) or 1e-9
+    ur = ((price - entry) if t["direction"] == "long"
+          else (entry - price)) / risk
+    from dashboard.execution import broker as _bk
+    if pos:
+        col = "bg-green-1" if ur >= 0 else "bg-red-1"
+        card_extra = ""
+    else:                                          # PENDING: unmistakably different look
+        col = "bg-grey-2"
+        card_extra = " border-dashed border-2 border-grey-5 opacity-80"
+    with ui.card().classes(f"min-w-[210px] grow {col}{card_extra}"):
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label(active_by_key(key).name).classes("font-bold")
+            ui.badge(t["direction"],
+                     color="positive" if t["direction"] == "long" else "negative")
+        if not pos:
+            ui.badge("⏳ PENDING", color="grey-7").classes("text-xs")
+        ui.label(f"{price:,.4f}").classes("text-base")
+        spark = service.STATE.get("spark", {}).get(key)
+        if spark:                                  # same sparkline as Top Opportunities
+            up = spark[-1] >= spark[0]
+            ui.html(_sparkline_svg(spark, up, h=32)).classes("w-full")
+        if pos:                                   # P&L in account base ccy (HKD)
+            from dashboard.data import ib_client
+            _acct = service.STATE.get("account") or {}
+            _ccy = _acct.get("_ccy", "")
+            _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
+            pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
+            ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
+        else:
+            ui.label(f"Signal fired, but {_pending_reason(t)} — never placed on "
+                     f"the broker, will never fill on its own.")\
+                .classes("text-xs text-grey-8")
+        src = f"{_bk.name()} fill" if pos else "paper (unconfirmed)"
+        ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
+            .classes("text-xs text-grey-7")
+        tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
+                                  else f" (not on {_bk.name()})")
+        ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
+            .classes("text-xs text-grey-6")
+
+
 @ui.refreshable
 def active_panel() -> None:
-    """Open positions shown on the Board with live unrealized P&L in R."""
+    """Open positions shown on the Board with live unrealized P&L in R. Splits
+    CONFIRMED (a real, broker-mirrored position) from PENDING (a signal that fired
+    and was logged, but never actually got sized/placed on the broker -- e.g. an
+    account too small to fund it) -- these used to be silently counted together as
+    one misleading "Active Trades (N)" total with no distinction."""
     from dashboard.core import paper
     open_t = paper.open_trades()
-    ui.label(f"Active Trades ({len(open_t)})").classes("text-lg font-bold")
+    positions = service.STATE.get("positions", {})
+    confirmed = [t for t in open_t if positions.get(t["id"])]
+    pending = [t for t in open_t if not positions.get(t["id"])]
+    hdr = f"Active Trades ({len(confirmed)} open"
+    hdr += f" · {len(pending)} pending)" if pending else ")"
+    ui.label(hdr).classes("text-lg font-bold")
     if not open_t:
         ui.label("No open positions. Setups are logged automatically from "
                  "qualifying signals.").classes("text-sm text-grey")
         return
-    positions = service.STATE.get("positions", {})
-    with ui.row().classes("w-full flex-wrap gap-3"):
-        for t in open_t:
-            key = t["instrument"]
-            live = service.STATE.get("live", {}).get(key)
-            price = live["price"] if live else t["entry"]
-            # prefer the REAL MT5 fill price when this trade is on the demo, so
-            # the card matches what the MT5 terminal shows (not the paper entry).
-            pos = positions.get(t["id"])
-            entry = pos["open"] if pos else t["entry"]
-            risk = abs(entry - t["sl"]) or 1e-9
-            ur = ((price - entry) if t["direction"] == "long"
-                  else (entry - price)) / risk
-            col = "bg-green-1" if ur >= 0 else "bg-red-1"
-            with ui.card().classes(f"min-w-[210px] grow {col}"):
-                with ui.row().classes("items-center justify-between w-full"):
-                    ui.label(active_by_key(key).name).classes("font-bold")
-                    ui.badge(t["direction"],
-                             color="positive" if t["direction"] == "long" else "negative")
-                ui.label(f"{price:,.4f}").classes("text-base")
-                spark = service.STATE.get("spark", {}).get(key)
-                if spark:                                  # same sparkline as Top Opportunities
-                    up = spark[-1] >= spark[0]
-                    ui.html(_sparkline_svg(spark, up, h=32)).classes("w-full")
-                if pos:                                   # P&L in account base ccy (HKD)
-                    from dashboard.data import ib_client
-                    _acct = service.STATE.get("account") or {}
-                    _ccy = _acct.get("_ccy", "")
-                    _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
-                    pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
-                else:
-                    pnl = ""
-                ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
-                from dashboard.execution import broker as _bk
-                src = f"{_bk.name()} fill" if pos else "paper"
-                ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
-                    .classes("text-xs text-grey-7")
-                tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
-                                          else f" (not on {_bk.name()})")
-                ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
-                    .classes("text-xs text-grey-6")
+    if confirmed:
+        with ui.row().classes("w-full flex-wrap gap-3"):
+            for t in confirmed:
+                _trade_card(t, positions.get(t["id"]))
+    if pending:
+        ui.label("Pending — signal fired but never funded/placed").classes(
+            "text-sm font-bold text-grey-7 mt-2").tooltip(
+            "These are NOT real positions. The strategy found a qualifying setup and "
+            "logged it, but couldn't size even 1 share at the configured risk (usually "
+            "because the account is too small) -- so nothing was ever sent to the broker.")
+        with ui.row().classes("w-full flex-wrap gap-3"):
+            for t in pending:
+                _trade_card(t, None)
 
 
 @ui.refreshable

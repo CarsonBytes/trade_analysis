@@ -163,6 +163,17 @@ def size_shares(equity: float, stop_per_share: float, risk_pct: float) -> int:
     return int(math.floor((equity * risk_pct) / stop_per_share))
 
 
+def min_equity_for_1_share(stop_per_share: float, risk_pct: float) -> float:
+    """Inverse of size_shares: the smallest equity (same currency as stop_per_share,
+    USD for US ETFs) that would size to >= 1 share at risk_pct. Used to explain WHY a
+    signal that qualified couldn't be placed on the broker (a PENDING, unfunded trade) --
+    e.g. 'needs ~$1,220 to size, you have $40 available' -- rather than silently vanishing
+    into a phantom position with no explanation."""
+    if stop_per_share <= 0 or risk_pct <= 0:
+        return float("inf")
+    return stop_per_share / risk_pct
+
+
 def choose_contract(spec: FutureSpec, equity: float, stop_points: float,
                     risk_pct: float, fx_to_usd: float = 1.0,
                     ) -> tuple[FutureSpec, int]:
