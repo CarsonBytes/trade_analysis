@@ -298,6 +298,62 @@ fresh; the Gateway reconnected without needing a new 2FA push this time (verifie
 **Until `DashboardAppLive` is registered as a real scheduled task, this will keep recurring on any
 crash/reboot** — that PowerShell command is still the top pending action item for the user.
 
+**UPDATE 2026-07-07: `DashboardAppLive` is now registered** (user ran the `Register-ScheduledTask`
+command; run-level lowered to `LeastPrivilege` since the script needs no admin rights). Verified by
+killing the live process tree entirely and calling `Start-ScheduledTask` — it came back on its own,
+gateway reconnected without a fresh 2FA. Live now has the same auto-recovery as paper.
+
+**Also fixed 2026-07-07: IBC's own console window kept popping up during gameplay (not the dashboard's
+doing).** Root cause: `StartGateway.bat` launched without `/INLINE` uses `start` internally to open
+`DisplayBannerAndLaunch.bat`, and Windows' `start` always spawns a NEW, visible console regardless of
+the parent process being hidden — IBC's own doc comment says exactly this ("if using Task Scheduler
+... you MUST supply /INLINE"). Fixed both `C:\IBC\start_hidden.vbs` and `C:\IBC-Live\start_hidden.vbs`
+to pass `/INLINE`. Verified on paper: killed the gateway's java.exe, watchdog relaunched it, no console
+window appeared this time (previously a visible admin cmd window titled "IBC (GATEWAY 1047)" showed
+up every relaunch).
+(Considered but NOT built: a game-mode auto-detect watchdog to pause `DashboardApp`/`DashboardAppLive`
+during play — turned out unnecessary once the actual annoyance (the console popup) was root-caused
+and fixed directly; also `Stop-ScheduledTask` was found to sometimes silently set `Enabled=False` on a
+task, effectively disabling it — avoid using it for any future pause/resume automation, prefer killing
+the process tree directly and leaving the task definition alone.)
+
+### 🔬 INVESTIGATED 2026-07-07: does the LLM gate reduce trade frequency? — corrected finding
+**Question:** LLM's `action` already overrides the deterministic signal when present ([paper.py:435](
+dashboard/core/paper.py)) — does this meaningfully cut trade frequency today?
+
+**First pass (misleading):** naively counting `board_scan_signals` rows where `det_strength>=5` and
+the LLM said WAIT/HOLD gave ~19.7% (1,032/5,248) — looked like a real ~20% frequency cut.
+
+**Corrected finding, after deduping scan-level noise into actual decision points:** that 19.7% almost
+entirely counts REPEATED scans of the SAME already-open/already-qualifying trend (scans run every
+15min-4h), not independent entry opportunities. Deduping into direction-contiguous "episodes" (a new
+streak = an actual entry decision point) over the ~3.5-week live history gives 31 total episodes —
+**31/31 had the LLM confirming direction at the episode's start.** Cross-checked two ways: (1) all 4
+real paper trades have `llm_bias='bullish'` at entry: (2) the FULL `rejected_signals` log (874 rows)
+has **zero** entries citing LLM/no-confluence as a block reason — 100% are `trend strength <5` or
+`overextended RSI`. The LLM only turns cautious (WAIT) LATER in an already-open episode, as RSI climbs
+— by which point `OVEREXT_FILTER` (the overextended-RSI gate) already blocks re-entry independently.
+**Conclusion: in this sample, LLM has never been the actual reason a trade was blocked — its caution
+is currently 100% redundant with the existing overextended-RSI filter, not an independent lever.**
+Making LLM a stricter/required criterion would change nothing yet; there's no case in the data where
+LLM alone would have prevented a trade the RSI filter wouldn't already catch, so its judgment quality
+(would a vetoed trade have lost money?) is currently untestable — would need either more live time or
+a genuine LLM-vs-RSI disagreement case to ever show up. Re-check once more live history accumulates.
+
+**RETRACTED follow-up (2026-07-07): "would exiting on LLM's WAIT have helped" is not a valid test.**
+Tried a counterfactual: for each of the 4 real open trades, find the first post-entry scan where LLM
+said WAIT, look up the actual price then (fully reconstructable now from `board_scan_signals` timestamps
++ `get_ohlc()`, no new logging needed -- corrects an earlier claim that this needed unbuilt
+infrastructure), and compare "exit there" R vs "hold to today" R. All 4 showed early-exit would have
+been worse (-0.07R to -0.29R). **But this result is meaningless and should be ignored**: per the LLM's
+own system prompt ([board_scan.py:44](dashboard/web/board_scan.py)), "WAIT is correct when signals
+conflict OR a trend is overextended" -- it's a fresh NEW-ENTRY conviction call made independently every
+scan, never a judgment on whether to exit a position already held. Treating it as an exit trigger tests
+an invented rule the LLM was never designed to support (and "overextended but still trending" is
+exactly when a trend-follower should hold, not sell) -- it says nothing about whether the LLM's actual
+job (gating new entries) is any good. A valid test still needs a genuine case where the LLM would have
+blocked a NEW entry that the RSI filter alone wouldn't have -- none exists yet (see above).
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:

@@ -325,7 +325,9 @@ def _signal_card(key: str, compact: bool = False, width_class: str = "min-w-[260
     src = live["src"] if live else service.STATE["sources"].get(key, "")
     with ui.card().classes(f"{width_class} h-full"):
         with ui.row().classes("items-center justify-between w-full"):
-            ui.label(f"{inst.name}").classes("text-base font-bold")
+            with ui.row().classes("items-baseline gap-1"):
+                ui.label(f"{inst.name}").classes("text-base font-bold")
+                ui.label(key).classes("text-xs text-grey-6 font-mono")
             with ui.row().classes("items-center gap-1"):
                 if score:
                     from dashboard.core import paper
@@ -428,7 +430,8 @@ def gate_panel() -> None:
               "BLOCKED": "🔴 blocked"}
     # hide WAIT/WATCH instruments -- only show directional candidates
     rows = [{
-        "instrument": r["key"],
+        "instrument": f"{active_by_key(r['key']).name} ({r['key']})",
+        "key": r["key"],
         "action": r["action"],
         "strength": f"{r['strength']}/5",
         "edge": (f"{r['obj_edge']:+.2f}R (n{r['obj_n']})"
@@ -438,17 +441,27 @@ def gate_panel() -> None:
         # an OPEN position's re-entry gates are irrelevant -- don't list them
         "blocked by": ("—" if r["status"] == "OPEN"
                        else "; ".join(r["blocked_by"]) or "—"),
+        "detail": "",
     } for r in rows_data if r["status"] != "WAIT"]
     if not rows:
         ui.label("No directional candidates right now — all instruments are "
                  "WAIT/WATCH.").classes("text-sm text-grey")
         return
-    ui.table(rows=rows,
-             columns=[{"name": c, "label": c, "field": c,
-                       "align": "left" if c in ("blocked by", "status") else "center",
+    cols = [c for c in rows[0] if c != "key"]
+    gtable = ui.table(rows=rows,
+             columns=[{"name": c, "label": "" if c == "detail" else c,
+                       "field": c,
+                       "align": "left" if c in ("blocked by", "status", "instrument") else "center",
                        "sortable": c in ("instrument", "strength", "edge", "status")}
-                      for c in rows[0]])\
+                      for c in cols])\
         .classes("w-full").props("dense")
+    gtable.add_slot("body-cell-detail", '''
+        <q-td :props="props">
+            <q-btn flat dense size="sm" icon="info" color="primary"
+                   @click="() => $parent.$emit('detail', props.row.key)" />
+        </q-td>
+    ''')
+    gtable.on("detail", lambda e: _open_detail(e.args))
 
 
 def _open_detail(key: str) -> None:
@@ -787,7 +800,9 @@ def _trade_card(t: dict, pos: dict | None) -> None:
         card_extra = " border-dashed border-2 border-grey-5 opacity-80"
     with ui.card().classes(f"min-w-[210px] grow {col}{card_extra}"):
         with ui.row().classes("items-center justify-between w-full"):
-            ui.label(active_by_key(key).name).classes("font-bold")
+            with ui.row().classes("items-baseline gap-1"):
+                ui.label(active_by_key(key).name).classes("font-bold")
+                ui.label(key).classes("text-xs text-grey-6 font-mono")
             ui.badge(t["direction"],
                      color="positive" if t["direction"] == "long" else "negative")
         if not pos:
@@ -815,6 +830,7 @@ def _trade_card(t: dict, pos: dict | None) -> None:
                                   else f" (not on {_bk.name()})")
         ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
             .classes("text-xs text-grey-6")
+        ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
 
 
 @ui.refreshable
