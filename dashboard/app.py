@@ -1047,12 +1047,13 @@ def retrospective_panel() -> None:
                 ui.label(value).classes("text-base font-bold")
                 ui.label(sub).classes("text-xs text-grey-6")
         total_r = curve[-1] if curve else 0.0
-        _kpi("Expectancy", f"{s['expectancy_R']:+.3f} R", f"n={s['n']}",
+        _trust_sub = f"n={s['n']} · " + ("trustworthy" if s["trustworthy"] else "≥30 to trust")
+        _kpi("Expectancy", f"{s['expectancy_R']:+.3f} R", _trust_sub,
              good=(s["expectancy_R"] > 0) if s["n"] else None)
         _kpi("Total / equity", f"{total_r:+.2f} R",
              f"{total_r*paper.RISK_PER_TRADE:+.2%} acct", good=(total_r > 0) if curve else None)
-        _kpi("Max drawdown", f"{max_dd:.2f} R",
-             f"{-max_dd*paper.RISK_PER_TRADE:.2%} acct", good=(max_dd == 0) if curve else None)
+        _kpi("Max drawdown", f"{max_dd:.2f} R", _trust_sub,
+             good=(max_dd == 0) if curve else None)
         _kpi("Win rate", f"{s['win_rate']:.0%}",
              "≥30 to trust" if not s["trustworthy"] else "trustworthy")
 

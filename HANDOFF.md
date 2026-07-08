@@ -642,6 +642,30 @@ text and the "(not on {broker})" ticket tag both now correctly say "order alread
 to fill" / "(order placed, unfilled)" instead of the previous wrong wording. Verified live: both
 CWB and AMLP corrected after the fix. Committed `06894cd`.
 
+### 🐞 FIXED 2026-07-08: Expectancy/Max-drawdown KPI cards had no n≥30 trust context
+Prompted by user's 6-point critique of the trading plan (② "monitor real expR & drawdown after
+n≥30 trades, not short-term CAGR"). `paper.stats()` already computes `trustworthy: n >= 30` as a
+GENERAL property of the stats dict (same `n` backs expectancy, drawdown, and win rate alike) but
+`retrospective_panel()` only surfaced it on the **Win rate** card ("≥30 to trust"/"trustworthy");
+Expectancy showed a bare `n=X` and Max drawdown showed only the account-% conversion with no
+trust framing at all — silently contradicting the exact metrics ② calls out. Fixed: both cards now
+share the same `n=X · ≥30 to trust / trustworthy` subtitle as Win rate. Verified rendered on both
+dashboards after restart (3x "≥30 to trust" each, n=6 on both books currently — n≥30 is many
+months away, not a near-term milestone). Also evaluated the other 5 critique points: ① (execute
+contribution plan) and ⑥ (avoid manual signal overrides) are financial-planning/behavioral, no
+code artifact; ③ (review Rejected Signals / P&L ex-deposits) already implemented and working; ④
+(Phase 2 + estate tax at >500K) already accurate — `PHASE2_NAV_USD=64000` and the ~$60k US
+estate-tax line coincide within ~7%, not a conflation error. ⑤ (0.75% risk / expand universe): got
+the EXACT (not interpolated) 0.75%-risk backtest figure by temporarily adding 0.0075 to
+`RISK_LEVELS` in `backtest.py` and running the full 21-ETF production backtest — **CAGR +7.9% /
+maxDD −18.0% / ratio 0.439**, in line with the flat ~0.43-0.44 ratio already seen at 0.25/0.5/1%,
+i.e. 0.75% is a pure linear interpolation point with no special risk-adjusted edge; reverted the
+temporary edit immediately (confirmed clean via `git diff --stat`). Also confirmed 0.75% isn't
+even a selectable dashboard option (UI toggle only has 0.25/0.5/1/2%) and universe expansion isn't
+currently live-actionable (3 straight rejected screening batches, 7-9, already recommend pausing).
+No universe/risk-level code change made — the backtest confirmed the status quo, it didn't justify
+a change.
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:
