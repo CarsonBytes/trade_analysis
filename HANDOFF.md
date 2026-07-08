@@ -859,6 +859,10 @@ buckets empty for futures+ETF), tail-risk circuit breaker (kills CAGR, no DD hel
 class-weighting (worse OOS DD), SPY-regime overlay (hurts diversified book), VIX-regime size
 ladder (2026-06-23 --vix-regime: +10.1%/-6.5%→+8.4%/-7.7%, worse CAGR AND worse DD despite
 cutting exposure 15% — VIX is coincident/lagging, trend filter already de-risks endogenously;
+**RECONFIRMED 2026-07-08 on the current 21-ETF book** (was 18 at the original test) — 0.5% risk
++5.4%/-12.3%→+4.3%/-12.2%, OOS +13.3%/-6.6%→+11.1%/-7.5% (CAGR down, OOS DD *worse* not better).
+Same verdict holds post-universe-growth; kills the "LLM as macro risk-dial" idea too — a slower,
+noisier signal than VIX can't fix a structural redundancy VIX itself doesn't fix.
 same verdict as SPY-regime → regime overlays are redundant on a long-only TSMOM book), ADX
 (halves return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kept only
 EMB+PFF, EMB later dropped — see below). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
