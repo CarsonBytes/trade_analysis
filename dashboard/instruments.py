@@ -274,6 +274,24 @@ ETF_SCREEN_BATCH_8: list[Instrument] = [
 ]
 ETF_SCREEN_BATCH_8_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_8}
 
+# Batch 9 to SCREEN (--etf-screen9, 2026-07-08). Two candidates, honestly scraping toward the
+# bottom of well-motivated ideas after batches 7-8 both came back empty: lithium/battery metals
+# (LIT -- genuinely different demand driver (EV supply chain) than the metals already tested:
+# precious GLD/SLV/PPLT/PALL, industrial CPER, nuclear-fuel URA) and low-volatility factor
+# equity (USMV -- the scientific complement to MTUM's borderline result; if momentum showed
+# marginal promise, testing its opposite is informative either way, though "low-vol" stocks
+# trending less dramatically is a real reason to expect a WEAK result here, similar to REM/IGF).
+# BOTH REJECTED 2026-07-08 (isolation): LIT ratio 2.02->1.90 (~6% decline), USMV 2.02->1.86
+# (~8% decline) -- both more severe than MTUM's 1% borderline, so no judgment call needed,
+# clean rejects under the established flat-or-better rule. USMV's weaker result vs MTUM matches
+# the prediction (low-vol trends less). THIRD batch in a row (7/8/9) with zero adoptions --
+# strong signal the well-motivated-idea pool is genuinely exhausted, not just unlucky timing.
+ETF_SCREEN_BATCH_9: list[Instrument] = [
+    Instrument("LIT",  "Lithium & Battery",  "LIT",  "", "metal3"),
+    Instrument("USMV", "Low-Vol Factor Eq",  "USMV", "", "factor_eq2"),
+]
+ETF_SCREEN_BATCH_9_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_9}
+
 # The validated ETF trading universe = core {metal,index,rate} + screened diversifiers.
 # 22 defined here, but EMB (em_bond) is excluded from LIVE trading via WEEKLY_TREND_CLASSES
 # (paper.py) -- 21 ETFs actually trade. Latest isolation-tested result (2026-07-08, adding
@@ -314,9 +332,11 @@ def active_by_key(key: str) -> Instrument | None:
             or ETF_SCREEN_BATCH_BY_KEY.get(key) or ETF_SCREEN_BATCH_3_BY_KEY.get(key)
             or ETF_SCREEN_BATCH_4_BY_KEY.get(key) or ETF_SCREEN_BATCH_5_BY_KEY.get(key)
             or ETF_SCREEN_BATCH_6_BY_KEY.get(key) or ETF_SCREEN_BATCH_7_BY_KEY.get(key)
-            or ETF_SCREEN_BATCH_8_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
+            or ETF_SCREEN_BATCH_8_BY_KEY.get(key) or ETF_SCREEN_BATCH_9_BY_KEY.get(key)
+            or BY_KEY.get(key)) if _ib_broker() \
         else (BY_KEY.get(key) or FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key)
               or ETF_CANDIDATE_BY_KEY.get(key) or ETF_SCREEN_BATCH_BY_KEY.get(key)
               or ETF_SCREEN_BATCH_3_BY_KEY.get(key) or ETF_SCREEN_BATCH_4_BY_KEY.get(key)
               or ETF_SCREEN_BATCH_5_BY_KEY.get(key) or ETF_SCREEN_BATCH_6_BY_KEY.get(key)
-              or ETF_SCREEN_BATCH_7_BY_KEY.get(key) or ETF_SCREEN_BATCH_8_BY_KEY.get(key))
+              or ETF_SCREEN_BATCH_7_BY_KEY.get(key) or ETF_SCREEN_BATCH_8_BY_KEY.get(key)
+              or ETF_SCREEN_BATCH_9_BY_KEY.get(key))

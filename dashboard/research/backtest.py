@@ -26,7 +26,8 @@ from metrics import deflated_sharpe_ratio
 from dashboard.instruments import (active_universe, active_by_key, ETF_UNIVERSE,
                                    ETF_CANDIDATES, ETF_TRADED, ETF_SCREEN_BATCH,
                                    ETF_SCREEN_BATCH_3, ETF_SCREEN_BATCH_4, ETF_SCREEN_BATCH_5,
-                                   ETF_SCREEN_BATCH_6, ETF_SCREEN_BATCH_7, ETF_SCREEN_BATCH_8)
+                                   ETF_SCREEN_BATCH_6, ETF_SCREEN_BATCH_7, ETF_SCREEN_BATCH_8,
+                                   ETF_SCREEN_BATCH_9)
 from dashboard.data.providers import get_ohlc
 from dashboard.core.scoring import score_from_facts
 from dashboard.core import paper
@@ -597,6 +598,9 @@ def main():
     ap.add_argument("--etf-screen8", action="store_true",
                     help="screen validated-21 + BATCH-8 candidates: mortgage REITs/natural gas/"
                          "momentum factor equity (REM/UNG/MTUM)")
+    ap.add_argument("--etf-screen9", action="store_true",
+                    help="screen validated-21 + BATCH-9 candidates: lithium/battery metals + "
+                         "low-vol factor equity (LIT/USMV)")
     ap.add_argument("--cluster", action="store_true",
                     help="de-correlate by ASSET CLASS (max one open position per "
                          "metal/index/rate) -- caps correlated-cluster drawdown")
@@ -649,7 +653,9 @@ def main():
         # GUARD: a typo'd/plural class name (e.g. "rates" vs "rate") would silently
         # match nothing and quietly degrade the universe -> a wrong conclusion you'd
         # trust. Validate against the classes that actually exist in the universe.
-        if args.etf_screen8:
+        if args.etf_screen9:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_9
+        elif args.etf_screen8:
             _uni = ETF_TRADED + ETF_SCREEN_BATCH_8
         elif args.etf_screen7:
             _uni = ETF_TRADED + ETF_SCREEN_BATCH_7
@@ -685,7 +691,11 @@ def main():
     weekly = args.weekly or args.longweekly
     if weekly:
         print("[LONG-HISTORY WEEKLY (yfinance max)]" if args.longweekly else "[WEEKLY bars]")
-    if args.etf_screen8:                                # validated 21 + NEW batch-8
+    if args.etf_screen9:                                # validated 21 + NEW batch-9
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_9
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen8:                                # validated 21 + NEW batch-8
         universe = ETF_TRADED + ETF_SCREEN_BATCH_8
         if not args.classes:
             paper.WEEKLY_TREND_CLASSES = set()

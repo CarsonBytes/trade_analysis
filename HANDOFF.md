@@ -1,7 +1,7 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-06-25.
+Last updated 2026-07-08.
 
 ---
 
@@ -396,14 +396,38 @@ this recurs, the fix is either (a) also check for the Gateway process running >N
 API port opening and force-kill it, or (b) increase IBC's own internal timeout/retry behavior. Not
 built yet since a single manual kill+relaunch resolves it in under a minute when it happens.
 
+**CONFIRMED WORKING later the same day:** the scheduled 08:00 AM daily auto-restart fired naturally
+and completed in ~15 seconds with **no manual 2FA needed** -- the first real proof the format fix
+actually restored the session-preserving behavior that had silently never worked before.
+
 ### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
-Also fixed 2026-07-08: two REAL bugs found while running this. (1) `keep_cash_usd()` retried a
+Also fixed 2026-07-08: THREE real bugs found in this stretch of work.
+
+**(1) A HKD 10,000 deposit into the live account showed as fake trading P&L, AND permanently
+froze the equity chart.** `service.py`'s equity_history sanity guard (added 2026-07-02 to reject
+a corrupted one-off spike) was a one-shot reject: since every future reading after a REAL deposit
+is also >2x the stale pre-deposit baseline, the guard rejected every future point forever, and
+"Total P&L" (`nl - base0`) counted the deposit itself as if it were profit. Fixed with a
+confirm-then-accept state machine (`equity_pending_jump` cache key): a single implausible jump is
+held pending, not recorded or discarded; if the NEXT reading confirms the same new level, it's a
+real, sustained change (not a one-off glitch) -- record it AND log it to a new `cash_flows` cache
+key so it can be netted out. `portfolio_panel()`'s Total P&L and the equity/drawdown charts now
+subtract net cash flows since tracking began (`_deposit_adjusted()` helper) so a deposit is
+invisible to P&L instead of masquerading as gains, and never resets the drawdown "peak" to hide a
+real ongoing loss. Added a "View: P&L (ex-deposits) / Account value" toggle (`chart_view` setting)
++ dotted deposit markers on the raw-value chart. Verified end-to-end on the actual HKD 10,000
+deposit: cash_flows correctly logged `[ts, 10000.0, 'HKD']`, equity_history un-stuck, Total P&L
+corrected from "HKD 10,000 (+25000%)" to "HKD 0 (+0.00%)".
+
+**(2)** `keep_cash_usd()` retried a
 failing FX order every single cycle forever (224+ live attempts, 0 fills) because `placeOrder()`
 is fire-and-forget and a rejection never surfaces as a Python exception -- added a 20min cooldown
 + persistent attempts counter + a dashboard warning badge once repeated attempts produce no real
 USD balance (root cause: account likely lacks Forex trading permission -- IBKR categorizes ANY
 API-placed IDEALPRO order under "Leveraged Forex", not the separately-held "Currency Conversion"
-permission; user's call whether to enable it or drop the automation). (2) `sweep_cash()` only
+permission; user's call whether to enable it or drop the automation).
+
+**(3)** `sweep_cash()` only
 gated on a $1,500 rebalance-DELTA, not account size -- added `CASH_SWEEP_MIN_NAV_USD=75_000`
 matching the ADOPTED PLAN's own "skip SGOV sweep until ~$75-100k NAV" decision, which the delta
 check was never actually enforcing (would start sweeping ~$2,500 NAV, nowhere near $75k).
@@ -446,8 +470,8 @@ actual production `active_universe()` path) reproduces the 18+VNQI isolation num
 Confidence model needs NO rebuild for new instruments -- `confidence_model.py` buckets purely by
 `(strength, regime)`, never per-instrument, so it already covers CWB/VNQI like any other symbol.
 
-**Infra added for future batches:** `ETF_SCREEN_BATCH_3` through `_8` in `instruments.py` +
-`--etf-screen3` through `--etf-screen8` in `backtest.py`, mirroring the
+**Infra added for future batches:** `ETF_SCREEN_BATCH_3` through `_9` in `instruments.py` +
+`--etf-screen3` through `--etf-screen9` in `backtest.py`, mirroring the
 existing batch-1/2 pattern exactly (including the `if not args.classes: WEEKLY_TREND_CLASSES = set()`
 guard that batch-2 was missing, needed to isolate a single candidate rather than always
 trading the whole batch). Deferred/rejected batch members stay defined in their batch lists
@@ -521,11 +545,12 @@ counts how many could size >=1 share RIGHT NOW at current equity -- displayed as
 (backtest): ~38/yr (~0.7/wk) · Fundable now: N/21 ETFs at current equity" under the Active Trades
 header. `BACKTEST_SIGNAL_FREQ_YR`/`_WK` are static reference constants (re-measure if the universe
 changes again -- same pattern as the drawdown chart's hardcoded "-10.5%" backtest-DD reference
-line). Verified on paper (21/21 fundable, full paper balance) -- live currently shows the
-frequency reference but not the fundable count, because the live gateway is disconnected at time
-of writing (correct graceful-degradation, `equity_usd()` returns None when disconnected, same as
-the existing `_pending_reason()` fallback) -- will show a real (and much lower) number once
-reconnected.
+line). Verified on paper (21/21 fundable, full paper balance). Live briefly showed only the
+frequency reference with the fundable count hidden while the gateway was disconnected (correct
+graceful-degradation, `equity_usd()` returns None when disconnected, same as the existing
+`_pending_reason()` fallback) -- confirmed later the same day, once reconnected: 18/21 ETFs
+fundable at the live account's actual (small) balance, exactly the kind of real, informative
+number this feature exists to surface.
 
 **Batch-7 screen** (`--etf-screen7`, targeting genuinely new STRATEGY structures rather than
 asset classes: merger arbitrage/covered-call income, plus one more confirmatory real-asset
@@ -575,6 +600,47 @@ own: the "genuinely different risk driver" reasoning (rate/spread-sensitive vs p
 sensitive) was sound, but a different risk driver doesn't automatically mean a USABLE weekly-
 trend signal -- worth remembering for future candidate selection. **Live universe unchanged at
 21 ETFs; zero adoptions from batch 8 (second batch in a row with none).**
+
+**Batch-9 screen** (`--etf-screen9`, honestly scraping toward the bottom of well-motivated
+ideas: lithium/battery metals as a genuinely different metal demand driver, low-vol factor
+equity as the scientific complement to MTUM's borderline batch-8 result):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| LIT | metal3 | 23 | +0.547 | reject (isolation) |
+| USMV | factor_eq2 | 60 | +0.216 | reject (isolation) |
+
+**Isolation tests:**
+| | OOS CAGR | OOS maxDD | Ratio |
+|---|---|---|---|
+| 21-base | +13.3% | −6.6% | 2.02 |
+| + LIT | +13.9% | −7.3% | 1.90 (~6% relative decline) |
+| + USMV | +13.8% | −7.4% | 1.86 (~8% relative decline) |
+
+Both clearly worse than MTUM's 1% borderline decline -- no judgment call needed this time,
+clean rejects under the flat-or-better rule. USMV underperforming MTUM matches the prediction
+(low-vol stocks trend less dramatically, giving a trend-follower less to work with).
+
+**THIRD batch in a row (7/8/9) with zero adoptions.** This is now a strong, consistent signal
+that the pool of genuinely well-motivated, untested candidates is exhausted -- not bad luck on
+any single batch. Recommend pausing the ETF-screening thread here; **live universe holds at
+21 ETFs.** Future re-screening candidates already on file for later (deferred, not rejected, if
+more live history accumulates): BKLN (bank_loan, n=11), FM (frontier_eq, n=14). Everything else
+tested across batches 1-9 (~27 tickers) was a clean reject or (MTUM) a user judgment call.
+
+### 🐞 FIXED 2026-07-08: pending-trade card said "will never fill" for orders already sent
+`_pending_reason()` (app.py) had only two states: "needs $X to size" (funding gap, order never
+sent) and a generic "awaiting the next mirror cycle" -- it couldn't tell the difference between
+an order that was genuinely never sent and one that WAS sent but just hasn't filled yet (e.g.
+placed outside US market hours). The trailing card text ("never placed on the broker, will never
+fill on its own") is actively wrong for the latter case. Root-caused live: two paper trades (CWB,
+AMLP, both opened 2026-07-08T06:13 UTC = 2:13am ET) showed as pending with that wrong message;
+direct IBKR query confirmed their entry orders were `PreSubmitted`, `filled=0.0`, correctly
+waiting for market open (9:30am ET) -- not broken, not a funding issue. Fixed: `_pending_reason()`
+now returns `(reason, order_already_placed)`, checking `broker.executed_ids()` (already-existing
+helper -- a trade has a broker mirror row) before falling through to the generic message. Card
+text and the "(not on {broker})" ticket tag both now correctly say "order already placed, waiting
+to fill" / "(order placed, unfilled)" instead of the previous wrong wording. Verified live: both
+CWB and AMLP corrected after the fix. Committed `06894cd`.
 
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
