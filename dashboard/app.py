@@ -852,23 +852,29 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
-def _pending_reason(t: dict) -> str:
-    """Why a qualifying signal never became a real broker position -- e.g. an
-    account too small to size even 1 share at the configured risk. Returns '' if
-    unknown/inapplicable (non-IB broker, or a rare non-funding failure)."""
+def _pending_reason(t: dict) -> tuple[str, bool]:
+    """Why a qualifying signal isn't showing as a confirmed position yet. Returns
+    (reason, order_already_placed) -- the second flag distinguishes an order that's
+    ALREADY sitting at the broker (just not filled yet -- e.g. placed outside market
+    hours, or a slow fill) from one that was never sent at all (e.g. account too
+    small to size even 1 share). These need very different framing: "will never fill
+    on its own" is true for the latter but actively WRONG for the former."""
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
-        return "not yet mirrored to the broker"
+        return "not yet mirrored to the broker", False
     from dashboard.core import paper
     from dashboard.data import contracts
     eq = _bk.equity_usd()
     stop_per_share = abs(t["entry"] - t["sl"])
     if eq is None or stop_per_share <= 0:
-        return "not yet mirrored to the broker"
+        return "not yet mirrored to the broker", False
     needed = contracts.min_equity_for_1_share(stop_per_share, paper.RISK_PER_TRADE)
     if eq < needed:
-        return f"needs ~${needed:,.0f} to size (you have ~${eq:,.0f})"
-    return "awaiting the next mirror cycle"
+        return f"needs ~${needed:,.0f} to size (you have ~${eq:,.0f})", False
+    if t["id"] in _bk.executed_ids():
+        return ("order already placed, waiting to fill (e.g. outside market hours, "
+                "or a slow fill) -- check IBKR directly for the order status", True)
+    return "awaiting the next mirror cycle", False
 
 
 def _trade_card(t: dict, pos: dict | None) -> None:
@@ -910,14 +916,18 @@ def _trade_card(t: dict, pos: dict | None) -> None:
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
         else:
-            ui.label(f"Signal fired, but {_pending_reason(t)} — never placed on "
-                     f"the broker, will never fill on its own.")\
-                .classes("text-xs text-grey-8")
+            _reason, _placed = _pending_reason(t)
+            if _placed:
+                ui.label(f"Signal fired, {_reason}.").classes("text-xs text-grey-8")
+            else:
+                ui.label(f"Signal fired, but {_reason} — never placed on the broker, "
+                         "will never fill on its own.").classes("text-xs text-grey-8")
         src = f"{_bk.name()} fill" if pos else "paper (unconfirmed)"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
         tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
-                                  else f" (not on {_bk.name()})")
+                                  else (" (order placed, unfilled)" if t["id"] in _bk.executed_ids()
+                                        else f" (not on {_bk.name()})"))
         ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
             .classes("text-xs text-grey-6")
         ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
