@@ -22,7 +22,11 @@ negligible early + adds commission-sensitive fills); run core-only first for sim
 (auto ~3.1%), skip SGOV sweep until ~$75-100k NAV** (T+1 friction not worth it on a tiny contribution-fed
 acct). (6) **US estate-tax $60k line crossed at ~month 12** (~470K HKD) — US-domiciled ETFs >$60k =
 US-situs, up to 40% on a HK NRA's death; consider Irish-UCITS for long-held core equity then, but bonds/
-commodities/REITs have no clean UCITS equiv → "be aware, revisit ~$130k", not an immediate switch. (7)
+commodities/REITs have no clean UCITS equiv → **revisit at that ~470K HKD/month-12 point, not ~$130k**
+(2026-07-08 fix: the old "$130k" trigger here was just reusing the doc's other scale-milestone number
+and doesn't match this section's own $60k/month-12 math — over a year too late for an irreversible
+40%-on-death exposure; keep "not an immediate switch" since the live account is ~$1.3k today, ~47x
+away, but the review date is month-12/~470K HKD, not $130k). (7)
 Account self-bootstraps to ~$130k (planned scale) in **~2.3y**, when the full sizing analysis applies.
 DD trivial early (−11% ≈ −11K < half a month's contribution). **Real lever = relentless contributions, not bps of edge.**
 
@@ -89,6 +93,22 @@ toward the T-bill Sharpe. **Strategy-only (cash@0%) Sharpe is FLAT ~0.88 at ever
 w/ SGOV cash ~5.9% / −4.6%. Rationale: 15% removes over-leverage (safety) AND is a conservative
 de-lever (lower DD for less return) — fine at 100K where contributions dominate & DD is trivial.
 Loosen toward 20-25% later for more return once the base grows (all safe; ≤~40% prevents over-leverage).
+
+**⚠️ CORRECTION (2026-07-08): this 0.15/0.5% decision was written here but NEVER actually applied
+to the running system** — found while fact-checking a user critique that assumed 0.15/0.5% was
+live. Verified ground truth: `ETF_POS_CAP` has no override anywhere (not in `dashboard.ps1`,
+`run_dashboard_live.ps1`, or any machine/user/process env var) → falls through to the code default
+**0.25** (`ib_exec.py`); `risk_per_trade` in BOTH `dashboard/dashboard.db` and `dashboard_live.db`'s
+persisted `ui_settings` reads **0.01 (1%)** — nobody ever flipped the UI toggle to 0.5% either. So
+the system has been running the EARLIER "2-PHASE AUTO-SWITCH" settings (line ~56 above:
+`RISK_PER_TRADE=0.01` + `ETF_POS_CAP=0.25`) the whole time, not this later "adopted" 0.15/0.5%.
+**That's actually the better outcome** — its own expected numbers (line ~59: ~7.5% CAGR/−8.8% DD
+blended, ~5.7%/−10.5% strategy-only) are meaningfully better than this section's 3.35%/5.9% figures,
+and 25% is already the cap this section said to "loosen toward... later." No code change made (the
+better config is already live) — this note exists so nobody replans around the stale 3.35%/5.9%
+numbers again. If a MORE conservative cap is ever wanted, it needs an explicit choice + code change
+(set `ETF_POS_CAP=0.15` in both `.ps1` launch scripts + flip the risk toggle to 0.5% in the UI) —
+not a rerun of this backtest, since the number was already computed correctly here.
 
 ### 🐞 FIXED 2026-07-02: mode-switch showed PAPER trade history/stats after switching to LIVE
 Root cause: `paper._DB`/`store._DB` (journal `paper_trades`, `ib_mirror`, cache/settings incl.
