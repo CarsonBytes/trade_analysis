@@ -525,7 +525,7 @@ def main():
                     help="cap per-position NOTIONAL at FRAC of equity (+ scale risk down when a "
                          "low-vol ETF's full-risk notional exceeds it). Prevents small-account "
                          "over-leverage; ~0.20 costs ~-1pp CAGR but cuts maxDD & lifts Sharpe. "
-                         "LIVE default = 0.20 (ETF_POS_CAP env).")
+                         "LIVE default = 0.25 (ETF_POS_CAP env, unset -> code default).")
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
