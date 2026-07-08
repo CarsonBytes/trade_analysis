@@ -70,13 +70,19 @@ def _default_trend_classes() -> set[str]:
     import os
     if os.environ.get("BROKER", "mt5").lower() == "ib":
         if os.environ.get("UNIVERSE", "futures").lower() == "etf":
-            # 17-ETF set (16 core/screened + PFF). em_bond (EMB) dropped 2026-06-23:
-            # redundant vs HYG credit + TLT duration, and a drag on risk-adjusted return
-            # across BOTH the recent and full-history (--longweekly) windows. PFF kept --
-            # best CAGR/DD ratio in both. EMB still defined in instruments.py for research;
-            # re-test if a major EM-credit dislocation gives it a distinct edge.
+            # 21-ETF set (16 core/screened + PFF + CWB + VNQI + AMLP + HYD). em_bond (EMB)
+            # dropped 2026-06-23: redundant vs HYG credit + TLT duration, and a drag on
+            # risk-adjusted return across BOTH the recent and full-history (--longweekly)
+            # windows. PFF kept -- best CAGR/DD ratio in both. EMB still defined in
+            # instruments.py for research; re-test if a major EM-credit dislocation gives it
+            # a distinct edge. CWB (convertible) + VNQI (intl_reit) + AMLP (mlp) + HYD
+            # (muni_hy) ADDED 2026-07-08: isolation-tested vs their respective bases, +1.0pp /
+            # +0.5pp / +0.9pp / +0.6pp OOS CAGR each for flat-or-better DD ratio -- see
+            # HANDOFF. (PALL/PPLT/URA/BWX/PICB/WOOD/EMLC/IGF/BIZD/COPX all screened and
+            # rejected; BKLN/FM deferred, n too small.)
             return {"metal", "index", "rate", "credit", "inflation", "intl_eq",
-                    "commodity", "reit", "preferred"}
+                    "commodity", "reit", "preferred", "convertible", "intl_reit", "mlp",
+                    "muni_hy"}
         return {"metal", "index", "rate"}      # evidence-based futures universe
     return {"metal", "energy", "index"}        # original spot/MT5 whitelist
 

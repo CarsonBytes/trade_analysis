@@ -354,6 +354,228 @@ exactly when a trend-follower should hold, not sell) -- it says nothing about wh
 job (gating new entries) is any good. A valid test still needs a genuine case where the LLM would have
 blocked a NEW entry that the RSI filter alone wouldn't have -- none exists yet (see above).
 
+**FOLLOW-UP TOOL (2026-07-07): `dashboard/research/llm_gate_audit.py`** -- re-runnable script for the
+one still-valid question above (does LLM ever independently veto a NEW entry the RSI/strength filters
+wouldn't already block). Run: `python -m dashboard.research.llm_gate_audit`. First real run found a
+candidate in the LIVE db (VNQ, RSI 68.8 -- under the OVEREXT_HI=70 cutoff, so genuinely independent of
+the RSI filter) but it didn't survive inspection: confidence was 0.5 (the model's floor) and the very
+next scan flipped back to BUY. Deliberately did NOT add an "N consecutive WAIT scans" persistence
+filter to auto-reject noise like this -- verified by hand that scan cadence isn't fixed (gaps from
+~15min to ~6h in the same instrument's history, weekends pause it), so a raw scan-count threshold is
+meaningless; if ever added, anchor it to elapsed wall-clock time instead. Still zero confirmed
+independent vetoes in either DB as of this date.
+
+### ⭐ FIXED 2026-07-07: instrument identity + drill-down inconsistent across Board panels
+Active Trades cards showed name only, Signal gate status table showed ticker code only, Top
+Opportunities/Other instruments had a "Details" button but no code. Unified all three: full name +
+`(TICKER)` + a Details link/button wired to the same facts+LLM dialog (`_open_detail`). The gate-status
+table's Details is a `q-table` `body-cell-detail` slot template (icon button per row, emits a `detail`
+event `.on()`'d to `_open_detail`) since NiceGUI tables can't host a plain `ui.button` per cell.
+Verified identical on both paper (8080) and live (8081) -- single shared `app.py`, no divergence risk.
+Committed `ddc20d5`.
+
+### 🐞 FIXED 2026-07-08: live gateway silently "stuck alive, never authenticated" doesn't self-heal
+User reported quant-live.carsonng.com appeared down; asked whether visiting the URL could trigger a
+fresh login. **Answer: no new mechanism needed** -- the watchdog inside `DashboardAppLive` already
+retries the login every ~30s whenever port 4001 is down, independent of web traffic. The actual bug:
+after a 2FA push times out unapproved (~6min window, `SecondFactorAuthenticationTimeout=180` /
+`ReloginAfterSecondFactorAuthenticationTimeout=no`), the java.exe process does NOT exit -- it just sits
+at a stuck, unauthenticated login screen indefinitely. Since the PROCESS is still alive, the watchdog's
+`Test-Port 4001` check never fires (port is down, but nothing signals "try again"), so it never
+self-heals without a manual kill+relaunch. Fixed for now by killing the stuck process tree and
+relaunching -- a fresh 2FA push went out immediately and was approved within the window.
+**Separately found and fixed a real config bug while debugging this:** `C:\IBC-Live\config.ini` had
+`AutoRestartTime=08:00` -- IBC logs `"Auto restart time setting must be hh:mm AM or hh:mm PM"` on
+every single restart attempt, meaning the documented "session-preserving daily restart, no 2FA needed"
+behavior (see the 2026-06-20 HANDOFF entry) has likely NEVER actually worked since it was set -- every
+restart silently fell back to needing a full fresh login. Fixed to `AutoRestartTime=08:00 AM` (12-hour
+format required). Takes effect on the next natural restart; didn't force a restart to test it since
+that would trigger an unnecessary extra 2FA prompt right after successfully logging in.
+**Still open:** the watchdog doesn't detect "alive but stuck" as a failure mode, only "port down" -- if
+this recurs, the fix is either (a) also check for the Gateway process running >N minutes without the
+API port opening and force-kill it, or (b) increase IBC's own internal timeout/retry behavior. Not
+built yet since a single manual kill+relaunch resolves it in under a minute when it happens.
+
+### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
+Also fixed 2026-07-08: two REAL bugs found while running this. (1) `keep_cash_usd()` retried a
+failing FX order every single cycle forever (224+ live attempts, 0 fills) because `placeOrder()`
+is fire-and-forget and a rejection never surfaces as a Python exception -- added a 20min cooldown
++ persistent attempts counter + a dashboard warning badge once repeated attempts produce no real
+USD balance (root cause: account likely lacks Forex trading permission -- IBKR categorizes ANY
+API-placed IDEALPRO order under "Leveraged Forex", not the separately-held "Currency Conversion"
+permission; user's call whether to enable it or drop the automation). (2) `sweep_cash()` only
+gated on a $1,500 rebalance-DELTA, not account size -- added `CASH_SWEEP_MIN_NAV_USD=75_000`
+matching the ADOPTED PLAN's own "skip SGOV sweep until ~$75-100k NAV" decision, which the delta
+check was never actually enforcing (would start sweeping ~$2,500 NAV, nowhere near $75k).
+
+**Batch-3 screen** (`--etf-screen3`, targeting asset classes with ZERO existing representation,
+since batch-2's lesson was that narrower slices of a held class just correlate with it):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| CWB | convertible | 67 | +0.404 | **ADOPT** |
+| IGF | infra | 71 | +0.067 | reject (~zero edge) |
+| EMLC | em_local_debt | 19 | −0.261 | reject (negative, worst market in set) |
+| BKLN | bank_loan | 11 | +0.860 | defer (best number, but n=11 in 33y -- not enough to trust) |
+| FM | frontier_eq | 14 | +0.648 | defer (same issue, n=14) |
+
+**Batch-4 screen** (`--etf-screen4`, testing whether "international version of a held class"
+generalizes beyond equity, since EFA/EEM succeeding alongside domestic SPY/QQQ was the model):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| VNQI | intl_reit | 36 | +0.235 | **ADOPT** |
+| BWX | intl_rate | 25 | −0.139 | reject (negative) |
+| PICB | intl_credit | 28 | −0.074 | reject (negative) |
+| WOOD | timber | 36 | −0.076 | reject (negative) |
+**Finding: the geography-diversification pattern does NOT generalize past equity/hybrid-credit** --
+3 of 4 batch-4 candidates went negative. Don't assume "ex-US version of X" is automatically worth
+testing again without a specific reason.
+
+**Isolation tests** (same methodology as the 2026-06-23 EMB/PFF test -- add ONE candidate to the
+current base, compare OOS CAGR/DD, not just the raw per-market number):
+| | OOS CAGR | OOS maxDD | OOS expR | OOS n |
+|---|---|---|---|---|
+| 17-base | +10.3% | −6.0% | +0.380 | 549 |
+| 17 + CWB | +11.3% | −6.1% | +0.389 | 593 |
+| 18 (17+CWB) + VNQI | +11.8% | −6.2% | +0.387 | 621 |
+CWB: **+1.0pp** OOS CAGR for flat DD -- larger individual contribution than EMB or PFF showed
+alone. VNQI: **+0.5pp** for flat DD -- same tier as PFF's original contribution. Both promoted to
+`ETF_CANDIDATES` in `instruments.py` and added to `WEEKLY_TREND_CLASSES` in `paper.py`. Verified
+end-to-end: plain `python -m dashboard.research.backtest --longweekly` (no screen flag -- the
+actual production `active_universe()` path) reproduces the 18+VNQI isolation numbers exactly
+(OOS CAGR +11.8%/DD -6.2%/expR +0.387/n=621), confirming the promotion took effect correctly.
+Confidence model needs NO rebuild for new instruments -- `confidence_model.py` buckets purely by
+`(strength, regime)`, never per-instrument, so it already covers CWB/VNQI like any other symbol.
+
+**Infra added for future batches:** `ETF_SCREEN_BATCH_3` through `_8` in `instruments.py` +
+`--etf-screen3` through `--etf-screen8` in `backtest.py`, mirroring the
+existing batch-1/2 pattern exactly (including the `if not args.classes: WEEKLY_TREND_CLASSES = set()`
+guard that batch-2 was missing, needed to isolate a single candidate rather than always
+trading the whole batch). Deferred/rejected batch members stay defined in their batch lists
+(not deleted) for future re-screening, same reversibility principle as EMB.
+
+**Batch-5 screen** (`--etf-screen5`, targeting metals with DIFFERENT demand drivers than held
+GLD/SLV/CPER, plus a real-asset equity structure not yet tried):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| AMLP | mlp | 41 | +0.502 | **ADOPT** |
+| PALL | metal2 | 39 | +0.216 | reject (see isolation test below -- positive raw expR is misleading here) |
+| URA | uranium | 26 | +0.110 | reject (weaker than the already-rejected IGF) |
+| PPLT | metal2 | 11 | −0.089 | reject (negative + tiny n) |
+
+**Isolation tests, sequential from the 19-base (17+CWB+VNQI):**
+| | OOS CAGR | OOS maxDD | Ratio |
+|---|---|---|---|
+| 19-base | +11.8% | −6.2% | 1.90 |
+| 19-base + AMLP | +12.7% | −6.6% | 1.92 (flat/better) |
+| 19-base + metal2 (PPLT+PALL) | +12.1% | **−7.4%** | **1.64 (worse)** |
+
+**AMLP: +0.9pp OOS CAGR for -0.4pp extra DD, ratio flat/better -- adopted.** **PALL/PPLT: REJECTED
+despite a positive raw per-market expR** -- the portfolio-level isolation test shows the DD cost
+(-1.2pp vs 19-base) far outweighs the CAGR gain (+0.3pp), most likely because precious/industrial
+metals draw down alongside the existing GLD/SLV/CPER holdings rather than diversifying away from
+them. **This is the whole reason the isolation test exists**: the raw per-market screen alone
+would have said "maybe" on PALL; only checking the actual portfolio-level CAGR/DD delta caught
+that it hurts risk-adjusted performance. Don't skip this step for a future candidate just because
+its standalone number looks decent.
+
+Promoted `AMLP` to `ETF_CANDIDATES` (`instruments.py`) and added `"mlp"` to `WEEKLY_TREND_CLASSES`
+(`paper.py`). Verified end-to-end: plain `python -m dashboard.research.backtest --longweekly`
+(production `active_universe()` path, no screen flag) reproduces the isolation numbers exactly
+(OOS CAGR +12.7%/DD -6.6%/expR +0.393/n=655) -- 20-ETF universe confirmed working before batch 6.
+
+**Batch-6 screen** (`--etf-screen6`, targeting municipal HIGH-YIELD -- a different credit tier +
+tax-exempt investor base than both HYG and the rejected IG-muni MUB -- a BDC income fund, plus a
+confirmatory test of whether GDX's "mining equity carries broad market beta" rejection also holds
+for copper miners):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| HYD | muni_hy | 21 | +0.394 | **ADOPT** |
+| BIZD | bdc | 39 | +0.176 | reject (isolation: DD cost outweighs gain, same pattern as PALL) |
+| COPX | miner2 | 29 | +0.182 | reject (mining-equity-beta drag confirmed for copper too, milder than gold) |
+
+**Isolation tests from the 20-base:**
+| | OOS CAGR | OOS maxDD | Ratio |
+|---|---|---|---|
+| 20-base | +12.7% | −6.6% | 1.92 |
+| **20-base + HYD** | **+13.3%** | **−6.6%** | **2.02 (best ratio improvement this session)** |
+| 20-base + BIZD | +13.0% | −7.5% | 1.73 (worse) |
+| 20-base + COPX | +13.0% | −7.0% | 1.86 (worse) |
+
+**HYD: +0.6pp OOS CAGR for ZERO extra drawdown -- adopted.** BIZD and COPX both show the same
+"decent raw expR, DD cost outweighs it once in the actual portfolio" pattern PALL/PPLT showed in
+batch 5 -- rejected despite positive standalone numbers. COPX's result is informative on its own:
+mining-equity beta drag applies to copper too (not just gold/GDX), just less severely.
+
+Promoted `HYD` to `ETF_CANDIDATES` and added `"muni_hy"` to `WEEKLY_TREND_CLASSES`. Verified
+end-to-end: production `active_universe()` path reproduces the isolation numbers exactly (OOS
+CAGR +13.3%/DD -6.6%/expR +0.401/n=668) -- **current live universe = 21 ETFs**
+(17 + CWB + VNQI + AMLP + HYD; EMB still excluded via WEEKLY_TREND_CLASSES, 22 defined total).
+
+**FEATURE 2026-07-08: signal-frequency vs fill-frequency stat on Active Trades.** The backtest's
+~38 trades/year is a SIGNAL frequency (across the whole 21-ETF universe) -- not a promise of how
+often trades actually FILL on a small account. A cheap/low-ATR instrument (HYD, CPER) sizes 1
+share for a few dollars; an expensive/high-ATR one (SPY needs ~$209, QQQ ~$503 at 1% risk) can eat
+most of a small account's capital in one position. Added `_fundable_count()` (`app.py`) -- checks
+every active-universe instrument's current ATR against `contracts.min_equity_for_1_share()` and
+counts how many could size >=1 share RIGHT NOW at current equity -- displayed as "Signal freq
+(backtest): ~38/yr (~0.7/wk) · Fundable now: N/21 ETFs at current equity" under the Active Trades
+header. `BACKTEST_SIGNAL_FREQ_YR`/`_WK` are static reference constants (re-measure if the universe
+changes again -- same pattern as the drawdown chart's hardcoded "-10.5%" backtest-DD reference
+line). Verified on paper (21/21 fundable, full paper balance) -- live currently shows the
+frequency reference but not the fundable count, because the live gateway is disconnected at time
+of writing (correct graceful-degradation, `equity_usd()` returns None when disconnected, same as
+the existing `_pending_reason()` fallback) -- will show a real (and much lower) number once
+reconnected.
+
+**Batch-7 screen** (`--etf-screen7`, targeting genuinely new STRATEGY structures rather than
+asset classes: merger arbitrage/covered-call income, plus one more confirmatory real-asset
+thematic-equity test):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| QYLD | covered_call | 39 | +0.418 | reject (isolation: DD cost outweighs gain) |
+| PHO | thematic_eq | 76 | +0.157 | reject (weak edge, same pattern as infra/timber) |
+| MNA | merger_arb | 28 | −0.009 | reject (flat -- market-neutral strategies rarely throw trend signals) |
+
+**Isolation test:**
+| | OOS CAGR | OOS maxDD | Ratio |
+|---|---|---|---|
+| 21-base | +13.3% | −6.6% | 2.02 |
+| 21-base + QYLD | +14.1% | **−7.5%** | **1.88 (worse)** |
+
+**ZERO adoptions from batch 7** -- a legitimate, expected outcome, not a failure of the process.
+QYLD's rejection makes sense in hindsight: covered-call's capped-upside structure (from selling
+calls against the position) is fundamentally at odds with this strategy's core edge source
+("let winners run" on the strongest trends) -- it can't fully participate in the big rallies that
+drive returns here, but still shares the downside. This is now the FOURTH candidate this session
+(after PALL/PPLT, BIZD, COPX) with a decent-looking raw per-market expR that failed once actually
+tested in the portfolio -- a strong empirical case for why the isolation-test step is mandatory,
+not optional, for any future candidate regardless of how good its standalone number looks.
+**Live universe unchanged at 21 ETFs.**
+
+**Batch-8 screen** (`--etf-screen8`, mortgage REITs vs the already-held equity REITs, natural
+gas vs the already-rejected oil/broad commodity, and momentum-factor equity as the one
+factor-tilt idea worth actually testing):
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| MTUM | factor_eq | 52 | +0.289 | borderline -- see isolation test |
+| REM | mortgage_reit | 47 | −0.021 | reject (flat/negative) |
+| UNG | energy2 | 5 | +0.819 | reject (only 5 signals in 33y -- too thin, matches BKLN/FM) |
+
+**MTUM isolation:**
+| | OOS CAGR | OOS maxDD | Ratio |
+|---|---|---|---|
+| 21-base | +13.3% | −6.6% | 2.02 |
+| 21-base + MTUM | +14.0% | −7.0% | 2.00 (~1% relative decline -- far milder than PALL/BIZD/COPX/QYLD) |
+
+**MTUM was a genuine borderline case, not a clean pass or fail.** Asked the user directly rather
+than deciding unilaterally: **left out**, keeping the flat-or-better bar strict and mechanical
+rather than making exceptions for close calls. If a future batch needs a tiebreaker candidate,
+MTUM is the natural first thing to re-test alongside it. REM's rejection is informative on its
+own: the "genuinely different risk driver" reasoning (rate/spread-sensitive vs property-value-
+sensitive) was sound, but a different risk driver doesn't automatically mean a USABLE weekly-
+trend signal -- worth remembering for future candidate selection. **Live universe unchanged at
+21 ETFs; zero adoptions from batch 8 (second batch in a row with none).**
+
 ### ⭐ SINGLE-ENDPOINT paper/live MODE-SWITCH (2026-07-01) — SUPERSEDES the two-instance model below
 User wants **same domain + port** (Cloudflare `quant.carsonng.com` → localhost:8080 only) and
 quant.carsonng.com to reach LIVE. So the two-port/two-instance design (below) is ABANDONED for this:

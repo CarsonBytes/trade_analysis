@@ -53,7 +53,8 @@ from dashboard.core.scoring import rank                     # noqa: E402
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
 SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
-            "cap": 200, "grid_cols": 4, "chart_period": "All", "chart_scale": "Truncated"}
+            "cap": 200, "grid_cols": 4, "chart_period": "All", "chart_scale": "Truncated",
+            "chart_view": "P&L (ex-deposits)"}
 CHART_PERIODS = {"1W": 7, "1M": 30, "3M": 90, "All": None}   # label -> lookback days (None = all)
 _busy = {"flag": False}
 
@@ -67,7 +68,7 @@ def _save_settings() -> None:
             "cheap_min": SETTINGS["cheap_min"], "llm_min": SETTINGS["llm_min"],
             "auto_pause": SETTINGS["auto_pause"], "cap": SETTINGS["cap"],
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
-            "chart_scale": SETTINGS["chart_scale"],
+            "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI})
     except Exception:                                  # noqa: BLE001 -- settings are non-critical
@@ -82,7 +83,8 @@ def _load_settings() -> None:
         saved, _ts = store.cache_get("ui_settings")
         if not saved:
             return
-        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period", "chart_scale"):
+        for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
+                 "chart_scale", "chart_view"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -122,6 +124,15 @@ def _ago(t: dt.datetime | None) -> str:
 
 
 SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "grey-6"}
+
+# Backtest-measured SIGNAL frequency (not fill frequency -- see _fundable_count below for
+# why those two differ at small account sizes). From the 21-ETF live universe, 33.4y:
+# `BROKER=ib UNIVERSE=etf python -m dashboard.research.backtest --longweekly`
+# (2026-07-08): "PORTFOLIO TRADES ... FREQUENCY: ~38 trades/year | ~0.7/week". A long-run
+# average, not a promise -- actual weeks cluster (several signals at once in a strong
+# synchronized trend, or none for a stretch). Re-measure if the universe changes again.
+BACKTEST_SIGNAL_FREQ_YR = 38
+BACKTEST_SIGNAL_FREQ_WK = 0.7
 
 
 # ---- refreshable panels ----------------------------------------------------
@@ -549,6 +560,24 @@ def paper_panel() -> None:
             .classes("w-full").props("dense")
 
 
+def _deposit_adjusted(hist: list, flows: list | None) -> list[float]:
+    """hist: [[ts, value, ccy], ...] ascending. flows: [[ts, amount, ccy], ...] (see
+    service.py's equity_history cash-flow logging). Returns hist's values with the
+    cumulative net cash flow up to each point subtracted, so the series reads as pure
+    trading P&L -- deposits/withdrawals become invisible instead of looking like gains."""
+    if not flows:
+        return [h[1] for h in hist]
+    flows_sorted = sorted(flows, key=lambda f: f[0])
+    out = []
+    fi, cum = 0, 0.0
+    for ts, val, _ccy in hist:
+        while fi < len(flows_sorted) and flows_sorted[fi][0] <= ts:
+            cum += flows_sorted[fi][1]
+            fi += 1
+        out.append(val - cum)
+    return out
+
+
 @ui.refreshable
 def portfolio_panel() -> None:
     """IBKR portfolio overview in the account base currency (HKD): total value,
@@ -580,7 +609,12 @@ def portfolio_panel() -> None:
     hist, _ts = store.cache_get("equity_history")
     hist = hist or []
     base0 = hist[0][1] if hist else nl                        # value when tracking started
-    total_pl = nl - base0
+    base0_ts = hist[0][0] if hist else 0
+    flows, _fts = store.cache_get("cash_flows")
+    # net deposits/withdrawals since tracking began -- these move NetLiquidation but are NOT
+    # trading P&L, so they must be excluded (see service.py's equity_history cash-flow logging)
+    net_flows = sum(f[1] for f in (flows or []) if f[0] >= base0_ts)
+    total_pl = nl - base0 - net_flows
     pct = (total_pl / base0 * 100.0) if base0 else 0.0
 
     def _money(x):
@@ -615,7 +649,8 @@ def portfolio_panel() -> None:
               f"Net liquidation value of the {_bk.name()} account")
         _stat("Total P&L", f"{_money(total_pl)}  ({pct:+.2f}%)",
               "text-green" if total_pl >= 0 else "text-red",
-              "Account value now minus when tracking began (realized + unrealized)")
+              "Account value now minus when tracking began, EXCLUDING deposits/withdrawals "
+              "in between (realized + unrealized trading P&L only)")
         _stat("Unrealized (open)", _money(upnl),
               "text-green" if upnl >= 0 else "text-red",
               "P&L of currently open positions (USD converted at the HKD peg)")
@@ -632,10 +667,21 @@ def portfolio_panel() -> None:
         if fx.get("enabled"):
             usd_c = fx.get("usd_cash", 0.0)
             hkd_c = fx.get("hkd_cash", 0.0)
-            _stat("USD cash", f"${usd_c:,.0f}",
-                  "text-green" if usd_c >= 0 else "text-red",
-                  "USD cash balance — negative = margin debit (~5-6% interest); auto-converts "
-                  f"idle HKD→USD each cycle. HKD residual: {hkd_c:,.0f}")
+            if fx.get("stuck"):
+                with ui.column().classes("items-start gap-0"):
+                    ui.label("USD cash").classes("text-xs text-grey-6 uppercase")
+                    with ui.row().classes("items-center gap-1"):
+                        ui.label(f"${usd_c:,.0f}").classes(
+                            "text-xl font-bold " + ("text-green" if usd_c >= 0 else "text-red"))
+                        ui.badge("⚠", color="orange").classes("text-xs").tooltip(
+                            "HKD→USD conversion keeps failing to actually fill (repeated attempts, "
+                            "no real USD balance yet) -- most likely the account's Forex trading "
+                            f"permission isn't enabled/approved. HKD residual: {hkd_c:,.0f}")
+            else:
+                _stat("USD cash", f"${usd_c:,.0f}",
+                      "text-green" if usd_c >= 0 else "text-red",
+                      "USD cash balance — negative = margin debit (~5-6% interest); auto-converts "
+                      f"idle HKD→USD each cycle. HKD residual: {hkd_c:,.0f}")
         accrued = acct.get("AccruedCash")
         if accrued is not None:
             _stat("Interest accrued", _money(accrued),
@@ -666,48 +712,90 @@ def portfolio_panel() -> None:
 
     _lookback_days = CHART_PERIODS.get(SETTINGS["chart_period"])
     _cutoff = (hist[-1][0] - _lookback_days * 86400) if (_lookback_days and hist) else None
+    _adj_full = _deposit_adjusted(hist, flows)   # pure trading P&L, deposits/withdrawals netted out
 
     # equity line chart (account value over time, base ccy)
     def _set_chart_scale(e) -> None:
         SETTINGS["chart_scale"] = e.value
         _save_settings()
         portfolio_panel.refresh()
+
+    def _set_chart_view(e) -> None:
+        SETTINGS["chart_view"] = e.value
+        _save_settings()
+        portfolio_panel.refresh()
     with ui.row().classes("items-center justify-between w-full mt-2"):
         ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold")
         with ui.row().classes("items-center gap-2"):
+            ui.label("View:").classes("text-xs text-grey-6")
+            ui.toggle(["P&L (ex-deposits)", "Account value"], value=SETTINGS["chart_view"],
+                     on_change=_set_chart_view).props("dense")\
+                .tooltip("P&L (ex-deposits) nets out deposits/withdrawals so the line reads as "
+                         "pure trading performance; Account value shows the raw balance "
+                         "(deposits appear as jumps)")
             ui.label("Scale:").classes("text-xs text-grey-6")
             ui.toggle(["Truncated", "Zero-baseline"], value=SETTINGS["chart_scale"],
                      on_change=_set_chart_scale).props("dense")\
                 .tooltip("Truncated = zoomed to the data range (shows fine detail); "
                          "Zero-baseline = y-axis starts at 0 (shows true relative scale)")
-    _whist = [h for h in hist if _cutoff is None or h[0] >= _cutoff]
+    _win_idx = [i for i, h in enumerate(hist) if _cutoff is None or h[0] >= _cutoff]
+    _whist = [hist[i] for i in _win_idx]
     if len(hist) >= 2:
         xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in _whist]
-        ys = [h[1] for h in _whist]
+        _use_adj = SETTINGS["chart_view"] == "P&L (ex-deposits)"
+        # P&L view must be ZERO-referenced (matches the Total P&L stat's own math: nl - base0 -
+        # flows) -- _adj_full alone only nets out cash flows, leaving the series sitting at the
+        # ORIGINAL starting value (itself a deposit, not profit) instead of 0. Subtract it here;
+        # _adj_full stays value-based (unsubtracted) for the drawdown monitor below, where you
+        # divide by the peak VALUE, not peak P&L.
+        ys = ([_adj_full[i] - hist[0][1] for i in _win_idx] if _use_adj
+              else [hist[i][1] for i in _win_idx])
         _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
+        _marks = []
+        for fts, famt, fccy in (flows or []):
+            if _cutoff is not None and fts < _cutoff:
+                continue
+            idx = min(range(len(_whist)), key=lambda i: abs(_whist[i][0] - fts), default=None)
+            if idx is None:
+                continue
+            kind = "deposit" if famt > 0 else "withdrawal"
+            _marks.append({"xAxis": xs[idx],
+                           "label": {"formatter": f"{kind} {famt:+,.0f}", "fontSize": 9},
+                           "lineStyle": {"color": "#6b7280", "type": "dotted"}})
         ui.echart({
             "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
             "yAxis": ({"type": "value", "name": ccy, "min": 0}
-                     if _zero_base else {"type": "value", "name": ccy, "scale": True}),
+                     if (_zero_base and not _use_adj)     # P&L can go negative -- never clip at 0
+                     else {"type": "value", "name": ccy, "scale": True}),
             "series": [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
                         "lineStyle": {"width": 2},
-                        "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"}}],
+                        "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"},
+                        "markLine": ({"silent": True, "symbol": "none", "data": _marks}
+                                    if _marks else None)}],
             "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
         }).classes("w-full h-56").tooltip(
-            "Net liquidation value over time. With no ongoing deposits this IS the pure "
-            "strategy P&L curve; once you're actively depositing it'll be deposit-adjusted.")
+            "P&L (ex-deposits) nets out logged cash flows so this is pure trading performance; "
+            "switch to Account value to see the raw balance, with deposits marked as dotted lines."
+            if _use_adj else
+            "Raw net liquidation value over time -- includes deposits/withdrawals as jumps "
+            "(marked with dotted lines). Switch to P&L (ex-deposits) for pure trading performance.")
     else:
         ui.label("Builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
 
     # DRAWDOWN MONITOR — current % below the running peak (watch the -10.5% line)
+    # Uses the DEPOSIT-ADJUSTED series unconditionally (not tied to the chart_view toggle
+    # above): a deposit must never look like a new all-time high that resets the peak and
+    # hides a real, ongoing trading drawdown -- this has to be correct regardless of what
+    # the user happens to have the equity chart's view set to.
     if len(hist) >= 2:
-        _peak = hist[0][1]
+        _peak = _adj_full[0]
         dxs, dys, cur_dd = [], [], 0.0
-        for h in hist:                        # ALWAYS the full series -- true peak, never windowed
-            _peak = max(_peak, h[1])
-            cur_dd = (h[1] - _peak) / _peak * 100.0 if _peak else 0.0
+        for i, h in enumerate(hist):          # ALWAYS the full series -- true peak, never windowed
+            _av = _adj_full[i]
+            _peak = max(_peak, _av)
+            cur_dd = (_av - _peak) / _peak * 100.0 if _peak else 0.0
             if _cutoff is None or h[0] >= _cutoff:
                 dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
                 dys.append(round(cur_dd, 2))
@@ -718,7 +806,8 @@ def portfolio_panel() -> None:
                 "text-sm font-bold " + ("text-green" if cur_dd > -5
                                         else "text-orange" if cur_dd > -10.5 else "text-red"))\
                 .tooltip("Always the TRUE current drawdown from the all-time peak, "
-                         "regardless of the period selected above")
+                         "regardless of the period selected above -- deposit-adjusted, so a "
+                         "cash-in never masquerades as a new peak")
         ui.echart({
             "tooltip": {"trigger": "axis"},
             "xAxis": {"type": "category", "data": dxs, "boundaryGap": False},
@@ -730,7 +819,8 @@ def portfolio_panel() -> None:
                              "lineStyle": {"color": "#dc2626", "type": "dashed"}}]}}],
             "grid": {"left": 55, "right": 20, "top": 20, "bottom": 45},
         }).classes("w-full h-44").tooltip(
-            "Current drawdown from the peak account value; dashed line = backtest worst case")
+            "Current drawdown from the peak DEPOSIT-ADJUSTED value (pure trading performance); "
+            "dashed line = backtest worst case")
 
     # allocation pie: strategy positions + SGOV + buffer cash, dual-currency on hover
     id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
@@ -833,6 +923,38 @@ def _trade_card(t: dict, pos: dict | None) -> None:
         ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
 
 
+def _fundable_count() -> tuple[int | None, int]:
+    """How many of the active universe's instruments could size >=1 share RIGHT NOW at
+    current equity + risk/trade. Explains the gap between the backtest's SIGNAL frequency
+    (BACKTEST_SIGNAL_FREQ_YR, fixed at the account's target/planned scale) and the account's
+    actual FILL frequency today -- a cheap/low-ATR instrument (e.g. a bond ETF) sizes easily
+    on a small account, but an expensive/high-ATR one (e.g. SPY, QQQ) can eat most of a small
+    account's risk budget in one position, so many qualifying signals go unfunded until the
+    account grows. First element is None if equity is unavailable (e.g. broker disconnected)
+    -- distinct from 0 fundable, which is a real (if grim) answer."""
+    from dashboard.execution import broker as _bk
+    from dashboard.core import paper
+    from dashboard.data import contracts
+    from dashboard.instruments import active_universe
+    eq = _bk.equity_usd()
+    universe = active_universe()
+    if eq is None or not universe:
+        return None, len(universe)
+    fundable = 0
+    for inst in universe:
+        score = service.STATE.get("scores", {}).get(inst.key)
+        if not score:
+            continue
+        atr = score.facts.get("atr14") or 0.0
+        stop_per_share = paper.SL_ATR_MULT * atr
+        if stop_per_share <= 0:
+            continue
+        needed = contracts.min_equity_for_1_share(stop_per_share, paper.RISK_PER_TRADE)
+        if eq >= needed:
+            fundable += 1
+    return fundable, len(universe)
+
+
 @ui.refreshable
 def active_panel() -> None:
     """Open positions shown on the Board with live unrealized P&L in R. Splits
@@ -848,6 +970,19 @@ def active_panel() -> None:
     hdr = f"Active Trades ({len(confirmed)} open"
     hdr += f" · {len(pending)} pending)" if pending else ")"
     ui.label(hdr).classes("text-lg font-bold")
+    from dashboard.execution import broker as _bk
+    if _bk.is_ib():
+        fundable, total = _fundable_count()
+        freq = (f"Signal freq (backtest): ~{BACKTEST_SIGNAL_FREQ_YR}/yr "
+                f"(~{BACKTEST_SIGNAL_FREQ_WK:.1f}/wk)")
+        if fundable is not None:
+            freq += f"  ·  Fundable now: {fundable}/{total} ETFs at current equity"
+        ui.label(freq).classes("text-xs text-grey-6").tooltip(
+            "The backtest's signal frequency is how often the strategy finds a qualifying "
+            "setup across the whole universe -- NOT how often trades actually FILL. A small "
+            "account can't size expensive/high-volatility instruments (e.g. SPY, QQQ) even "
+            "when they qualify, so real fill frequency is lower until the account grows -- "
+            "see the funding-gap reason on each pending card below.")
     if not open_t:
         ui.label("No open positions. Setups are logged automatically from "
                  "qualifying signals.").classes("text-sm text-grey")

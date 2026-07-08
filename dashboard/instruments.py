@@ -137,6 +137,19 @@ ETF_CANDIDATES: list[Instrument] = [
     # batch-2 keepers (screened 2026-06-22): distinct, positive, not equity-cluster.
     Instrument("EMB",  "EM Bonds",          "EMB",  "", "em_bond"),
     Instrument("PFF",  "Preferred Stock",   "PFF",  "", "preferred"),
+    # batch-3/4 keepers (screened 2026-07-08, isolation-tested vs the 17/18-base):
+    # CWB +1.0pp OOS CAGR (flat DD), VNQI +0.5pp OOS CAGR (flat DD) -- see HANDOFF.
+    Instrument("CWB",  "Convertible Bonds", "CWB",  "", "convertible"),
+    Instrument("VNQI", "Intl REITs",        "VNQI", "", "intl_reit"),
+    # batch-5 keeper (screened 2026-07-08, isolation-tested vs the 19-base): AMLP +0.9pp
+    # OOS CAGR for -0.4pp extra DD (ratio flat/better). PALL/PPLT rejected DESPITE positive
+    # raw per-market expR -- portfolio isolation showed -1.2pp DD cost for only +0.3pp CAGR
+    # (clusters with existing GLD/SLV/CPER metal risk). See HANDOFF.
+    Instrument("AMLP", "MLP Energy Infra",  "AMLP", "", "mlp"),
+    # batch-6 keeper (screened 2026-07-08, isolation-tested vs the 20-base): HYD +0.6pp OOS
+    # CAGR for ZERO extra DD (best ratio improvement of any candidate this session). BIZD/COPX
+    # rejected -- both showed the same "decent raw expR, DD cost outweighs it" pattern as PALL.
+    Instrument("HYD",  "Muni High-Yield",   "HYD",  "", "muni_hy"),
 ]
 ETF_CANDIDATE_BY_KEY = {i.key: i for i in ETF_CANDIDATES}
 
@@ -156,9 +169,116 @@ ETF_SCREEN_BATCH: list[Instrument] = [
 ]
 ETF_SCREEN_BATCH_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH}
 
-# The validated ETF trading universe = core {metal,index,rate} + screened diversifiers
-# (credit/inflation/intl_eq/commodity/reit). 16 ETFs. Best risk-adjusted result found:
-# full +4.2% CAGR / -10.7% DD (vs core-10 2.6%/-13.4%). Use for small accounts.
+# Batch 3 to SCREEN (--etf-screen3, 2026-07-08). Batch-2's lesson: narrower slices of an
+# asset class already held (sectors, regional-equity subsets, extra commodities/credit)
+# just correlate with what's already in the book. This batch targets asset classes with
+# NO representation at all in the traded universe, rather than subsets of existing ones.
+# CWB PROMOTED to ETF_CANDIDATES 2026-07-08 (isolation-confirmed, +1.0pp OOS CAGR).
+# BKLN/FM: promising expR but n=11/14 -- too few trades to trust, re-screen later with
+# more history. EMLC: negative edge, clean reject.
+ETF_SCREEN_BATCH_3: list[Instrument] = [
+    Instrument("BKLN", "Senior Loans",       "BKLN", "", "bank_loan"),
+    Instrument("EMLC", "EM Local-Ccy Debt",  "EMLC", "", "em_local_debt"),
+    Instrument("IGF",  "Global Infra Eq",    "IGF",  "", "infra"),
+    Instrument("FM",   "Frontier Mkts Eq",   "FM",   "", "frontier_eq"),
+]
+ETF_SCREEN_BATCH_3_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_3}
+
+# Batch 4 to SCREEN (--etf-screen4, 2026-07-08). Batch-3's CWB confirmed the pattern that
+# works: geographic/structural diversification of an asset class ALREADY held successfully
+# (like EFA/EEM alongside domestic SPY/QQQ) beats a narrower slice of one. Applies that same
+# logic to REIT (domestic VNQ -> ex-US), rate (domestic IEF/TLT/SHY -> ex-US), and credit
+# (domestic HYG -> international IG), plus one genuinely new real-asset class (timber).
+# VNQI PROMOTED to ETF_CANDIDATES 2026-07-08 (isolation-confirmed, +0.5pp OOS CAGR). The
+# geography-diversification pattern did NOT generalize to rate/credit/timber: BWX/PICB/WOOD
+# all showed negative edge -- clean rejects, not deferred (plenty of history, no small-n excuse).
+ETF_SCREEN_BATCH_4: list[Instrument] = [
+    Instrument("BWX",  "Intl Govt Bonds",    "BWX",  "", "intl_rate"),
+    Instrument("PICB", "Intl Corp Bonds",    "PICB", "", "intl_credit"),
+    Instrument("WOOD", "Timber & Forestry",  "WOOD", "", "timber"),
+]
+ETF_SCREEN_BATCH_4_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_4}
+
+# Batch 5 to SCREEN (--etf-screen5, 2026-07-08). Neither "narrower slice of a held class"
+# (batch-2) nor "international version of a held class" (batch-4, mostly) worked. This batch
+# targets precious/industrial metals with DIFFERENT demand drivers than GLD/SLV/CPER (platinum/
+# palladium: auto-catalyst demand; uranium: nuclear-fuel cycle, not monetary/industrial-base-
+# metal), plus a real-asset equity structure not yet tried (MLP midstream energy -- distinct
+# from both broad commodity DBC and the already-rejected energy sector XLE/USO).
+# AMLP PROMOTED to ETF_CANDIDATES 2026-07-08 (isolation-confirmed, +0.9pp OOS CAGR). PPLT/
+# PALL REJECTED despite positive raw per-market expR -- portfolio isolation showed they
+# cluster drawdown risk with existing GLD/SLV/CPER (-1.2pp DD for only +0.3pp CAGR). URA:
+# weak raw edge (+0.110, weaker than the already-rejected IGF), not worth an isolation test.
+ETF_SCREEN_BATCH_5: list[Instrument] = [
+    Instrument("PPLT", "Physical Platinum",  "PPLT", "", "metal2"),
+    Instrument("PALL", "Physical Palladium", "PALL", "", "metal2"),
+    Instrument("URA",  "Uranium Miners",     "URA",  "", "uranium"),
+]
+ETF_SCREEN_BATCH_5_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_5}
+
+# Batch 6 to SCREEN (--etf-screen6, 2026-07-08). Two genuinely new structures: municipal
+# HIGH-YIELD (different credit tier + tax-exempt investor base than both HYG corporate-HY and
+# the already-rejected MUB investment-grade muni), and a BDC income fund (leveraged private
+# credit, a structure not tested at all yet). Plus one confirmatory test: does the "mining
+# EQUITY carries broad market beta, diluting the pure-commodity diversification benefit"
+# lesson from GDX's rejection (gold miners, -0.27) also hold for copper miners, given CPER
+# (physical copper) itself succeeded?
+# HYD PROMOTED to ETF_CANDIDATES 2026-07-08 (isolation-confirmed, +0.6pp OOS CAGR, ZERO extra
+# DD -- the best ratio improvement of any candidate this session). BIZD/COPX REJECTED despite
+# positive raw expR -- same "DD cost outweighs the CAGR gain" pattern as PALL/PPLT; COPX
+# confirms the mining-equity-beta drag applies to copper too, just less severely than gold.
+ETF_SCREEN_BATCH_6: list[Instrument] = [
+    Instrument("BIZD", "BDC Income",        "BIZD", "", "bdc"),
+    Instrument("COPX", "Copper Miners",     "COPX", "", "miner2"),
+]
+ETF_SCREEN_BATCH_6_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_6}
+
+# Batch 7 to SCREEN (--etf-screen7, 2026-07-08). Two genuinely new STRATEGY structures (not
+# just new asset classes): merger arbitrage (MNA -- event-driven risk, not macro-trend-driven,
+# since 2010) and covered-call income (QYLD -- options-overlay structure, capped upside/income
+# focus, since 2013). Plus one more confirmatory real-asset-equity test (PHO water resources),
+# extending the COPX result (mining-equity-beta drag) to see if it generalizes to another
+# thematic real-asset equity, given infra/timber (both thematic real-asset equity) already
+# failed. Deliberately EXCLUDED: managed-futures ETFs (e.g. DBMF) -- only ~6y history, same
+# problem as crypto (too short for this project's 33y DSR/OOS discipline).
+# ALL THREE REJECTED 2026-07-08: MNA flat edge (-0.009, n28 -- market-neutral strategies rarely
+# throw real weekly trend signals). QYLD isolation-rejected despite +0.418 raw expR -- capped
+# upside from the call overlay is fundamentally at odds with this strategy's "let winners run"
+# edge source (ratio 2.02->1.88, same DD-outweighs-gain pattern as PALL/BIZD/COPX). PHO weak
+# edge (+0.157), consistent with infra/timber -- thematic real-asset equity keeps failing.
+ETF_SCREEN_BATCH_7: list[Instrument] = [
+    Instrument("MNA",  "Merger Arbitrage",  "MNA",  "", "merger_arb"),
+    Instrument("QYLD", "Covered-Call Income","QYLD", "", "covered_call"),
+    Instrument("PHO",  "Water Resources",   "PHO",  "", "thematic_eq"),
+]
+ETF_SCREEN_BATCH_7_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_7}
+
+# Batch 8 to SCREEN (--etf-screen8, 2026-07-08). Mortgage REITs (REM -- rate/credit-spread
+# sensitive leveraged bond-like structure, genuinely different risk driver than the EQUITY
+# REITs already held (VNQ/VNQI, property-value/rental-income sensitive)); natural gas (UNG --
+# weather/storage-driven demand, distinct from oil (USO, rejected) and broad commodity (DBC,
+# held) -- CAVEAT: UNG is notorious for contango/roll decay dragging down long-term returns
+# regardless of spot price, expect this one to likely fail); momentum factor equity (MTUM --
+# the one factor-tilt idea worth actually testing rather than assuming redundant with SPY/QQQ,
+# since this whole strategy IS trend-following and a momentum-tilted basket could plausibly
+# behave differently, unlike straight sector/regional subsets which just repeatedly failed).
+# REJECTED 2026-07-08: REM flat/negative edge (-0.021, n47). UNG only 5 signals in 33y --
+# too thin to conclude (matches BKLN/FM). MTUM was a genuine borderline case (isolation:
+# ratio 2.02->2.00, ~1% relative decline -- far milder than the clear rejects PALL/BIZD/COPX/
+# QYLD showed) -- USER CALL: left out, keeping the flat-or-better bar strict/mechanical
+# rather than making exceptions for close calls. Re-visit if a future batch needs a tiebreaker.
+ETF_SCREEN_BATCH_8: list[Instrument] = [
+    Instrument("REM",  "Mortgage REITs",    "REM",  "", "mortgage_reit"),
+    Instrument("UNG",  "Natural Gas",       "UNG",  "", "energy2"),
+    Instrument("MTUM", "Momentum Factor Eq","MTUM", "", "factor_eq"),
+]
+ETF_SCREEN_BATCH_8_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_8}
+
+# The validated ETF trading universe = core {metal,index,rate} + screened diversifiers.
+# 22 defined here, but EMB (em_bond) is excluded from LIVE trading via WEEKLY_TREND_CLASSES
+# (paper.py) -- 21 ETFs actually trade. Latest isolation-tested result (2026-07-08, adding
+# CWB+VNQI+AMLP+HYD to the prior 17): OOS CAGR +13.3% / maxDD -6.6% / expR +0.401 (33.4y, 0.5%
+# risk). See HANDOFF.md for the full batch-3/4/5/6 screens + per-candidate isolation tests.
 ETF_TRADED: list[Instrument] = ETF_UNIVERSE + ETF_CANDIDATES
 ETF_TRADED_BY_KEY = {i.key: i for i in ETF_TRADED}
 
@@ -191,6 +311,12 @@ def active_by_key(key: str) -> Instrument | None:
     """Look up an instrument by key in the ACTIVE universe, with a fallback to
     the other (so a journal row written under one broker still resolves)."""
     return (FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key) or ETF_CANDIDATE_BY_KEY.get(key)
-            or ETF_SCREEN_BATCH_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
+            or ETF_SCREEN_BATCH_BY_KEY.get(key) or ETF_SCREEN_BATCH_3_BY_KEY.get(key)
+            or ETF_SCREEN_BATCH_4_BY_KEY.get(key) or ETF_SCREEN_BATCH_5_BY_KEY.get(key)
+            or ETF_SCREEN_BATCH_6_BY_KEY.get(key) or ETF_SCREEN_BATCH_7_BY_KEY.get(key)
+            or ETF_SCREEN_BATCH_8_BY_KEY.get(key) or BY_KEY.get(key)) if _ib_broker() \
         else (BY_KEY.get(key) or FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key)
-              or ETF_CANDIDATE_BY_KEY.get(key) or ETF_SCREEN_BATCH_BY_KEY.get(key))
+              or ETF_CANDIDATE_BY_KEY.get(key) or ETF_SCREEN_BATCH_BY_KEY.get(key)
+              or ETF_SCREEN_BATCH_3_BY_KEY.get(key) or ETF_SCREEN_BATCH_4_BY_KEY.get(key)
+              or ETF_SCREEN_BATCH_5_BY_KEY.get(key) or ETF_SCREEN_BATCH_6_BY_KEY.get(key)
+              or ETF_SCREEN_BATCH_7_BY_KEY.get(key) or ETF_SCREEN_BATCH_8_BY_KEY.get(key))

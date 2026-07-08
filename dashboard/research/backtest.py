@@ -24,7 +24,9 @@ import pandas as pd
 from analyst.features import compute_facts
 from metrics import deflated_sharpe_ratio
 from dashboard.instruments import (active_universe, active_by_key, ETF_UNIVERSE,
-                                   ETF_CANDIDATES, ETF_TRADED, ETF_SCREEN_BATCH)
+                                   ETF_CANDIDATES, ETF_TRADED, ETF_SCREEN_BATCH,
+                                   ETF_SCREEN_BATCH_3, ETF_SCREEN_BATCH_4, ETF_SCREEN_BATCH_5,
+                                   ETF_SCREEN_BATCH_6, ETF_SCREEN_BATCH_7, ETF_SCREEN_BATCH_8)
 from dashboard.data.providers import get_ohlc
 from dashboard.core.scoring import score_from_facts
 from dashboard.core import paper
@@ -573,6 +575,28 @@ def main():
     ap.add_argument("--etf-screen2", action="store_true",
                     help="screen validated-16 + BATCH-2 candidates (XLK/XLF/XLE/VGK/EWJ/"
                          "INDA/GSG/DBA/LQD/MUB/EMB/PFF) -- per-market attribution")
+    ap.add_argument("--etf-screen3", action="store_true",
+                    help="screen validated-17 + BATCH-3 candidates targeting UNREPRESENTED "
+                         "asset classes (BKLN bank loans/CWB convertibles/EMLC EM local-ccy "
+                         "debt/IGF global infra/FM frontier eq) -- per-market attribution")
+    ap.add_argument("--etf-screen4", action="store_true",
+                    help="screen validated-18 (17+CWB) + BATCH-4 candidates: geographic/"
+                         "structural diversification of asset classes already held (VNQI intl "
+                         "REITs/BWX intl govt bonds/PICB intl corp bonds/WOOD timber)")
+    ap.add_argument("--etf-screen5", action="store_true",
+                    help="screen validated-19 (17+CWB+VNQI) + BATCH-5 candidates: metals/"
+                         "real-assets with different demand drivers than held metals/commodity "
+                         "(PPLT platinum/PALL palladium/URA uranium/AMLP MLP energy infra)")
+    ap.add_argument("--etf-screen6", action="store_true",
+                    help="screen validated-20 (17+CWB+VNQI+AMLP) + BATCH-6 candidates: muni "
+                         "high-yield/BDC income/copper miners (HYD/BIZD/COPX)")
+    ap.add_argument("--etf-screen7", action="store_true",
+                    help="screen validated-21 (17+CWB+VNQI+AMLP+HYD) + BATCH-7 candidates: "
+                         "genuinely new STRATEGY structures -- merger arb/covered-call income/"
+                         "water resources equity (MNA/QYLD/PHO)")
+    ap.add_argument("--etf-screen8", action="store_true",
+                    help="screen validated-21 + BATCH-8 candidates: mortgage REITs/natural gas/"
+                         "momentum factor equity (REM/UNG/MTUM)")
     ap.add_argument("--cluster", action="store_true",
                     help="de-correlate by ASSET CLASS (max one open position per "
                          "metal/index/rate) -- caps correlated-cluster drawdown")
@@ -625,7 +649,19 @@ def main():
         # GUARD: a typo'd/plural class name (e.g. "rates" vs "rate") would silently
         # match nothing and quietly degrade the universe -> a wrong conclusion you'd
         # trust. Validate against the classes that actually exist in the universe.
-        if args.etf_screen2:
+        if args.etf_screen8:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_8
+        elif args.etf_screen7:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_7
+        elif args.etf_screen6:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_6
+        elif args.etf_screen5:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_5
+        elif args.etf_screen4:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_3 + ETF_SCREEN_BATCH_4
+        elif args.etf_screen3:
+            _uni = ETF_TRADED + ETF_SCREEN_BATCH_3
+        elif args.etf_screen2:
             _uni = ETF_TRADED + ETF_SCREEN_BATCH
         elif args.etf_screen:
             _uni = ETF_UNIVERSE + ETF_CANDIDATES
@@ -649,9 +685,34 @@ def main():
     weekly = args.weekly or args.longweekly
     if weekly:
         print("[LONG-HISTORY WEEKLY (yfinance max)]" if args.longweekly else "[WEEKLY bars]")
-    if args.etf_screen2:                              # validated 16 + NEW batch-2 candidates
+    if args.etf_screen8:                                # validated 21 + NEW batch-8
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_8
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen7:                               # validated 21 (17+CWB+VNQI+AMLP+HYD) + batch-7
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_7
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen6:                                # validated 20 (17+CWB+VNQI+AMLP) + batch-6
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_6
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen5:                              # validated 19 (17+CWB+VNQI) + NEW batch-5
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_5
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen4:                              # validated 18 (17+CWB) + NEW batch-4
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_3 + ETF_SCREEN_BATCH_4
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen3:                            # validated 17 + NEW batch-3 candidates
+        universe = ETF_TRADED + ETF_SCREEN_BATCH_3
+        if not args.classes:                          # --classes can sub-select (isolate a candidate)
+            paper.WEEKLY_TREND_CLASSES = set()
+    elif args.etf_screen2:                            # validated 16 + NEW batch-2 candidates
         universe = ETF_TRADED + ETF_SCREEN_BATCH
-        paper.WEEKLY_TREND_CLASSES = set()
+        if not args.classes:
+            paper.WEEKLY_TREND_CLASSES = set()
     elif args.etf_screen:                             # core + candidate ETFs
         universe = ETF_UNIVERSE + ETF_CANDIDATES
         if not args.classes:                          # --classes can sub-select (isolate an ETF)

@@ -552,7 +552,7 @@ def keep_cash_usd() -> dict:
     debit, which costs ~5-6%). Opt-in via CASH_USD=1, paper-guarded. Converts HKD down to
     a small residual buffer. Returns status for the dashboard."""
     status = {"enabled": os.environ.get("CASH_USD", "").lower() in ("1", "true", "yes"),
-              "ok": False, "usd_cash": 0.0, "hkd_cash": 0.0, "log": ""}
+              "ok": False, "usd_cash": 0.0, "hkd_cash": 0.0, "log": "", "stuck": False}
     if not status["enabled"]:
         return status
     ib = _guard()
@@ -565,6 +565,9 @@ def keep_cash_usd() -> dict:
     hkd = led.get("HKD", 0.0)
     status["usd_cash"] = led.get("USD", 0.0)
     status["hkd_cash"] = hkd
+    from dashboard.core import store
+    if status["usd_cash"] > 1:            # a genuine past fill -- clear the stuck-attempt counter
+        store.cache_set("keep_cash_usd_attempts", 0)
     rate = led.get("_hkd_per_usd", 7.84)              # HKD per USD
     KEEP_HKD = 500.0                                  # leave a tiny HKD residual
     if hkd <= KEEP_HKD or rate <= 0:
@@ -577,6 +580,26 @@ def keep_cash_usd() -> dict:
                          f"BUY ${usd_to_buy:,} (USD cash now {status['usd_cash']:,.0f})")
         log.info("ib_exec: %s", status["log"])
         return status
+    # RETRY COOLDOWN (2026-07-08): placeOrder() is fire-and-forget -- a rejection comes back
+    # async via an error event we don't listen for, never as an exception here, so a failing
+    # order (e.g. Forex trading not yet approved on the account) looked identical to success
+    # and got resubmitted every single refresh cycle (~70-90s) indefinitely -- 224+ live order
+    # attempts over 3.5h with zero actual fills before this was caught. Only retry every 20min.
+    # STUCK TRACKING: a persistent attempts counter survives across cycles/restarts (unlike a
+    # local variable) so the dashboard can show a warning badge once repeated attempts have
+    # produced no real USD balance -- surfaced via status["stuck"] regardless of which branch
+    # below returns (cooldown-skip included), so the badge doesn't flicker off between retries.
+    import time as _time
+    attempts, _ats = store.cache_get("keep_cash_usd_attempts")
+    attempts = attempts or 0
+    status["stuck"] = attempts >= 2
+    last, _lts = store.cache_get("keep_cash_usd_last_attempt")
+    now_s = int(_time.time())
+    if last and now_s - last < 1200:
+        status["log"] = "keep-cash-usd: cooling down after a recent attempt (retries every 20min)"
+        return status
+    store.cache_set("keep_cash_usd_last_attempt", now_s)
+    store.cache_set("keep_cash_usd_attempts", attempts + 1)
     import ib_async
     fx = ib_async.Forex("USDHKD")
 
@@ -587,15 +610,21 @@ def keep_cash_usd() -> dict:
         ib_client._run(_qualify())
         o = ib_async.MarketOrder("BUY", usd_to_buy)   # BUY USD base, pay HKD
         o.orderRef = "keep-cash-usd"
-        ib_client.call(lambda: ib.placeOrder(fx, o))
+        trade = ib_client.call(lambda: ib.placeOrder(fx, o))
     except Exception as e:                             # noqa: BLE001
         status["log"] = f"keep-cash-usd: FX order failed ({e})"
         log.warning("ib_exec: %s", status["log"])
         return status
-    status["log"] = (f"keep-cash-usd: converted ~HKD {hkd:,.0f} -> BUY ${usd_to_buy:,} "
-                     f"(clears USD debit / parks idle cash in USD @~3.1%)")
-    status["usd_cash"] = status["usd_cash"] + usd_to_buy
-    status["hkd_cash"] = KEEP_HKD
+    # best-effort immediate status check -- placeOrder() doesn't block for a fill, so this
+    # only catches a FAST rejection, not a delayed one; the 20min cooldown is the real safety net
+    st = getattr(trade.orderStatus, "status", "") if trade else ""
+    if st in ("Cancelled", "Inactive", "ApiCancelled"):
+        status["log"] = f"keep-cash-usd: order REJECTED immediately (status={st}) -- check " \
+                        "the account has Forex trading permissions enabled"
+        log.warning("ib_exec: %s", status["log"])
+        return status
+    status["log"] = (f"keep-cash-usd: SUBMITTED (status={st or 'unknown'}) BUY ${usd_to_buy:,} "
+                     f"vs HKD {hkd:,.0f} -- not yet confirmed filled")
     log.info("ib_exec: %s", status["log"])
     return status
 
@@ -604,7 +633,11 @@ def keep_cash_usd() -> dict:
 SGOV_SYMBOL = "SGOV"
 SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MKT fills real)
 CASH_SWEEP_TARGET = 0.60      # park 60% of (idle cash + SGOV); keep 40% buffer for the strategy
-CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas
+CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas (anti-churn ONLY -- not a
+                              # substitute for CASH_SWEEP_MIN_NAV_USD below; see 2026-07-08 HANDOFF)
+CASH_SWEEP_MIN_NAV_USD = 75_000   # per the ADOPTED PLAN: T+1 settlement friction isn't worth it
+                                  # on a tiny contribution-fed account -- skip sweeping ENTIRELY
+                                  # below this NAV, regardless of the delta-size check above
 
 
 def _sweep_on() -> bool:
@@ -650,6 +683,11 @@ def sweep_cash() -> dict:
     status["sgov_value_base"] = sgov_usd * base_per_usd
     if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
         return status                                            # SGOV value, skip rebalancing
+    nav_usd = float(summ.get("NetLiquidation", 0.0) or 0.0) / base_per_usd
+    if nav_usd < CASH_SWEEP_MIN_NAV_USD:
+        status["log"] = (f"cash-sweep: paused until NAV reaches ${CASH_SWEEP_MIN_NAV_USD:,.0f} "
+                         f"(currently ~${nav_usd:,.0f}) -- T+1 friction isn't worth it yet")
+        return status                                            # SGOV value already reported above
     cash_usd = float(summ["TotalCashValue"]) / base_per_usd
 
     # exclude any cash earmarked for a pending manual withdrawal so the sweep does NOT
