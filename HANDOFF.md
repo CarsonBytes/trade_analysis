@@ -61,6 +61,23 @@ fractional-bracket paper order first (the one silent-failure risk: stops on frac
 persisted in ui_settings). 1% risk "fills" the 25% cap on high-vol names; the CAP is the real
 return/DD dial (risk% is inert once the cap binds; strategy-only Sharpe flat ~0.88 at any cap).
 Expected @25%: **~7.5% CAGR / −8.8% DD blended (SGOV cash)**, strategy-only ~5.7% / −10.5%.
+
+**⭐ VERIFIED 2026-07-08 on the CURRENT live setup** (21-ETF book, actual deployed
+`ETF_POS_CAP=0.25` + `RISK_PER_TRADE=0.01`, not an older 17-ETF/estimated number) —
+`--pos-cap 0.25`, full 33.4y history:
+
+| | Full-history CAGR | Full maxDD | OOS CAGR | OOS maxDD |
+|---|---|---|---|
+| **Strategy-only (cash@0%)** | +5.7% | −11.1% | +13.8% | −9.3% |
+| **Blended (cash@4.3%, today's rate)** | +7.3% | −9.6% | +14.8% | −9.3% |
+
+Monthly: avg +0.86%/mo, std 2.58%, worst month −6.0%, positive 61% of months (blended). This is
+the honest current-setup number to plan around — **use this table, not the 2026-07-01 one-liner
+above**, which was pre-batch-3-6 (17 ETFs) and a rough estimate rather than a direct `--pos-cap`
+run. Full-history is the conservative anchor; OOS (~13-14% CAGR) is the recent-regime, bull-
+flattered case — don't plan around OOS alone (see the ~4-7%/~33y vs ~10%/~13y split earlier in
+this doc for why).
+
 **Two phases, auto-switched by equity** (`paper.account_phase()` / `sleeve_active()`, threshold
 `PHASE2_NAV_USD`=$64k ≈ 500K HKD; UI shows a Phase badge):
 - **Phase 1 (<500K): core 17-ETF only**, 1% + 25% cap. (100K start is here for ~1.1y.)
@@ -863,6 +880,14 @@ cutting exposure 15% — VIX is coincident/lagging, trend filter already de-risk
 +5.4%/-12.3%→+4.3%/-12.2%, OOS +13.3%/-6.6%→+11.1%/-7.5% (CAGR down, OOS DD *worse* not better).
 Same verdict holds post-universe-growth; kills the "LLM as macro risk-dial" idea too — a slower,
 noisier signal than VIX can't fix a structural redundancy VIX itself doesn't fix.
+**MILD class-tilt variant TESTED 2026-07-08** (a user suggestion proposed a gentler ±10-15% static
+tilt toward historically-stronger classes, distinct from the aggressive 0.25x-2.0x trailing-12mo
+version already rejected above): temporarily narrowed `_class_factor`'s clamp to 0.85x-1.15x and
+reran on the 21-ETF book — 0.5% risk +5.4%/-12.3%→+5.5%/-11.6% (CAGR +0.1pp, a wash), but OOS
++13.3%/-6.6%→+13.2%/-7.6% (OOS DD *worse*). Milder than the aggressive version's damage but still
+not a real improvement — reverted, not adopted. Also note: the proposed method (weight by
+full-sample expR) would itself be look-ahead-biased in a live implementation; the walk-forward
+trailing-12mo version tested here is the honest way to test this and it still doesn't clear the bar.
 same verdict as SPY-regime → regime overlays are redundant on a long-only TSMOM book), ADX
 (halves return), batch-2 ETFs (sectors/intl-subsets/extra-commodities all redundant; kept only
 EMB+PFF, EMB later dropped — see below). **XSMOM predicted to fail** here (18 clustered ETFs → collapses to the rejected
