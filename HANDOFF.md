@@ -482,6 +482,25 @@ through a real stuck-gateway episode end-to-end (that failure mode is intermitte
 occurrence will be the real test; the Restart-button path remains available as an immediate
 manual override if needed before then.
 
+### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
+User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
+interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
+(HKD 1,034,943) slightly exceeds `NetLiquidation` (HKD 1,014,468) because 6 concurrent ETF
+positions are each risk-sized independently and their combined notional landed just over 100% of
+NAV -- normal for `ETF_POS_CAP=0.25` with several positions open, and `ExcessLiquidity` (HKD
+863,364) is nowhere near a margin call. But the **projected interest WAS wrong**: `app.py`'s
+"Projected interest (1mo)" multiplied the cash buffer by `ib_rate` (the ~3.2% CREDIT rate paid on
+positive cash) regardless of sign -- applying that same low rate to a NEGATIVE buffer, when the
+"USD cash" tooltip right next to it already says negative cash is a margin DEBIT charged ~5-6%.
+Understated the true monthly cost by ~74% (-54 shown vs -94 actual at a representative 5.5% debit
+rate). Fixed: `cash_mo` now picks `ib_rate` when cash>=0 or a new `MARGIN_DEBIT_RATE=5.5` constant
+when cash<0 (a fixed approximation -- IBKR's API has no field for this account's actual per-user
+margin rate); tooltip now labels which rate applied, and the stat's color flips red when the
+projection is negative (previously always green regardless of sign). Verified: recomputed by hand
+(-94.17 at 5.5% vs -54.33 at 3.2% for the same -20,546.69 HKD balance) and confirmed the rendered
+page now shows "USD cash HKD -94 @ 5.5% (margin debit rate, approx)" on both dashboards after
+restart.
+
 ### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
 Also fixed 2026-07-08: THREE real bugs found in this stretch of work.
 

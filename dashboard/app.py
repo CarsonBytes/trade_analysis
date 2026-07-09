@@ -689,14 +689,25 @@ def portfolio_panel() -> None:
                   "IB interest accrued on CASH balances since the last monthly payout "
                   "(running total, resets monthly). NOT from SGOV — SGOV pays separate monthly "
                   "distributions. Negative = net margin interest owed.")
-        # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB rate
+        # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB credit/debit rate.
+        # Borrow and lend rates are NOT symmetric -- a positive cash buffer earns the ~benchmark
+        # credit rate (ib_rate), but a NEGATIVE buffer is a margin debit charged ~5-6% (see the
+        # "USD cash" tooltip above), a materially higher rate. Using ib_rate for both understated
+        # the true cost of the (normal, expected) small margin debit that comes from sizing
+        # multiple concurrent ETF positions independently -- fixed 2026-07-09.
+        MARGIN_DEBIT_RATE = 5.5   # approx IBKR HKD/USD margin rate; not account-specific (no API
+                                  # field for the live per-account rate) -- see HANDOFF ~5-6% figure
         if sgov_rate is not None:
             sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
-            cash_mo = (cash or 0.0) * (ib_rate or 0.0) / 100.0 / 12.0
+            cash_val = cash or 0.0
+            cash_rate = (ib_rate or 0.0) if cash_val >= 0 else MARGIN_DEBIT_RATE
+            cash_mo = cash_val * cash_rate / 100.0 / 12.0
             proj = sgov_mo + cash_mo
-            _stat("Projected interest (1mo)", _money(proj), "text-green",
+            _stat("Projected interest (1mo)", _money(proj),
+                  "text-green" if proj >= 0 else "text-red",
                   f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
-                  f"USD cash {_money(cash_mo)} @ {ib_rate:.1f}% (live ^IRX-derived rates)")
+                  f"USD cash {_money(cash_mo)} @ {cash_rate:.1f}% "
+                  f"({'margin debit rate, approx' if cash_val < 0 else 'live ^IRX-derived rate'})")
 
     # Period control: governs BOTH charts below. The drawdown "now" badge + the peak-tracking
     # always use the FULL history (correctness -- a window can't hide the true current DD from
