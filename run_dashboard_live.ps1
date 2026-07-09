@@ -45,13 +45,47 @@ $env:CASH_SWEEP      = "1"
 # NOTE: a cold Gateway (re)start needs a 2FA phone approval -- AutoRestartTime=08:00 in
 # C:\IBC-Live\config.ini keeps the DAILY cycle session-preserving (no prompt); only a real
 # crash/reboot needs you to tap approve.
+#
+# ALSO handles the "stuck alive, never authenticated" failure mode (2026-07-08/09 HANDOFF):
+# a Gateway that times out mid-2FA (~6min, SecondFactorAuthenticationTimeout=180) never exits --
+# the process stays alive at a stuck login screen, so plain Test-Port-down relaunching is a
+# no-op against it (there's already a process; launching another doesn't help). If port 4001
+# is STILL down after $stuckThresholdMin (comfortably longer than the ~6min natural timeout --
+# conservative, so a legitimately-slow-but-working login is never killed mid-flight) while an
+# "IBKR Gateway" process is confirmed alive, force-kill it before relaunching -- same kill logic
+# app.py's Restart button uses on demand, now automatic. Capped at $maxAutoKills so a problem
+# that ISN'T the stuck-2FA case (e.g. a real credential/config error) doesn't retry forever;
+# after the cap it falls back to passive relaunch-only (today's behavior) until manually fixed.
 $mon = Start-Job -ScriptBlock {
     function Test-Port($p) {
         try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $p); $c.Close(); return $true }
         catch { return $false }
     }
+    $stuckSince = $null
+    $autoKillCount = 0
+    $stuckThresholdMin = 10
+    $maxAutoKills = 3
     while ($true) {
-        if (-not (Test-Port 4001)) {
+        if (Test-Port 4001) {
+            $stuckSince = $null
+            $autoKillCount = 0
+        } else {
+            if (-not $stuckSince) { $stuckSince = Get-Date }
+            $downMin = ((Get-Date) - $stuckSince).TotalMinutes
+            $gwProc = Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowTitle -match 'IBKR Gateway' }
+            if ($gwProc -and $downMin -ge $stuckThresholdMin -and $autoKillCount -lt $maxAutoKills) {
+                Add-Content -Path 'C:\IBC-Live\watchdog.log' -Value (
+                    "$(Get-Date -Format o) auto-kill: gateway alive $([math]::Round($downMin,1))min " +
+                    "without port 4001 open (attempt $($autoKillCount + 1)/$maxAutoKills)")
+                Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CommandLine -match 'StartGateway' } |
+                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                $gwProc | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+                Start-Sleep -Seconds 2
+                $autoKillCount++
+                $stuckSince = Get-Date
+            }
             Start-Process -FilePath 'wscript.exe' `
                 -ArgumentList '//B','//Nologo','C:\IBC-Live\start_hidden.vbs' -WindowStyle Hidden
             Start-Sleep -Seconds 45
