@@ -432,6 +432,8 @@ that would trigger an unnecessary extra 2FA prompt right after successfully logg
 this recurs, the fix is either (a) also check for the Gateway process running >N minutes without the
 API port opening and force-kill it, or (b) increase IBC's own internal timeout/retry behavior. Not
 built yet since a single manual kill+relaunch resolves it in under a minute when it happens.
+**CLOSED 2026-07-09** -- see the watchdog auto-recovery entry below (option (a), built into the
+background monitor itself, not just the on-demand Restart button).
 
 **CONFIRMED WORKING later the same day:** the scheduled 08:00 AM daily auto-restart fired naturally
 and completed in ~15 seconds with **no manual 2FA needed** -- the first real proof the format fix
@@ -457,6 +459,28 @@ the dashboard header flipped to "IBKR LIVE: acct U12991898 ●", no 2FA prompt n
 (consistent with the AutoRestartTime session-preserving fix above still holding). Chrome extension
 was unavailable to click the literal button in-browser, so verified via the identical underlying
 command instead -- the code path clicking the button executes is exactly what was run.
+
+### ⭐ BUILT 2026-07-09: watchdog auto-recovers a stuck-alive gateway (zero-click)
+Follow-up to the Restart-button fix above -- user asked whether a stuck gateway could recover
+without any manual click. Until now, no: the background port-watchdog (`run_dashboard_live.ps1`'s
+`$mon` job, mirrored in `C:\Scripts\dashboard.ps1`) only detects "port down," and relaunching via
+`start_hidden.vbs` is a no-op against a gateway that's still alive (just stuck, unauthenticated) --
+so the "stuck" case (still open in the 2026-07-08 entry above) needed a human to notice and click
+Restart or kill it by hand. Built option (a) from that TODO directly into the watchdog loop:
+tracks how long port 4001/4002 has been down; if a process titled "IBKR Gateway" is confirmed
+still alive and the port has been down **>=10min** (conservative -- comfortably past the ~6min
+natural `SecondFactorAuthenticationTimeout=180` window, so a login that's just slow/awaiting a
+phone tap is never killed mid-flight), force-kills it (same kill logic the Restart button uses)
+before the next relaunch attempt. Capped at **3 auto-kills** per down-episode so a non-2FA problem
+(bad credentials, a real config error) doesn't retry forever -- after the cap it falls back to
+today's passive relaunch-only behavior until someone looks. Logs each auto-kill to
+`C:\IBC-Live\watchdog.log` / `C:\IBC\watchdog.log` with a timestamp and attempt count. Applied
+symmetrically to both the live (`run_dashboard_live.ps1`, repo-tracked) and paper
+(`C:\Scripts\dashboard.ps1`, NOT repo-tracked -- edited directly) watchdogs, since both share the
+identical latent bug. Syntax-checked via `PSParser::Tokenize` on both (0 errors); not yet run
+through a real stuck-gateway episode end-to-end (that failure mode is intermittent) -- next
+occurrence will be the real test; the Restart-button path remains available as an immediate
+manual override if needed before then.
 
 ### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
 Also fixed 2026-07-08: THREE real bugs found in this stretch of work.
