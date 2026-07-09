@@ -47,15 +47,20 @@ $env:CASH_SWEEP      = "1"
 # crash/reboot needs you to tap approve.
 #
 # ALSO handles the "stuck alive, never authenticated" failure mode (2026-07-08/09 HANDOFF):
-# a Gateway that times out mid-2FA (~6min, SecondFactorAuthenticationTimeout=180) never exits --
-# the process stays alive at a stuck login screen, so plain Test-Port-down relaunching is a
-# no-op against it (there's already a process; launching another doesn't help). If port 4001
-# is STILL down after $stuckThresholdMin (comfortably longer than the ~6min natural timeout --
-# conservative, so a legitimately-slow-but-working login is never killed mid-flight) while a
-# live gateway process is confirmed alive, force-kill it before relaunching -- same kill logic
-# app.py's Restart button uses on demand, now automatic. Capped at $maxAutoKills so a problem
-# that ISN'T the stuck-2FA case (e.g. a real credential/config error) doesn't retry forever;
-# after the cap it falls back to passive relaunch-only (today's behavior) until manually fixed.
+# a Gateway that times out mid-2FA (SecondFactorAuthenticationTimeout=180, and does NOT self-
+# heal when it fires -- the process just sits at the stuck dialog forever) never exits, so plain
+# Test-Port-down relaunching is a no-op against it (there's already a process; launching another
+# doesn't help). If port 4001 is STILL down after $stuckThresholdMin (user-set to 2min, 2026-07-09
+# -- deliberately SHORTER than IBC's own 180s timeout, since that timeout doesn't recover on its
+# own anyway, so there's no benefit to waiting for it) while a live gateway process is confirmed
+# alive, force-kill it before relaunching -- same kill logic app.py's Restart button uses on
+# demand, now automatic; this re-issues a FRESH 2FA push each time (a new login attempt = a new
+# push), so a missed/expired push gets retried rather than leaving the account stuck waiting on
+# one that already lapsed. Applies equally whether the down-episode started organically or from
+# a manual Restart-button click -- this loop polls continuously regardless of what caused "port
+# down." Capped at $maxAutoKills (10, ~20min of retrying at this cadence) so a problem that ISN'T
+# the stuck-2FA case (e.g. a real credential/config error) doesn't retry forever; after the cap
+# it falls back to passive relaunch-only (today's behavior) until manually fixed.
 $mon = Start-Job -ScriptBlock {
     function Test-Port($p) {
         try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $p); $c.Close(); return $true }
@@ -87,8 +92,8 @@ $mon = Start-Job -ScriptBlock {
     }
     $stuckSince = $null
     $autoKillCount = 0
-    $stuckThresholdMin = 10
-    $maxAutoKills = 3
+    $stuckThresholdMin = 2
+    $maxAutoKills = 10
     while ($true) {
         if (Test-Port 4001) {
             $stuckSince = $null
