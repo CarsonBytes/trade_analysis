@@ -73,6 +73,83 @@ def sleeve_enabled() -> bool:
     return os.environ.get("SLEEVE_ENABLED", "").lower() in ("1", "true", "yes")
 
 
+# --- STAGED ROLLOUT (2026-07-09) --------------------------------------------------------
+# 8 of the 11 SLEEVE_UNIVERSE tickers have zero live-observed trades. Rather than go from
+# "3 backtested tickers" to "11 all at once" the instant an account crosses the equity gate,
+# widen the ACTIVE set in stages, tied to elapsed time since the sleeve first activated (not
+# since this code shipped -- an account already past the gate on day 1 still gets the same
+# staged ramp, not an instant jump to all 11). SLEEVE_UNIVERSE itself is untouched (still the
+# full 11 -- ib_exec's membership check and the research/backtest scripts need the complete
+# set); this only narrows which tickers NEW entries are taken on.
+SLEEVE_STAGE_2A = ["SPY", "QQQ", "XLK"]                       # immediate: the only 3 with
+                                                                # any backtest history pre-dating
+                                                                # 2026-07-09's extension
+SLEEVE_STAGE_2B_ADD = ["DIA", "IWM"]                           # +3 months: most liquid,
+                                                                # closest analogues to 2a
+SLEEVE_STAGE_2C_ADD = ["HYG", "EFA", "EEM", "VNQ", "PFF", "ASHR"]   # +6 months: the rest
+SLEEVE_STAGE_2B_MONTHS = 3.0
+SLEEVE_STAGE_2C_MONTHS = 6.0
+
+
+def _sleeve_first_active_ts() -> float | None:
+    """Unix ts of the first cycle sleeve_active(equity) was True. Written once, never
+    overwritten -- drives the staged rollout below, independent of when this code shipped."""
+    from dashboard.core import store
+    cached, _ = store.cache_get("sleeve_first_active_ts")
+    return float(cached) if cached else None
+
+
+def _record_first_active_if_needed() -> None:
+    from dashboard.core import store
+    import time as _time
+    if _sleeve_first_active_ts() is None:
+        store.cache_set("sleeve_first_active_ts", _time.time())
+        log.info("sleeve: first activation recorded -- staged rollout clock starts now "
+                 "(2a=%s now, 2b +%s at %.0fmo, 2c +%s at %.0fmo)",
+                 SLEEVE_STAGE_2A, SLEEVE_STAGE_2B_ADD, SLEEVE_STAGE_2B_MONTHS,
+                 SLEEVE_STAGE_2C_ADD, SLEEVE_STAGE_2C_MONTHS)
+
+
+SLEEVE_BREAKER_MIN_N = 5           # need at least this many closed trades before judging a
+                                    # ticker -- same "don't judge on noise" ethos as paper.stats()
+SLEEVE_BREAKER_MIN_WIN = 0.40
+SLEEVE_BREAKER_MIN_EXPR = 0.0
+
+
+def _ticker_breaker_tripped(ticker: str) -> str | None:
+    """Auto-remove a single ticker from new sleeve entries if ITS OWN live closed-trade
+    record turns bad (win% < SLEEVE_BREAKER_MIN_WIN or expR < SLEEVE_BREAKER_MIN_EXPR), once
+    there are enough trades to judge. Returns a reason string if tripped, else None. Does NOT
+    touch other tickers or the core book -- a bad live result on one satellite ticker doesn't
+    imply the others are bad too."""
+    rs = [t["realized_r"] for t in paper.all_trades()
+          if t["instrument"] == ticker and t["method"] == SLEEVE_METHOD
+          and t["status"] != "OPEN"]
+    if len(rs) < SLEEVE_BREAKER_MIN_N:
+        return None
+    s = paper.stats(rs)
+    if s["win_rate"] < SLEEVE_BREAKER_MIN_WIN or s["expectancy_R"] < SLEEVE_BREAKER_MIN_EXPR:
+        return (f"live win {s['win_rate']:.0%} / expR {s['expectancy_R']:+.3f} over "
+                f"{s['n']} closed trades")
+    return None
+
+
+def active_sleeve_universe() -> list[str]:
+    """The CURRENTLY tradeable subset of SLEEVE_UNIVERSE, per the staged rollout. Returns
+    just SLEEVE_STAGE_2A if the sleeve has never activated yet (harmless default -- nothing
+    calls this before checking sleeve_active() anyway)."""
+    first_ts = _sleeve_first_active_ts()
+    if first_ts is None:
+        return list(SLEEVE_STAGE_2A)
+    months = (dt.datetime.now(dt.timezone.utc).timestamp() - first_ts) / (30.44 * 86400)
+    uni = list(SLEEVE_STAGE_2A)
+    if months >= SLEEVE_STAGE_2B_MONTHS:
+        uni += SLEEVE_STAGE_2B_ADD
+    if months >= SLEEVE_STAGE_2C_MONTHS:
+        uni += SLEEVE_STAGE_2C_ADD
+    return uni
+
+
 def _load_daily(ticker: str) -> dict | None:
     """Daily OHLC + VIX + indicators, computed IDENTICALLY to the validated backtest
     (dipbuy_refine2.load()). Returns None on a data-fetch failure (caller skips this cycle)."""
@@ -180,11 +257,16 @@ def place_sleeve_signals(equity_usd: float | None) -> list[str]:
         return logs
     if not paper.sleeve_active(equity_usd):
         return logs
+    _record_first_active_if_needed()
     if _throttled("entries"):
         return logs
     now = dt.datetime.now(dt.timezone.utc)
-    for ticker in SLEEVE_UNIVERSE:
+    for ticker in active_sleeve_universe():
         if paper._has_open(ticker, SLEEVE_METHOD) or paper._recent_close(ticker):
+            continue
+        tripped = _ticker_breaker_tripped(ticker)
+        if tripped:
+            log.warning("sleeve: %s auto-removed from new entries -- %s", ticker, tripped)
             continue
         cand = entry_signal(ticker)
         if cand is None:

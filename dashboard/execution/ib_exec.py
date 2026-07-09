@@ -39,6 +39,11 @@ from dashboard.instruments import FUT_BY_KEY
 from dashboard.core.log import log
 
 MIRROR_METHOD = "ATR rr3.0"   # the one live variant we execute (same as MT5 exec)
+SLEEVE_MAX_SPREAD_PCT = 0.005  # 0.5% of mid -- skip a sleeve entry if the live bid-ask spread
+                               # is wider than this (VIX-panic spreads can blow out 5-10x vs a
+                               # normal liquid ETF's ~0.01-0.05%; 0.5% is a generous cap, not a
+                               # tight one). No historical intraday spread data exists to derive
+                               # a rolling per-ticker baseline, so this is a fixed absolute cap.
 
 
 # ---- paper guard (non-negotiable) ------------------------------------------
@@ -288,6 +293,29 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float) -> str | None:
         qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))
     if qty < 1:
         return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
+    # SPREAD-WIDENING GUARD (2026-07-09): the sleeve's whole thesis is entering during a VIX
+    # panic, exactly when ETF bid-ask spreads can blow out 5-10x -- filling a bracket's MARKET
+    # parent order into a wide spread means paying the worst possible price right when the
+    # signal fires. Backtests assume close-price fills (no spread cost modeled here at all),
+    # so this is a real, previously-uncovered execution risk, not just a refinement. Skip (not
+    # cancel -- the trade row stays OPEN/unmirrored so the next mirror_new() cycle retries) if
+    # the live spread is wider than SLEEVE_MAX_SPREAD_PCT of mid price. Logged either way for
+    # audit ("skipped due to spread" is itself useful information, not just silence).
+    tick = ib_client.get_stock_tick(t["instrument"])
+    if tick and tick.get("mid"):
+        spread_pct = tick["spread"] / tick["mid"] if tick["mid"] else 0.0
+        if spread_pct > SLEEVE_MAX_SPREAD_PCT:
+            log.warning("ib_exec: sleeve #%s %s SKIPPED, spread %.2f%% > cap %.2f%% "
+                        "(bid %.2f / ask %.2f)", t.get("id"), t["instrument"],
+                        spread_pct * 100, SLEEVE_MAX_SPREAD_PCT * 100,
+                        tick["bid"], tick["ask"])
+            return (f"{t['instrument']}: spread {spread_pct:.2%} > cap "
+                    f"{SLEEVE_MAX_SPREAD_PCT:.2%} (bid {tick['bid']:.2f}/ask {tick['ask']:.2f}), "
+                    "SKIP for now, retry next cycle")
+    # tick is None (no real-time market-data subscription, or a transient fetch failure) ->
+    # deliberately fall through and place the order anyway, matching how the rest of this
+    # codebase treats missing live quotes elsewhere -- a permanent block on every missing-quote
+    # cycle would silently starve the sleeve of all its trades on a delayed-data account.
     action = "BUY"                                       # sleeve is long-only
     risk_money = equity_usd * risk_pct
     tp_px = round(float(t["tp"]), 2)

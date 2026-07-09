@@ -641,6 +641,57 @@ caveat: don't assume the last decade's numbers are the steady-state.
   rejected (OOS ratio got worse in both cases). Not re-tested.
 No code deployed to the live/paper systems from this entry -- pure validation/audit work.
 
+### ⭐⭐⭐ BUILT 2026-07-09: staged sleeve rollout, spread guard, SPY benchmark, monthly attribution
+Four items from the "改进建议" critique review, all genuinely buildable (not backtest questions):
+
+**(4) Staged sleeve rollout** (`dashboard/core/sleeve.py`). 8 of 11 `SLEEVE_UNIVERSE` tickers have
+zero live-observed trades -- rather than jump straight to all 11 the instant an account crosses
+the equity gate, `active_sleeve_universe()` widens in stages tied to elapsed time since the
+sleeve FIRST activated (`_sleeve_first_active_ts`, written once via `_record_first_active_if_needed`,
+never overwritten -- an account already past the gate on day 1 still gets the same ramp, not an
+instant jump): Stage 2a (SPY/QQQ/XLK) immediately, +DIA/IWM at 3mo, +HYG/EFA/EEM/VNQ/PFF/ASHR at
+6mo. `SLEEVE_UNIVERSE` itself is untouched (ib_exec's membership check + research scripts need
+the full 11) -- this only narrows which tickers NEW entries fire on. Also added a PER-TICKER
+circuit breaker (`_ticker_breaker_tripped`): auto-removes a single ticker from new entries if its
+OWN live closed-trade record shows win<40% or expR<0 once n>=5 closed trades exist -- doesn't
+touch other tickers or the core book, a bad result on one satellite doesn't imply the others are.
+
+**(8) Spread-widening guard** (`dashboard/execution/ib_exec.py`, `_place_sleeve_bracket`). The
+sleeve's whole thesis is entering during a VIX panic -- exactly when ETF bid-ask spreads can blow
+out 5-10x, and the backtest assumes close-price fills with NO spread cost modeled at all. Added
+`ib_client.get_stock_tick()` (new function, mirrors the existing futures-only `get_tick()` but for
+SMART-routed stocks -- careful about `_LOCK` non-reentrancy, does its own inline qualify rather
+than calling `stock_contract()` which takes the lock itself) and a `SLEEVE_MAX_SPREAD_PCT=0.5%`
+cap: skip (not cancel -- trade stays unmirrored, retries next cycle) if live spread/mid exceeds
+it. Falls through and places the order if no live quote is available (a permanent block on every
+missing-quote cycle would silently starve the sleeve on a delayed-data account) -- logged either
+way for audit.
+
+**(5) SPY benchmark comparison** (`app.py` + `service.py`). New "vs SPY / excess" line under the
+Portfolio panel's P&L headline card -- your % return vs. buy-and-hold SPY over the SAME tracking
+window. `base_px` (SPY price at the account's own tracking-start date) is a one-time historical
+lookup cached forever (re-fetched only if the tracking-start date itself changes); `cur_px`
+refreshes on the same ~4h cadence as `tbill_rate`. **Bug caught during verification**: first
+version compared a tz-aware Python datetime against yfinance's tz-naive daily index --
+"Invalid comparison between dtype=datetime64 and datetime" on every cycle, silently logged as a
+DEBUG line, UI just never showed the row. Fixed by stripping tz from both sides before comparing.
+Verified live on both dashboards after the fix: paper "vs SPY +2.03% / excess −1.33%", live
+"vs SPY +0.45% / excess −0.45%".
+
+**(6) Monthly attribution table** (`app.py`, `retrospective_panel()`). Breaks monthly $ P&L into
+trend-strategy / sleeve / other. Trend and sleeve are computed from CLOSED trades'
+`realized_r * risk_money` (risk_money is the ACTUAL dollar risk sized at execution time, read
+from `ib_mirror`/`mt5_mirror` -- exact even if `RISK_PER_TRADE` changed between trades, not
+re-derived). **"Other" is a deliberate residual** (total month-over-month change on the
+deposit-adjusted equity curve, minus trend, minus sleeve) -- there's no historical `AccruedCash`
+time series stored anywhere to compute cash-interest contribution directly, so labeling the gap
+"other" is the honest choice over fabricating a precise-looking number. Whole table in USD (risk
+sizing is natively USD; the equity curve converts from the account's base currency via the same
+HKD peg used elsewhere). Verified rendering on paper with real month rows (2026-06, 2026-07).
+
+All four compiled clean, redeployed to both dashboards, verified live (not just compiled) after
+catching and fixing the SPY-benchmark timezone bug.
+
 ### ⭐⭐ BUILT 2026-07-09: panic-MR dip sleeve extended 3 → 11 tickers, DEPLOYED to paper
 User asked for a "1 trade/day, 0.5% risk, closes within days" opportunistic sleeve. Rather than a
 new mechanism, re-tested the ALREADY-VALIDATED panic-MR dip-buy signal (close<20MA*0.975, VIX

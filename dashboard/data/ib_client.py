@@ -330,6 +330,38 @@ def get_tick(spec: FutureSpec) -> dict | None:
                 "spread": ask - bid, "time": pd.Timestamp.now(tz="UTC"), "age_sec": 0.0}
 
 
+def get_stock_tick(symbol: str, currency: str = "USD") -> dict | None:
+    """Latest ETF/stock quote: bid/ask/mid/spread. Mirrors get_tick() but for the
+    SMART-routed Stock contract, not a future. Needs a real-time market-data
+    subscription; returns None on delayed/empty/no-connection.
+    NOTE: does its own inline qualify (not stock_contract()) since that function
+    takes _LOCK itself -- _LOCK is a plain, non-reentrant threading.Lock."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+        ib_async = _mod()
+        c = ib_async.Stock(symbol, "SMART", currency)
+        try:
+            _run(ib.qualifyContractsAsync(c))
+        except Exception as e:                         # noqa: BLE001
+            log.info("ib_client: qualify Stock(%s) failed: %s", symbol, e)
+            return None
+        if not getattr(c, "conId", 0):
+            return None
+        try:
+            tickers = _run(ib.reqTickersAsync(c), timeout=6)
+        except Exception:                              # noqa: BLE001
+            return None
+        t = tickers[0] if tickers else None
+        bid, ask = getattr(t, "bid", None), getattr(t, "ask", None)
+        if not bid or not ask or bid != bid or ask != ask:   # None / NaN
+            return None
+        bid, ask = float(bid), float(ask)
+        return {"bid": bid, "ask": ask, "mid": (bid + ask) / 2,
+                "spread": ask - bid, "time": pd.Timestamp.now(tz="UTC"), "age_sec": 0.0}
+
+
 # ---- account guard data (used by ib_exec, see §4 of IBKR_SCOPE.md) ---------
 
 def account_id() -> str | None:

@@ -256,6 +256,44 @@ def refresh_cheap() -> None:
             STATE["tbill_rate"] = cached[1]
     except Exception as e:
         log.debug("tbill_rate fetch error: %s", e)
+    # SPY benchmark: "am I beating the market" comparison. base_px is a ONE-TIME historical
+    # lookup keyed to the account's own tracking-start date (base0_ts from equity_history) --
+    # cached forever unless that start date itself changes (a fresh reset). cur_px refreshes
+    # on the same ~4h cadence as tbill_rate (no need for anything faster -- a daily-signal
+    # strategy doesn't need an intraday-fresh benchmark).
+    try:
+        hist, _ = store.cache_get("equity_history")
+        if hist:
+            import time as _t4
+            base0_ts = hist[0][0]
+            cached_spy, _ = store.cache_get("spy_benchmark")
+            need_base = not cached_spy or cached_spy.get("base0_ts") != base0_ts
+            need_cur = not cached_spy or (_t4.time() - cached_spy.get("cur_ts", 0)) > 14400
+            if need_base or need_cur:
+                import yfinance as yf
+                import pandas as pd
+                spy = yf.download("SPY", period="max", interval="1d", progress=False,
+                                  auto_adjust=True)["Close"].dropna()
+                if hasattr(spy, "columns"):
+                    spy = spy.iloc[:, 0]
+                # yfinance's daily index is tz-naive -- strip tz from base_dt too, else
+                # pandas raises "Invalid comparison between dtype=datetime64 and datetime".
+                base_dt = pd.Timestamp(dt.datetime.fromtimestamp(base0_ts, dt.timezone.utc)
+                                        .replace(tzinfo=None))
+                idx = spy.index.tz_localize(None) if spy.index.tz is not None else spy.index
+                on_or_before = spy[idx <= base_dt]     # dates ascending -> last row = closest
+                base_px = float(on_or_before.iloc[-1]) if need_base and len(on_or_before) \
+                    else (cached_spy or {}).get("base_px")
+                cur_px = float(spy.iloc[-1])
+                if base_px:
+                    store.cache_set("spy_benchmark", {"base0_ts": base0_ts, "base_px": base_px,
+                                                       "cur_px": cur_px, "cur_ts": _t4.time()})
+                    STATE["spy_benchmark"] = {"base_px": base_px, "cur_px": cur_px}
+            else:
+                STATE["spy_benchmark"] = {"base_px": cached_spy["base_px"],
+                                          "cur_px": cached_spy["cur_px"]}
+    except Exception as e:
+        log.debug("spy_benchmark fetch error: %s", e)
     # SGOV-value history for the dashboard chart (throttled ~10min, same cadence as equity)
     try:
         sv = (STATE.get("cash_sweep") or {}).get("sgov_value_base")
@@ -280,6 +318,7 @@ def refresh_cheap() -> None:
                 "account": STATE.get("account"), "positions": STATE.get("positions"),
                 "cash_sweep": STATE.get("cash_sweep"), "fx_usd": STATE.get("fx_usd"),
                 "tbill_rate": STATE.get("tbill_rate"),
+                "spy_benchmark": STATE.get("spy_benchmark"),
                 "broker_name": STATE.get("broker_name"),
                 "broker_conn": STATE.get("broker_conn")})
     except Exception as e:
@@ -342,8 +381,8 @@ def restore_cache() -> None:
     # portfolio snapshot: only fill keys the live refresh hasn't populated yet
     snap, _sts = store.cache_get("portfolio_snapshot")
     if snap:
-        for k in ("account", "cash_sweep", "fx_usd", "tbill_rate", "broker_name",
-                  "broker_conn"):
+        for k in ("account", "cash_sweep", "fx_usd", "tbill_rate", "spy_benchmark",
+                  "broker_name", "broker_conn"):
             if snap.get(k) is not None and not STATE.get(k):
                 STATE[k] = snap[k]
         pos = snap.get("positions")

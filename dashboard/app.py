@@ -578,6 +578,66 @@ def _deposit_adjusted(hist: list, flows: list | None) -> list[float]:
     return out
 
 
+def _monthly_attribution() -> list[dict]:
+    """Monthly $ breakdown: trend-strategy / sleeve / other. Trend and sleeve are computed
+    from CLOSED trades' realized_r * risk_money (risk_money is the ACTUAL dollar risk sized
+    at execution time, read from ib_mirror/mt5_mirror -- not re-derived, so it's exact even
+    if RISK_PER_TRADE changed between trades). 'Other' is a deliberate RESIDUAL against the
+    deposit-adjusted equity curve (total month-over-month change minus trend minus sleeve),
+    not a separately-modeled cash-interest number -- there's no historical AccruedCash time
+    series stored anywhere to compute that directly, so labeling the gap 'other' is the
+    honest choice over fabricating a precise-looking cash figure. Whole table in USD (trend/
+    sleeve $ are natively USD from risk sizing; the equity curve is converted from the
+    account's base currency via the same HKD peg used elsewhere)."""
+    from dashboard.core import paper, store, sleeve
+    from dashboard.execution import broker as _bk
+    from dashboard.data import ib_client
+    trades = paper.all_trades()
+    closed = [t for t in trades if t["status"] != "OPEN" and t.get("exit_ts")]
+    with paper._LOCK, paper._conn() as c:
+        mirror_rows = c.execute(f"SELECT paper_id, risk_money FROM {_bk.mirror_table()}").fetchall()
+    risk_by_id = dict(mirror_rows)
+
+    buckets: dict[str, dict] = {}
+    for t in closed:
+        risk_money = risk_by_id.get(t["id"])
+        if risk_money is None:
+            continue
+        month = t["exit_ts"][:7]
+        b = buckets.setdefault(month, {"trend": 0.0, "sleeve": 0.0})
+        dollar_pnl = t["realized_r"] * risk_money
+        if t["method"] == sleeve.SLEEVE_METHOD:
+            b["sleeve"] += dollar_pnl
+        else:
+            b["trend"] += dollar_pnl
+
+    hist, _ts = store.cache_get("equity_history")
+    flows, _fts = store.cache_get("cash_flows")
+    hist = hist or []
+    if not hist:
+        return []
+    ccy = hist[0][2] if len(hist[0]) > 2 else "USD"
+    usd_per_ccy = ib_client._PEG_USD_PER.get(ccy, 1.0)
+    adj = _deposit_adjusted(hist, flows)
+    month_end_usd: dict[str, float] = {}
+    for (ts, _v, _c), av in zip(hist, adj):
+        m = dt.datetime.fromtimestamp(ts).strftime("%Y-%m")
+        month_end_usd[m] = av * usd_per_ccy   # last write per month wins (hist is ascending)
+
+    months = sorted(set(list(buckets.keys()) + list(month_end_usd.keys())))
+    out, prev_val = [], None
+    for m in months:
+        b = buckets.get(m, {"trend": 0.0, "sleeve": 0.0})
+        cur_val = month_end_usd.get(m)
+        total = (cur_val - prev_val) if (cur_val is not None and prev_val is not None) else None
+        other = (total - b["trend"] - b["sleeve"]) if total is not None else None
+        out.append({"month": m, "trend": b["trend"], "sleeve": b["sleeve"],
+                    "total": total, "other": other})
+        if cur_val is not None:
+            prev_val = cur_val
+    return out
+
+
 @ui.refreshable
 def portfolio_panel() -> None:
     """IBKR portfolio overview in the account base currency (HKD): total value,
@@ -661,6 +721,18 @@ def portfolio_panel() -> None:
             "text-3xl font-bold " + ("text-green" if total_pl >= 0 else "text-red"))
         ui.label("Total trading P&L since tracking began — excludes deposits/withdrawals, "
                  "includes both open and closed trades").classes("text-xs text-grey-6")
+        _spy = service.STATE.get("spy_benchmark")
+        if _spy and _spy.get("base_px"):
+            spy_pct = (_spy["cur_px"] / _spy["base_px"] - 1.0) * 100.0
+            excess = pct - spy_pct
+            with ui.row().classes("items-center gap-2 mt-1"):
+                ui.label(f"vs SPY {spy_pct:+.2f}%").classes("text-xs text-grey-7")
+                ui.label(f"excess {excess:+.2f}%").classes(
+                    "text-xs font-bold " + ("text-green" if excess >= 0 else "text-red"))\
+                    .tooltip("Your % return vs. buy-and-hold SPY over the SAME tracking "
+                             "window — the honest 'is this strategy earning its keep' check. "
+                             "SPY return is unweighted/undiversified for comparison purposes "
+                             "only, not a claim the account should hold 100% SPY.")
 
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         _stat("Total value", _money(nl), "text-grey-9",
@@ -1104,6 +1176,29 @@ def retrospective_panel() -> None:
     else:
         ui.label("No closed trades yet — the equity curve appears as trades settle.")\
             .classes("text-sm text-grey")
+
+    # monthly attribution: where did the P&L actually come from
+    with ui.row().classes("items-center gap-2 mt-4"):
+        ui.label("Monthly attribution (USD)").classes("text-sm font-bold")
+        ui.label("trend strategy vs. sleeve vs. other (cash interest + untracked, a "
+                 "residual — not separately modeled)").classes("text-xs text-grey-6")
+    attrib = _monthly_attribution()
+    if attrib:
+        rows = [{"month": a["month"],
+                 "trend": f"{a['trend']:+,.0f}", "sleeve": f"{a['sleeve']:+,.0f}",
+                 "other": f"{a['other']:+,.0f}" if a["other"] is not None else "—",
+                 "total": f"{a['total']:+,.0f}" if a["total"] is not None else "—"}
+                for a in reversed(attrib)]   # most recent month first
+        ui.table(rows=rows,
+                 columns=[{"name": "month", "label": "month", "field": "month", "align": "left"},
+                          {"name": "trend", "label": "trend $", "field": "trend", "align": "right"},
+                          {"name": "sleeve", "label": "sleeve $", "field": "sleeve", "align": "right"},
+                          {"name": "other", "label": "other $", "field": "other", "align": "right"},
+                          {"name": "total", "label": "total $", "field": "total", "align": "right"}])\
+            .classes("w-full").props("dense")
+    else:
+        ui.label("No closed trades / equity history yet — attribution appears once trades "
+                 "settle.").classes("text-sm text-grey")
 
     # constraint scorecard
     with ui.row().classes("items-center gap-2 mt-2"):
