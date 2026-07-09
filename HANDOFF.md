@@ -583,6 +583,64 @@ losing on, with zero diversification benefit (vs. the dip sleeve's counter-trend
 genuinely different risk driver). Same failure signature as the naive all-22 dip-buy extension,
 without the redeeming upside. **Not adopted, no code changes made.**
 
+### 🔬 BUILT & TESTED 2026-07-09: parameter sensitivity sweep + walk-forward validation
+User submitted two critique documents; most of their points either repeated already-settled
+questions or contained factual errors (see below), but two were genuinely new, valuable, and
+untested in this project: parameter robustness and temporal (regime) stability. Built both as
+permanent tools in `dashboard/research/`.
+
+**`param_sensitivity.py`** -- one-at-a-time ±20% perturbation of the 4 main tunable parameters
+(`SL_ATR_MULT`, `RR_DEFAULT`, `HORIZON_DAYS`, `OVEREXT_HI/LO`), holding all else at the live
+baseline (22-ETF book, `--pos-cap 0.25`):
+| Parameter | −20% | baseline | +20% |
+|---|---|---|---|
+| SL_ATR_MULT | 0.486 | **0.543** | 0.483 |
+| RR_DEFAULT | 0.502 | **0.543** | 0.518 |
+| HORIZON_DAYS | 0.389 | **0.543** | 0.481 |
+| OVEREXT band | 0.507 | **0.543** | 0.393 |
+(ratio = |CAGR/maxDD|). No collapse toward zero anywhere -- real evidence against overfitting.
+HORIZON_DAYS and the RSI OVEREXT band are the most sensitive (baseline happens to be the local
+best on both) but even their worst case is only ~28% below baseline, not a collapse.
+
+**`walk_forward.py`** -- 6 rolling ~5y windows across the full 30.3y span (not a true ML
+walk-forward, since the strategy has fixed hand-set parameters with no fitting step -- this
+checks TEMPORAL stability instead, i.e. is the edge concentrated in one lucky period):
+| Window | CAGR | expR | Win% |
+|---|---|---|---|
+| 1996-2001 | +1.23% | +0.324 | 43% |
+| 2001-2006 | **−0.43%** | **−0.118** | 35% |
+| 2006-2011 | +4.58% | +0.290 | 46% |
+| 2011-2016 | +3.38% | +0.148 | 42% |
+| 2016-2021 | +11.02% | +0.445 | 51% |
+| 2021-2026 | +12.13% | +0.376 | 48% |
+5/6 windows profitable (expR positive), but ratio std (0.684) EXCEEDS its own mean (0.877) --
+a wider spread than the critique's own example of "regime-dependent" (0.9±0.5), not the
+"narrow, strong robustness" (0.9±0.15) outcome. Honest read: the edge is real and has held up
+across most of 30 years, but is meaningfully weaker in 1996-2011 (mostly the +1 to +4.6% CAGR
+range, one outright negative window) than 2016-2026 (+11-12% CAGR) -- consistent with the
+already-documented recent-regime bull-flattering pattern (see the "~4-7%/33y vs ~10%/13y" note
+earlier in this doc). Not a red flag on its own (5/6 positive is a real pass), but a legitimate
+caveat: don't assume the last decade's numbers are the steady-state.
+
+**Fact-check on the accompanying critique (both documents), errors found:**
+- "开通 Currency Conversion 权限（不是 Leveraged Forex）" -- **backwards**. The user's own IBKR
+  screenshot confirmed Currency Conversion is already enabled; Leveraged Forex is the actual
+  gap. Following this literally would fix nothing.
+- "账户仅~$13k" -- wrong, live account is HKD 10,040 ≈ $1,287. The "manually buy $2-5k SGOV"
+  suggestion built on this is larger than the whole account.
+- "提高风险至2%，CAGR+15-20%，DD-19.8%" -- verified false at the actual deployed
+  `ETF_POS_CAP=0.25`: 2% vs 1% risk gives CAGR +6.1% vs +6.0%, DD −11.1% vs −11.1%, essentially
+  no change (the cap saturates first). Ran directly to check, not assumed.
+- "批次7-9零采纳，ETF已饱和" -- stale, unaware of today's batch-10 ASHR adoption.
+- "19/22...(18/22)" fundable count -- self-contradictory within the same sentence; verified
+  actual is 19/22.
+- "套筒15%权重" -- conflates the backtest blending-analysis parameter with a real settable
+  config value (already clarified with the user separately).
+- "#9 per-ETF weighted risk allocation" (weight by historical win-rate/expectancy) -- same
+  category as class-weight tilt and conviction-sizing, BOTH already tested this session and
+  rejected (OOS ratio got worse in both cases). Not re-tested.
+No code deployed to the live/paper systems from this entry -- pure validation/audit work.
+
 ### ⭐⭐ BUILT 2026-07-09: panic-MR dip sleeve extended 3 → 11 tickers, DEPLOYED to paper
 User asked for a "1 trade/day, 0.5% risk, closes within days" opportunistic sleeve. Rather than a
 new mechanism, re-tested the ALREADY-VALIDATED panic-MR dip-buy signal (close<20MA*0.975, VIX
