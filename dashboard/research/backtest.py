@@ -52,6 +52,15 @@ POS_CAP: float | None = None     # --pos-cap: max per-position NOTIONAL as a fra
                                  # full-risk notional exceeds the cap (models a small-account limit).
 CASH_YIELD = None                # --cash-yield: annualised rate Series (decimal) by date;
                                  # credits idle (un-deployed) equity = execution-layer realism
+MARGIN_DEBIT_RATE = 0.055         # FIXED 2026-07-09: when deployed notional exceeds equity
+                                  # (dep > equity -- routine under ETF_POS_CAP=0.25 + 1% risk
+                                  # once several positions are open at once, not an edge case;
+                                  # confirmed on the live paper book at 127% deployed), the OLD
+                                  # code floored "idle" at 0 and charged NOTHING for the excess
+                                  # -- every prior "--cash-yield" blended CAGR in this project
+                                  # was overstated by ignoring a real, recurring margin-interest
+                                  # cost. Same 5.5% rate as app.py's MARGIN_DEBIT_RATE (matches
+                                  # the live dashboard's Projected-interest fix, 2026-07-09).
 PULLBACK: bool = False           # --pullback: don't enter on the breakout bar; wait up to
 PULLBACK_WAIT = 2                # ..PULLBACK_WAIT bars for price to retrace within PULLBACK_BAND
 PULLBACK_BAND = 0.02             # ..of the 20wk MA (trend intact, better entry); else skip signal
@@ -363,10 +372,14 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
     paused = False
     for c in cands:
         if CASH_YIELD is not None and last_t[0] is not None:   # accrue idle-cash interest
+                                                                # OR margin-debit cost
             d = (c["entry_date"] - last_t[0]).days
             if d > 0:
-                idle = max(equity - dep[0], 0.0)
-                equity += idle * _rate(last_t[0]) * d / 365.0
+                idle = equity - dep[0]           # negative when notional deployed > equity
+                if idle >= 0:
+                    equity += idle * _rate(last_t[0]) * d / 365.0
+                else:
+                    equity += idle * MARGIN_DEBIT_RATE * d / 365.0   # idle<0 -> this SUBTRACTS
                 eq_points.append((c["entry_date"], equity))
             last_t[0] = c["entry_date"]
         _close_due(c["entry_date"])

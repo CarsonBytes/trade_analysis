@@ -87,11 +87,36 @@ this doc for why).
 | **+ dip sleeve @10% weight** | +11.96% | −9.5% | 1.26 | +16.63% | −9.5% |
 | **+ dip sleeve @15% weight** | +13.78% | −9.8% | 1.26 | +18.39% | −9.8% |
 
-**This is the current honest number to plan around** — 10-15% sleeve weight is the sweet spot
-(20%+ starts trading Sharpe for CAGR again, see the sleeve-extension entry below). The sleeve
-piece is PAPER-ONLY and backtested-only so far — zero live-observed trades yet on the 8 newly
-added tickers (DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR); don't treat it as confirmed until it's actually
-traded a few real cycles. Core-only (no sleeve) remains what's live on both books today.
+The sleeve piece is PAPER-ONLY and backtested-only so far — zero live-observed trades yet on the
+8 newly added tickers (DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR); don't treat it as confirmed until it's
+actually traded a few real cycles. Core-only (no sleeve) remains what's live on both books today.
+
+**⚠️ CORRECTED 2026-07-09 (same day) — the table above understated cost.** User asked "if cash
+stays negative, does that hurt the account (margin interest)?" while looking at paper's
+Projected-interest stat (verified correct: −HKD 1,265/mo on a −HKD 276,104 cash balance, 7
+concurrent positions at 127% deployed notional). That question led to checking whether the
+BACKTEST models this cost -- it didn't: `_portfolio()`'s idle-cash accrual (`--cash-yield`) did
+`idle = max(equity - dep[0], 0.0)`, flooring at zero, so it credited interest on positive idle
+cash but charged NOTHING when deployed notional exceeds equity (`dep[0] > equity`) -- which is
+ROUTINE under `ETF_POS_CAP=0.25` + 1% risk once several positions are open at once (confirmed:
+paper is at 127% deployed right now), not an edge case. **Every prior `--cash-yield` blended
+CAGR figure in this project was overstated.** Fixed: added `MARGIN_DEBIT_RATE=0.055` (matches
+`app.py`'s live dashboard rate) and charge it on the excess when `dep[0] > equity`. Re-verified
+the table above with the fix:
+
+| | Full CAGR | Full maxDD | Sharpe |
+|---|---|---|---|
+| Core only (before fix) | +8.28% | −9.6% | 1.00 |
+| **Core only (after fix)** | **+7.14%** | **−11.3%** | **0.89** |
+| +sleeve@10% (before fix) | +11.96% | −9.5% | 1.26 |
+| **+sleeve@10% (after fix)** | **+10.78%** | **−10.8%** | **1.16** |
+| +sleeve@15% (before fix) | +13.78% | −9.8% | 1.26 |
+| **+sleeve@15% (after fix)** | **+12.58%** | **−11.1%** | **1.17** |
+
+Roughly 1-1.4pp lower CAGR and 1-1.7pp worse DD across every scenario. The sleeve's qualitative
+conclusion survives (Sharpe still improves 0.89→1.16-1.17 at 10-15% weight) -- **this is the
+current honest number to plan around**, not the table above it. 10-15% sleeve weight remains the
+sweet spot (same shape, just uniformly worse than previously stated).
 
 **Two phases, auto-switched by equity** (`paper.account_phase()` / `sleeve_active()`, threshold
 `PHASE2_NAV_USD`=$64k ≈ 500K HKD; UI shows a Phase badge):
