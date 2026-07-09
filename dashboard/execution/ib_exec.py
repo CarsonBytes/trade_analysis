@@ -123,7 +123,7 @@ def mirror_new() -> list[str]:
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
                 continue
-            msg = _place_sleeve_bracket(ib, t, equity)                  # sleeve (SPY/QQQ/XLK)
+            msg = _place_sleeve_bracket(ib, t, equity)                  # sleeve (see sleeve.SLEEVE_UNIVERSE)
         elif t["method"] == MIRROR_METHOD:
             spec = contracts.SPECS.get(t["instrument"])
             if spec is not None:

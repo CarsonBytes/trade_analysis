@@ -103,7 +103,8 @@ LONG_ONLY = _os.environ.get("BROKER", "mt5").lower() == "ib"
 
 # --- account PHASE (auto-switch by equity) ----------------------------------------
 # Phase 1 (<PHASE2_NAV_USD): core 17-ETF only, 1% risk + 25% notional cap.
-# Phase 2 (>=PHASE2_NAV_USD): core + the panic-MR dip sleeve (SPY/QQQ/XLK). Same cap/risk.
+# Phase 2 (>=PHASE2_NAV_USD): core + the panic-MR dip sleeve (11-ticker set, see
+# dashboard.core.sleeve.SLEEVE_UNIVERSE). Same cap/risk.
 # (Phase 3 / cap-loosening was REJECTED -- pure leverage, worse ratio, trips the DD tripwire.)
 # The sleeve's ORDER EXECUTION is a separate build; sleeve_active() is the gate it plugs into,
 # so it turns on AUTOMATICALLY when the account crosses the threshold -- no manual step.

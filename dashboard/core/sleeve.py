@@ -3,7 +3,19 @@ SLEEVE SPEC"). Signal math replicated EXACTLY from the validated backtest
 (dashboard/research/dipbuy_refine2.py) so the live version is provably the same strategy that
 was backtested, not a similar-looking variant.
 
-Universe: SPY, QQQ, XLK (no IWM -- weakest edge, dropped in research).
+Universe: SPY, QQQ, XLK, DIA, IWM, HYG, EFA, EEM, VNQ, PFF, ASHR (11 tickers, EXTENDED
+2026-07-09 from the original SPY/QQQ/XLK-only scope). Re-tested the exact signal below against
+all 22 currently-held core ETFs: a naive "all 22" extension raised CAGR but blew out tail risk at
+higher weight (correlated dip-buy entries firing together during the SAME systemic panic that
+triggers the VIX-spike condition -- the opposite of the diversification benefit breadth gives the
+core trend book). This 11-ticker set is a SELECTIVE subset -- kept only tickers clearing meanR
+>=0.7% at n>=20 in that re-test (dropped CPER/DBC negative edge; GLD/TLT/TIP/CWB/VNQI/AMLP/HYD/
+SHY/IEF weak or too-thin). Blended into the core book at 10% weight: CAGR +7.91%->+11.58%, maxDD
+-11.2%->-10.4%, Sharpe 1.05->1.32 -- better on every metric than both the original 3-ticker scope
+AND the naive all-22 version. NOTE: IWM's inclusion updates an earlier note ("no IWM -- weakest
+edge") from an earlier research round -- this re-test, run against the CURRENT exact production
+signal spec, shows genuine edge (n=83, meanR +0.80%, win 72%) at a comparable tier to DIA. See
+HANDOFF for the full comparison table.
 Entry (ALL, daily close): close < 20dMA*0.975  AND  VIX/VIX[-5] - 1 > 0.15  AND  RSI14 < 35
                            AND ADX14 > 20.
 Size: 0.5% risk base, 1.0% at VIX>30 (hard cap 1%) -- risk_pct stored in entry_facts so
@@ -29,10 +41,10 @@ import pandas as pd
 from dashboard.core.log import log
 from dashboard.core import paper
 
-SLEEVE_UNIVERSE = ["SPY", "QQQ", "XLK"]
+SLEEVE_UNIVERSE = ["SPY", "QQQ", "XLK", "DIA", "IWM", "HYG", "EFA", "EEM", "VNQ", "PFF", "ASHR"]
 SLEEVE_METHOD = "dipbuy-sleeve"
 # Signal is DAILY-bar based; the app's cheap-refresh runs every ~1min by default, but
-# re-fetching yfinance for 3 tickers that often is wasteful and pointless (the underlying
+# re-fetching yfinance for 11 tickers that often is wasteful and pointless (the underlying
 # daily bar hasn't changed). Throttle to once per CHECK_INTERVAL_MIN; in-memory only (resets
 # on restart -- harmless, just means one extra check right after a restart).
 CHECK_INTERVAL_MIN = 60

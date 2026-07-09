@@ -540,6 +540,62 @@ continuously regardless of what caused "port down" -- no separate button-side lo
 Restarted both tasks; verified both dashboards reconnected (`acct DUK968178 ●` / `acct
 U12991898 ●`) on the new thresholds.
 
+### ⭐⭐ BUILT 2026-07-09: panic-MR dip sleeve extended 3 → 11 tickers, DEPLOYED to paper
+User asked for a "1 trade/day, 0.5% risk, closes within days" opportunistic sleeve. Rather than a
+new mechanism, re-tested the ALREADY-VALIDATED panic-MR dip-buy signal (close<20MA*0.975, VIX
+up>15%/5d, RSI14<35, ADX>20) across broader scopes, since it's the one surviving short-hold idea
+in this project (options lottery/short-vol/earnings-vol-crush/stat-arb pairs/sector-rotation MR
+all previously rejected -- see the "External/alt-data" section above for the full graveyard).
+
+**Scope test (blended into the core 22-ETF book, 33.4y, 0.5% base risk):**
+| | Core only | Current (SPY/QQQ/XLK) @10% | Naive ALL-22 @10% | **Selective 11 @10%** |
+|---|---|---|---|---|
+| CAGR | +7.91% | +9.68% | +11.16% | **+11.58%** |
+| Max DD | −11.2% | −9.7% | −11.5% | −10.4% |
+| Sharpe | 1.05 | 1.25 | 1.28 | **1.32** |
+
+Naive "all 22" looked good at 10% but its drawdown blows out to **−15.8% at 15% weight** (current
+scope: still −9.6% at 15%) -- broadening across correlated ETFs means the VIX-spike trigger fires
+MANY of them simultaneously during the SAME systemic panic, concentrating risk exactly when the
+core book is already stressed (the opposite of the diversification benefit breadth gives the core
+trend book). Built a SELECTIVE subset instead -- kept only tickers clearing meanR>=0.7% at n>=20
+in the per-ticker re-test, dropped the rest:
+
+| Ticker | n | meanR | | Ticker | n | meanR | | Dropped (weak/negative/thin) |
+|---|---|---|---|---|---|---|---|---|
+| QQQ | 87 | +2.16% | | HYG | 30 | +1.29% | | CPER −0.04%, DBC −0.65% (negative) |
+| EEM | 66 | +2.17% | | VNQ | 59 | +1.11% | | GLD +0.03%, TLT +0.05% (~zero) |
+| SPY | 98 | +1.40% | | ASHR | 23 | +1.10% | | TIP n=8, IEF n=5 (too thin) |
+| EFA | 72 | +1.27% | | PFF | 44 | +0.98% | | CWB +0.17%, VNQI +0.47%, AMLP +0.59%, |
+| DIA | 78 | +0.88% | | IWM | 83 | +0.80% | | HYD n=13 (weak/thin) |
+
+**Selective-11 stays stable further out too** (15%: +13.39%/−10.7%/Sh1.29; 20%: +15.19%/−12.6%/
+Sh1.23) before it starts trading Sharpe for CAGR the same way, just at a higher weight threshold
+than the naive version -- **10-15% weight is the sweet spot**, matching a small opportunistic
+allocation rather than a large reallocation.
+
+**NOTE on IWM:** an earlier research round (`dipbuy_refine.py`, 2026-06-29) dropped IWM citing
+"weakest edge." This fresh re-test, run against the CURRENT exact production signal spec (which
+may differ from that earlier draft), shows genuine edge (n=83, meanR +0.80%, win 72%, comparable
+tier to DIA) -- re-included based on this direct measurement against the live spec, which
+supersedes the earlier note.
+
+**Implemented:** `dashboard/core/sleeve.py`'s `SLEEVE_UNIVERSE` extended from `["SPY","QQQ","XLK"]`
+to `["SPY","QQQ","XLK","DIA","IWM","HYG","EFA","EEM","VNQ","PFF","ASHR"]` (11 tickers). No other
+code changes needed -- `ib_exec.py`'s order-placement path and `_place_sleeve_bracket` already
+reference `sleeve.SLEEVE_UNIVERSE` dynamically (not a hardcoded copy), and `_load_daily`/
+`entry_signal`/`should_exit_dynamic` are all already ticker-generic. Updated stale comments in
+`paper.py` and `ib_exec.py` that hardcoded "SPY/QQQ/XLK" in prose.
+
+**Deployed to PAPER only** (`SLEEVE_ENABLED=1` is set only in `C:\Scripts\dashboard.ps1`, per the
+existing paper-only gate -- `run_dashboard_live.ps1` deliberately does not set it, unchanged).
+Verified: compiled clean, confirmed `sleeve.SLEEVE_UNIVERSE` loads the new 11-ticker list, no
+open sleeve trades existed to disrupt, restarted `DashboardApp` and confirmed reconnected
+(`acct DUK968178 ●`). (Task restart took an extra cycle this time -- Task Scheduler/UAC hiccup
+unrelated to this change, confirmed by running `dashboard.app` directly first and seeing it start
+clean.) Not yet promoted to live -- that needs its own deliberate go-live decision, same policy
+as the sleeve's original 500K-equity gate.
+
 ### 🔬 TESTED 2026-07-09: conviction-weighted position sizing — REJECTED
 User asked for further performance-improvement ideas beyond new ETFs. Proposed scaling risk by
 signal conviction WITHIN the already-qualifying band, since `strength` itself has ZERO variance
