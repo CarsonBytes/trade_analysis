@@ -559,18 +559,37 @@ History checked via yfinance before including any of these (this project's "no c
 history" discipline): MBB 19.4y, WIP 18.4y, FLOT 15.1y, ASHR 12.7y, USFR 12.5y -- all clear the
 bar, on the shorter side vs the 33y core book (hence the low n's above).
 
-**Isolation test (21-base + ASHR), precise/unrounded:**
+**⚠️ CORRECTION (same day): the standalone isolation script below overstated the DD result.**
+Original ad-hoc script (calling `_signals()` directly per instrument, bypassing whatever
+filtering `main()`'s full loop applies before candidates reach `_portfolio`) reported "maxDD
+identical to 4 decimals" in both full-history and OOS windows. Re-checked against the REAL
+production path (`python -m dashboard.research.backtest --longweekly`, same command run before
+vs after promoting ASHR -- the actually-trustworthy comparison, not an ad-hoc script) and found a
+more mixed picture:
+
+| | Full history (0.5% risk) | OOS (recent ~40%) |
+|---|---|---|
+| 21-base | CAGR +5.4% / maxDD −12.3% / ratio 0.439 | CAGR +13.3% / maxDD −6.6% / ratio 2.02 |
+| 21-base + ASHR | CAGR +5.5% / maxDD −12.3% / ratio **0.447** | CAGR +13.8% / maxDD −6.9% / ratio **2.00** |
+
+Full-history (the honest long-run anchor) DOES improve cleanly: CAGR +0.1pp, DD unchanged, ratio
+0.439→0.447. But OOS is NOT "flat DD" as first claimed -- CAGR +0.5pp came with DD 0.3pp *worse*,
+so the OOS ratio is essentially flat (2.02→2.00), not an improvement. Net: still clears the
+"flat-or-better" bar on the metric this project anchors to (full-history), but by a smaller,
+more mixed margin than originally reported -- correcting the record rather than the standing
+adoption decision, since full-history still supports keeping ASHR. The original (overstated)
+isolation writeup follows for reference, since it's what informed the initial decision:
+
+**Isolation test (21-base + ASHR), precise/unrounded -- ad-hoc script, since found to differ
+from the real production path above:**
 | | full CAGR | full maxDD | OOS CAGR | OOS maxDD | OOS ratio |
 |---|---|---|---|---|---|
 | 21-base | +6.2720% | −12.9065% | +11.1741% | −12.9066% | 0.8658 |
 | 21-base + ASHR | +6.4352% | −12.9065% | +11.6021% | −12.9066% | 0.8989 |
 
-CAGR up (+0.16pp full / +0.43pp OOS), maxDD **identical to 4 decimals** both windows (ASHR's
-trades never touch the worst drawdown episode), profit factor 1.58→1.59, expR +0.301→+0.305 --
-every metric points the same direction, cleanly clearing the adopt bar (comparable to VNQI's
-original +0.5pp-for-flat-DD precedent). China A-shares are policy/capital-control-driven and
-genuinely decouple from broader EM for long stretches -- this is NOT a narrower geographic slice
-of the held EEM exposure (the batch-2 failure pattern), which is why it worked where BWX/PICB/WOOD
+China A-shares are policy/capital-control-driven and genuinely decouple from broader EM for long
+stretches -- this is NOT a narrower geographic slice of the held EEM exposure (the batch-2
+failure pattern), which is why it worked where BWX/PICB/WOOD
 (batch-4's "intl version of X" attempts) didn't.
 
 Promoted `ASHR` to `ETF_CANDIDATES` (`instruments.py`) and added `"china_eq"` to
