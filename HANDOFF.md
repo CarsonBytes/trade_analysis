@@ -526,6 +526,20 @@ asked the user to approve the phone push, and confirmed the dashboard flip to
 code -- paper's port 4002 was never actually down, confirmed still `IBKR Paper: acct DUK968178 ●`
 after restart. Both `.ps1` files syntax-checked clean (`PSParser::Tokenize`, 0 errors both).
 
+### ⭐ TUNED 2026-07-09: retry a stuck gateway every 2min (was 10) and reissue 2FA each time
+User wants a missed/expired 2FA push retried fast, not left waiting out a long conservative
+window. Lowered `$stuckThresholdMin` **10 -> 2 minutes** in both watchdogs -- deliberately
+SHORTER than IBC's own `SecondFactorAuthenticationTimeout=180`, since that timeout doesn't
+self-heal when it fires anyway (the whole reason the auto-kill exists), so there's no benefit to
+waiting for it. Each auto-kill+relaunch is a fresh login attempt = a fresh 2FA push, so a missed
+one gets retried rather than leaving the account stuck on one that already lapsed. Raised
+`$maxAutoKills` **3 -> 10** to keep a similar ~20min overall retry window at the faster cadence
+before giving up (vs. the old ~30min at the slower one). Applies uniformly whether the down-
+episode started organically or from a manual Restart-button click, since the watchdog polls
+continuously regardless of what caused "port down" -- no separate button-side logic needed.
+Restarted both tasks; verified both dashboards reconnected (`acct DUK968178 ●` / `acct
+U12991898 ●`) on the new thresholds.
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
