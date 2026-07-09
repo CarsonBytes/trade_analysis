@@ -57,6 +57,15 @@ PULLBACK_WAIT = 2                # ..PULLBACK_WAIT bars for price to retrace wit
 PULLBACK_BAND = 0.02             # ..of the 20wk MA (trend intact, better entry); else skip signal
 CLASS_WEIGHT: bool = False       # --class-weight: scale risk by a class's trailing-12mo
                                  # realized expR (walk-forward; tilt toward recent winners)
+CONVICTION_SIZE: bool = False    # --conviction-size: scale risk by 20d-momentum magnitude
+                                 # WITHIN the already-qualifying (strength==5) band -- strength
+                                 # itself has zero variance among gate-passing trades (MIN_STRENGTH
+                                 # ==5 is the max), so this uses the continuous signal underlying
+                                 # it instead. No look-ahead: uses only the entry bar's own facts.
+CONVICTION_LO, CONVICTION_HI = 0.85, 1.15     # risk multiplier band (matches the class-tilt
+                                              # test's magnitude for a comparable result)
+CONVICTION_MOM_LO, CONVICTION_MOM_HI = 0.03, 0.10   # 20d |momentum| mapped linearly to the band
+                                                     # (0.03 = paper.py's own strength=5 threshold)
 CLUSTER: bool = False            # --cluster: de-correlate by ASSET CLASS (one open
                                  # position per metal/index/rate) -- caps correlated risk
                                  # (the legacy _risk_buckets is empty for futures/ETF keys)
@@ -144,9 +153,15 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
         spec = contracts.SPECS.get(key)
         cost_abs = contracts.cost_points(spec) if spec else None
         r = paper.r_multiple(direction, entry, sl, exit_px, cost_abs=cost_abs)
+        risk_mult = 1.0
+        if CONVICTION_SIZE:
+            mom20 = abs(facts["returns"].get("20d") or 0.0)
+            frac = (mom20 - CONVICTION_MOM_LO) / (CONVICTION_MOM_HI - CONVICTION_MOM_LO)
+            frac = max(0.0, min(1.0, frac))
+            risk_mult = CONVICTION_LO + (CONVICTION_HI - CONVICTION_LO) * frac
         out.append({"key": key, "entry_i": entry_i, "entry_date": df.index[entry_i],
                     "exit_date": df.index[min(entry_i + used, n - 1)],
-                    "direction": direction, "r": r,
+                    "direction": direction, "r": r, "risk_mult": risk_mult,
                     # notional / risk_money = entry / stop_distance -> how much cash this
                     # position ties up per $ risked (for the idle-cash interest model).
                     "nmult": float(entry / max(abs(entry - sl), 1e-9))})
@@ -615,8 +630,12 @@ def main():
                          "to sizing not entry) -- VIX<20=100%%, <25=75%%, <30=50%%, else 25%%")
     ap.add_argument("--class-weight", action="store_true",
                     help="walk-forward: scale risk by each class's trailing-12mo expR")
+    ap.add_argument("--conviction-size", action="store_true",
+                    help="scale risk by 20d-momentum magnitude WITHIN the already-qualifying "
+                         "strength==5 band (0.85x-1.15x) -- strength itself has zero variance "
+                         "among gate-passing trades")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT
     if args.meanrev_budget is not None:
         MR_RISK_MULT = args.meanrev_budget
         args.meanrev_blend = True
@@ -631,6 +650,10 @@ def main():
     if args.class_weight:
         CLASS_WEIGHT = True
         print("[CLASS-WEIGHT: risk scaled by trailing-12mo class expR (0.25-2.0x)]")
+    if args.conviction_size:
+        CONVICTION_SIZE = True
+        print(f"[CONVICTION-SIZE: risk scaled {CONVICTION_LO}x-{CONVICTION_HI}x by 20d-momentum "
+              f"magnitude within the qualifying band]")
     if args.cluster:
         CLUSTER = True
         print("[CLUSTER: de-correlate by asset class (1 per metal/index/rate)]")

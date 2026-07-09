@@ -540,6 +540,32 @@ continuously regardless of what caused "port down" -- no separate button-side lo
 Restarted both tasks; verified both dashboards reconnected (`acct DUK968178 ●` / `acct
 U12991898 ●`) on the new thresholds.
 
+### 🔬 TESTED 2026-07-09: conviction-weighted position sizing — REJECTED
+User asked for further performance-improvement ideas beyond new ETFs. Proposed scaling risk by
+signal conviction WITHIN the already-qualifying band, since `strength` itself has ZERO variance
+among gate-passing trades (`MIN_STRENGTH=5` is the max on a 1-5 scale, so every trade that clears
+the gate is already strength=5) -- a genuinely different mechanism from the already-rejected
+class-weight tilt (which weighted by ASSET CLASS history, not per-trade conviction).
+Implemented `--conviction-size` (`backtest.py`): scales risk 0.85x-1.15x by the entry bar's own
+20-day momentum magnitude (the continuous signal underlying `strength`/`obviousness`), linearly
+between the 3% threshold that gates strength=5 and a 10% saturation point -- no look-ahead, uses
+only the entry bar's own facts. Wired through the existing `c.get("risk_mult", 1.0)` hook in
+`_portfolio` (already used elsewhere for the sleeve's VIX-scaled sizing), so no changes to the
+sizing engine itself were needed.
+
+**Result (21-ETF book, 0.5% risk, matching magnitude to the class-tilt test for comparability):**
+| | Full CAGR | Full maxDD | Full ratio | OOS CAGR | OOS maxDD | OOS ratio |
+|---|---|---|---|---|---|---|
+| Baseline | +5.5% | −12.3% | 0.447 | +13.8% | −6.9% | 2.00 |
+| Conviction-sized | +5.6% | −12.5% | 0.448 | +14.1% | −8.1% | **1.74** |
+
+Full-history is a wash (ratio flat). OOS is worse -- CAGR +0.3pp came with DD +1.2pp, a ~13%
+relative decline in the ratio. Same failure pattern as VIX-regime and class-tilt: sizing up on
+"stronger momentum" trades tends to load up right before the reversals hit hardest. **Not
+adopted** -- kept as a re-runnable CLI tool (`CONVICTION_SIZE` defaults False, zero effect on the
+live/paper dashboards) in case future data changes the picture, same policy as `--class-weight`/
+`--vix-regime`.
+
 ### ⭐⭐ ETF UNIVERSE: 21 → 22 (2026-07-09) — batch-10 screen, ASHR adopted
 User asked for further ETF candidates to backtest despite the 2026-07-08 "pool genuinely
 exhausted" conclusion (batches 7-9, zero adoptions). Rather than retread rejected classes,
