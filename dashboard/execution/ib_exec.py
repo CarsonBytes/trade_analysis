@@ -584,7 +584,10 @@ def keep_cash_usd() -> dict:
     # async via an error event we don't listen for, never as an exception here, so a failing
     # order (e.g. Forex trading not yet approved on the account) looked identical to success
     # and got resubmitted every single refresh cycle (~70-90s) indefinitely -- 224+ live order
-    # attempts over 3.5h with zero actual fills before this was caught. Only retry every 20min.
+    # attempts over 3.5h with zero actual fills before this was caught. Only retry every 5min
+    # (tightened from 20min 2026-07-09, once the account's Leveraged Forex permission gap was
+    # identified -- 5min gives a faster confirmation once that's enabled, while still well
+    # above the ~70-90s refresh cadence so a genuinely-broken case doesn't spam the API).
     # STUCK TRACKING: a persistent attempts counter survives across cycles/restarts (unlike a
     # local variable) so the dashboard can show a warning badge once repeated attempts have
     # produced no real USD balance -- surfaced via status["stuck"] regardless of which branch
@@ -595,8 +598,8 @@ def keep_cash_usd() -> dict:
     status["stuck"] = attempts >= 2
     last, _lts = store.cache_get("keep_cash_usd_last_attempt")
     now_s = int(_time.time())
-    if last and now_s - last < 1200:
-        status["log"] = "keep-cash-usd: cooling down after a recent attempt (retries every 20min)"
+    if last and now_s - last < 300:
+        status["log"] = "keep-cash-usd: cooling down after a recent attempt (retries every 5min)"
         return status
     store.cache_set("keep_cash_usd_last_attempt", now_s)
     store.cache_set("keep_cash_usd_attempts", attempts + 1)
@@ -616,7 +619,7 @@ def keep_cash_usd() -> dict:
         log.warning("ib_exec: %s", status["log"])
         return status
     # best-effort immediate status check -- placeOrder() doesn't block for a fill, so this
-    # only catches a FAST rejection, not a delayed one; the 20min cooldown is the real safety net
+    # only catches a FAST rejection, not a delayed one; the 5min cooldown is the real safety net
     st = getattr(trade.orderStatus, "status", "") if trade else ""
     if st in ("Cancelled", "Inactive", "ApiCancelled"):
         status["log"] = f"keep-cash-usd: order REJECTED immediately (status={st}) -- check " \
