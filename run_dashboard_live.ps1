@@ -39,6 +39,16 @@ $env:LIVE_URL        = "https://quant-live.carsonng.com"
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
 $env:CASH_USD        = "1"
 $env:CASH_SWEEP      = "1"
+# Panic-MR dip sleeve (2026-07-09, user-confirmed): enabling this is INERT today --
+# paper.sleeve_active(equity) is a SEPARATE, independent gate requiring equity >=
+# PHASE2_NAV_USD (~$64k/500K HKD, currently ~50x this account's real balance), so nothing can
+# actually trade until the account grows that far. Setting it now just means the sleeve
+# auto-activates the moment that threshold is crossed, matching the existing "no manual step"
+# Phase 1->2 design -- same policy as everything else. Re-check the sleeve's actual PAPER trade
+# history (once it has real trades on the 11-ticker scope) before that threshold is reached;
+# the backtest is not yet live-confirmed on any of the 8 tickers added 2026-07-09
+# (DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR), or even the original 3.
+$env:SLEEVE_ENABLED  = "1"
 
 # Background monitor: (re)launch the LIVE IB Gateway via IBC whenever port 4001 is down --
 # mirrors dashboard.ps1's paper-gateway watchdog, pointed at the live IBC instance.

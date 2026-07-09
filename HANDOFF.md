@@ -694,8 +694,21 @@ Verified: compiled clean, confirmed `sleeve.SLEEVE_UNIVERSE` loads the new 11-ti
 open sleeve trades existed to disrupt, restarted `DashboardApp` and confirmed reconnected
 (`acct DUK968178 ●`). (Task restart took an extra cycle this time -- Task Scheduler/UAC hiccup
 unrelated to this change, confirmed by running `dashboard.app` directly first and seeing it start
-clean.) Not yet promoted to live -- that needs its own deliberate go-live decision, same policy
-as the sleeve's original 500K-equity gate.
+clean.)
+
+**⭐ `SLEEVE_ENABLED=1` also set on LIVE (2026-07-09, user-confirmed via explicit yes/no prompt).**
+User asked whether the live sleeve "would do good than bad." Key finding that made this an easy
+call: setting the env var is **completely inert today** -- `paper.sleeve_active(equity)` is a
+SEPARATE, independent gate requiring equity >= `PHASE2_NAV_USD` (~$64k/500K HKD), and the live
+account (~$1,287) is ~50x below it, so nothing can trade regardless of `SLEEVE_ENABLED` until the
+account grows that far. Setting it now just means the sleeve auto-activates the moment that
+threshold is crossed later, matching the existing "no manual step" Phase 1->2 design already used
+everywhere else -- consistent policy, not a new exception. Added to `run_dashboard_live.ps1` with
+a comment flagging the still-open caveat: the 11-ticker scope (and even the original 3-ticker
+scope) has **zero live-observed trades** -- re-check paper's actual trade history once it
+accumulates some, before the $64k gate opens for real. Verified: syntax-checked clean, restarted
+`DashboardAppLive`, confirmed reconnected (`acct U12991898 ●`) with the header badge correctly
+showing **"Phase 1 · core-only"** (sleeve inactive, exactly as predicted given the equity gap).
 
 ### 🔬 TESTED 2026-07-09: conviction-weighted position sizing — REJECTED
 User asked for further performance-improvement ideas beyond new ETFs. Proposed scaling risk by
