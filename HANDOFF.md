@@ -540,6 +540,49 @@ continuously regardless of what caused "port down" -- no separate button-side lo
 Restarted both tasks; verified both dashboards reconnected (`acct DUK968178 ●` / `acct
 U12991898 ●`) on the new thresholds.
 
+### ⭐⭐ ETF UNIVERSE: 21 → 22 (2026-07-09) — batch-10 screen, ASHR adopted
+User asked for further ETF candidates to backtest despite the 2026-07-08 "pool genuinely
+exhausted" conclusion (batches 7-9, zero adoptions). Rather than retread rejected classes,
+targeted RATE-SENSITIVITY structures genuinely unlike the three duration buckets already held
+(all plain Treasury duration) plus one new equity sub-market, each picked for a distinct causal
+driver:
+
+| Ticker | class | n | expR | verdict |
+|---|---|---|---|---|
+| USFR | floating_rate | **0** | n/a | **structurally excluded** -- near-zero-duration by design, ZERO gate-passing signals in 12.5y (no price trend for a trend-follower to detect at all; a genuinely new type of negative finding, not just a weak edge) |
+| WIP | intl_inflation | 39 | +0.080 | reject (confirms batch-4's BWX/PICB lesson: "intl version of a held FIXED-INCOME class" doesn't generalize) |
+| FLOT | ig_floating | 2 | +2.925 | too thin to conclude (same as UNG) -- deferred |
+| MBB | mbs | 8 | +0.976 | strong raw expR but isolation test came back **FLAT** (OOS CAGR +11.17%→+11.17%, no visible change) -- deferred, not rejected, given the thin n |
+| ASHR | china_eq | 19 | +0.557 | **ADOPT** |
+
+History checked via yfinance before including any of these (this project's "no crypto-length
+history" discipline): MBB 19.4y, WIP 18.4y, FLOT 15.1y, ASHR 12.7y, USFR 12.5y -- all clear the
+bar, on the shorter side vs the 33y core book (hence the low n's above).
+
+**Isolation test (21-base + ASHR), precise/unrounded:**
+| | full CAGR | full maxDD | OOS CAGR | OOS maxDD | OOS ratio |
+|---|---|---|---|---|---|
+| 21-base | +6.2720% | −12.9065% | +11.1741% | −12.9066% | 0.8658 |
+| 21-base + ASHR | +6.4352% | −12.9065% | +11.6021% | −12.9066% | 0.8989 |
+
+CAGR up (+0.16pp full / +0.43pp OOS), maxDD **identical to 4 decimals** both windows (ASHR's
+trades never touch the worst drawdown episode), profit factor 1.58→1.59, expR +0.301→+0.305 --
+every metric points the same direction, cleanly clearing the adopt bar (comparable to VNQI's
+original +0.5pp-for-flat-DD precedent). China A-shares are policy/capital-control-driven and
+genuinely decouple from broader EM for long stretches -- this is NOT a narrower geographic slice
+of the held EEM exposure (the batch-2 failure pattern), which is why it worked where BWX/PICB/WOOD
+(batch-4's "intl version of X" attempts) didn't.
+
+Promoted `ASHR` to `ETF_CANDIDATES` (`instruments.py`) and added `"china_eq"` to
+`WEEKLY_TREND_CLASSES` (`paper.py`). Verified end-to-end: plain `python -m dashboard.research.backtest
+--longweekly` (production `active_universe()` path, no screen flag) reproduces the isolation
+numbers exactly (OOS CAGR +13.8%/DD -6.9%/expR +0.405/n=687) -- **live universe now 22 ETFs** (21
+prior + ASHR; 23 defined total, EMB still excluded via `WEEKLY_TREND_CLASSES`). Both dashboards
+restarted and confirmed scanning the new universe: paper "22/22 ETFs" fundable, live "19/22."
+Infra added: `ETF_SCREEN_BATCH_10` (USFR/MBB/FLOT/WIP remain, deferred/rejected -- not deleted,
+same reversibility principle as EMB/BKLN/FM) + `--etf-screen10` in `backtest.py`, mirroring the
+existing batch pattern exactly.
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`

@@ -150,6 +150,11 @@ ETF_CANDIDATES: list[Instrument] = [
     # CAGR for ZERO extra DD (best ratio improvement of any candidate this session). BIZD/COPX
     # rejected -- both showed the same "decent raw expR, DD cost outweighs it" pattern as PALL.
     Instrument("HYD",  "Muni High-Yield",   "HYD",  "", "muni_hy"),
+    # batch-10 keeper (screened 2026-07-09, isolation-tested vs the 21-base): ASHR +0.43pp
+    # OOS CAGR (+11.17%->+11.60%) for IDENTICAL maxDD to 4 decimals (-12.9065% both), ratio
+    # 0.866->0.899 -- a genuinely distinct EM sub-market (China, policy/capital-control-
+    # driven), not a narrower slice of the held EEM broad-EM exposure. See HANDOFF.
+    Instrument("ASHR", "China A-Shares",     "ASHR", "", "china_eq"),
 ]
 ETF_CANDIDATE_BY_KEY = {i.key: i for i in ETF_CANDIDATES}
 
@@ -292,11 +297,57 @@ ETF_SCREEN_BATCH_9: list[Instrument] = [
 ]
 ETF_SCREEN_BATCH_9_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_9}
 
+# Batch 10 to SCREEN (--etf-screen10, 2026-07-09). Batches 7-9 came back empty three times
+# straight -- HANDOFF called the well-motivated-idea pool "genuinely exhausted." Rather than
+# retread rejected classes (sector subsets, thematic real-asset equity, factor tilts), this
+# batch targets RATE-SENSITIVITY STRUCTURES genuinely unlike the three duration buckets
+# already held (IEF/TLT/SHY, all plain Treasury duration) and ONE new equity sub-market, each
+# picked for a distinct causal driver, not just "another bond fund":
+#   USFR (floating_rate): near-ZERO-duration Treasury -- floats with Fed policy, so it should
+#     trend the OPPOSITE way from IEF/TLT during a hiking cycle (rises as they fall), a
+#     genuinely different signal source, not a duration-bucket variant.
+#   MBB (mbs): agency mortgage-backed securities -- prepayment/convexity risk is a different
+#     risk driver than pure Treasury duration (IEF/TLT/SHY) or corporate credit (HYG).
+#   FLOT (ig_floating): investment-grade floating-rate CORPORATE debt -- combines USFR's
+#     near-zero-duration structure with HYG-style credit risk, a distinct combination from
+#     either alone.
+#   WIP (intl_inflation): international inflation-linked bonds -- non-US inflation dynamics,
+#     a different demand driver than domestic TIP (though batch-4's BWX/PICB lesson --
+#     "international version of a held FIXED-INCOME class doesn't generalize" -- predicts
+#     this one is more likely to fail than the rate-structure candidates above).
+#   ASHR (china_eq): China A-shares -- policy/capital-control-driven market, structurally
+#     distinct from broad EM (EEM) rather than a narrower geographic slice of it (batch-2's
+#     failure mode); genuinely worth testing once since China dynamics decouple from broader
+#     EM sentiment for long stretches.
+# History checked via yfinance before including any of these (this project's "no crypto-length
+# history" discipline): MBB 19.4y, WIP 18.4y, FLOT 15.1y, ASHR 12.7y, USFR 12.5y -- all clear
+# the bar (well past the ~6y managed-futures exclusion), though on the shorter side vs the
+# 33y core book, so expect lower trade counts (n) -- defer rather than reject if n is thin,
+# same treatment as BKLN/FM.
+# RESULTS 2026-07-09: ASHR PROMOTED to ETF_CANDIDATES (isolation-confirmed, +0.43pp OOS CAGR
+# for identical maxDD -- see instruments.py's ETF_CANDIDATES comment + HANDOFF). USFR: a
+# genuinely NEW negative finding -- ZERO gate-passing signals in 12.5y (near-zero-duration by
+# design, so there's no price trend for a trend-follower to detect at all; structurally
+# unsuitable for this strategy, not just a weak edge). WIP: weak raw expR +0.080 (n=39),
+# confirms the batch-4 BWX/PICB lesson that "international version of a held FIXED-INCOME
+# class" doesn't generalize -- clean reject. FLOT: only n=2 signals in 15.1y, too thin to
+# conclude (same as UNG) -- deferred, not rejected. MBB: strong raw expR +0.976 but thin n=8;
+# isolation test came back FLAT (OOS CAGR +11.17%->+11.17%, no visible improvement) despite
+# the promising raw number -- deferred rather than rejected given the small n, but the
+# isolation result itself doesn't currently support adoption.
+ETF_SCREEN_BATCH_10: list[Instrument] = [
+    Instrument("USFR", "Floating Rate Tsy",  "USFR", "", "floating_rate"),
+    Instrument("MBB",  "Agency MBS",         "MBB",  "", "mbs"),
+    Instrument("FLOT", "IG Floating Rate",   "FLOT", "", "ig_floating"),
+    Instrument("WIP",  "Intl Inflation Bonds","WIP",  "", "intl_inflation"),
+]
+ETF_SCREEN_BATCH_10_BY_KEY = {i.key: i for i in ETF_SCREEN_BATCH_10}
+
 # The validated ETF trading universe = core {metal,index,rate} + screened diversifiers.
-# 22 defined here, but EMB (em_bond) is excluded from LIVE trading via WEEKLY_TREND_CLASSES
-# (paper.py) -- 21 ETFs actually trade. Latest isolation-tested result (2026-07-08, adding
-# CWB+VNQI+AMLP+HYD to the prior 17): OOS CAGR +13.3% / maxDD -6.6% / expR +0.401 (33.4y, 0.5%
-# risk). See HANDOFF.md for the full batch-3/4/5/6 screens + per-candidate isolation tests.
+# 23 defined here, but EMB (em_bond) is excluded from LIVE trading via WEEKLY_TREND_CLASSES
+# (paper.py) -- 22 ETFs actually trade. Latest isolation-tested result (2026-07-09, adding
+# ASHR to the prior 21): OOS CAGR +13.8% / maxDD -6.9% / expR +0.405 (33.4y, 0.5% risk). See
+# HANDOFF.md for the full batch-3/4/5/6/10 screens + per-candidate isolation tests.
 ETF_TRADED: list[Instrument] = ETF_UNIVERSE + ETF_CANDIDATES
 ETF_TRADED_BY_KEY = {i.key: i for i in ETF_TRADED}
 
@@ -333,6 +384,7 @@ def active_by_key(key: str) -> Instrument | None:
             or ETF_SCREEN_BATCH_4_BY_KEY.get(key) or ETF_SCREEN_BATCH_5_BY_KEY.get(key)
             or ETF_SCREEN_BATCH_6_BY_KEY.get(key) or ETF_SCREEN_BATCH_7_BY_KEY.get(key)
             or ETF_SCREEN_BATCH_8_BY_KEY.get(key) or ETF_SCREEN_BATCH_9_BY_KEY.get(key)
+            or ETF_SCREEN_BATCH_10_BY_KEY.get(key)
             or BY_KEY.get(key)) if _ib_broker() \
         else (BY_KEY.get(key) or FUT_BY_KEY.get(key) or ETF_BY_KEY.get(key)
               or ETF_CANDIDATE_BY_KEY.get(key) or ETF_SCREEN_BATCH_BY_KEY.get(key)

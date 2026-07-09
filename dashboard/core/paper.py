@@ -79,10 +79,14 @@ def _default_trend_classes() -> set[str]:
             # (muni_hy) ADDED 2026-07-08: isolation-tested vs their respective bases, +1.0pp /
             # +0.5pp / +0.9pp / +0.6pp OOS CAGR each for flat-or-better DD ratio -- see
             # HANDOFF. (PALL/PPLT/URA/BWX/PICB/WOOD/EMLC/IGF/BIZD/COPX all screened and
-            # rejected; BKLN/FM deferred, n too small.)
+            # rejected; BKLN/FM deferred, n too small.) china_eq (ASHR) ADDED 2026-07-09:
+            # isolation-tested vs the 21-base, +0.43pp OOS CAGR (+11.17%->+11.60%) for
+            # IDENTICAL maxDD to 4 decimals (-12.9065% both), ratio 0.866->0.899 -- see
+            # HANDOFF batch-10. (USFR/WIP/FLOT screened batch-10 and rejected/untestable;
+            # MBB deferred, isolation flat despite strong raw expR.)
             return {"metal", "index", "rate", "credit", "inflation", "intl_eq",
                     "commodity", "reit", "preferred", "convertible", "intl_reit", "mlp",
-                    "muni_hy"}
+                    "muni_hy", "china_eq"}
         return {"metal", "index", "rate"}      # evidence-based futures universe
     return {"metal", "energy", "index"}        # original spot/MT5 whitelist
 
