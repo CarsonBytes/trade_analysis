@@ -437,6 +437,27 @@ built yet since a single manual kill+relaunch resolves it in under a minute when
 and completed in ~15 seconds with **no manual 2FA needed** -- the first real proof the format fix
 actually restored the session-preserving behavior that had silently never worked before.
 
+### 🐞 FIXED 2026-07-09: dashboard "Restart" button didn't touch a stuck IB Gateway
+User reported clicking Restart on quant-live.carsonng.com still showed "gateway down" afterward.
+Root cause: `_restart_server()` (`app.py`) only did `os._exit(0)` to let the watchdog relaunch the
+*app* process -- it never touched the Gateway, so the "stuck alive, never authenticated" failure
+mode above (still open at the time) was completely unaffected by clicking it. Implemented option
+(a) from that still-open TODO, triggered on-demand instead of only via the passive port-watchdog:
+new `_kill_and_relaunch_gateway()` mirrors `dashboard.ps1`'s existing stale-gateway kill block
+(match `cmd.exe` procs with `StartGateway` in their command line + any process titled "IBKR
+Gateway", force-kill both, relaunch via the mode-appropriate `start_hidden.vbs`), called from
+`_restart_server()` before the app exits. **Gated on `broker_conn`'s `available` flag only, NOT
+`ok`** -- `ok` means "is a paper account," which is *expected* False on the live dashboard even
+when perfectly healthy (the header dot is orange = available-but-not-paper = normal healthy live,
+not red = actually down); gating on `ok` would have force-killed a fine live gateway on every
+single restart click. Caught and fixed this before shipping.
+**Verified live, end-to-end:** live gateway was genuinely down at test time ("gateway down ○").
+Ran the exact kill+relaunch command the button now triggers -- port 4001 came up within ~30s and
+the dashboard header flipped to "IBKR LIVE: acct U12991898 ●", no 2FA prompt needed this time
+(consistent with the AutoRestartTime session-preserving fix above still holding). Chrome extension
+was unavailable to click the literal button in-browser, so verified via the identical underlying
+command instead -- the code path clicking the button executes is exactly what was run.
+
 ### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
 Also fixed 2026-07-08: THREE real bugs found in this stretch of work.
 

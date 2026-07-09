@@ -1210,15 +1210,68 @@ def _open_withdraw() -> None:
     dlg.open()
 
 
+def _kill_and_relaunch_gateway() -> None:
+    """Force-kill a stuck IB Gateway process tree and relaunch it hidden via IBC.
+    Needed because a gateway that timed out mid-2FA can sit alive but unauthenticated
+    forever (java.exe never exits) -- the port-down watchdog alone can't recover from
+    that, only from a genuinely dead process (see HANDOFF 2026-07-08 "stuck alive" fix).
+    Mirrors dashboard.ps1's own stale-gateway kill block, which only runs at task
+    START -- this makes the same recovery available on demand from the UI."""
+    import subprocess
+    ibc_dir = r"C:\IBC-Live" if DASH_MODE == "live" else r"C:\IBC"
+    ps = (
+        "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.CommandLine -match 'StartGateway' } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
+        "Get-Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowTitle -match 'IBKR Gateway' } | "
+        "ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; "
+        "Start-Sleep -Seconds 2; "
+        f"Start-Process -FilePath 'wscript.exe' -ArgumentList '//B','//Nologo',"
+        f"'{ibc_dir}\\start_hidden.vbs' -WindowStyle Hidden"
+    )
+    from dashboard.core.log import log
+    try:
+        subprocess.Popen(["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+        log.info("gateway kill+relaunch triggered (mode=%s, ibc=%s)", DASH_MODE, ibc_dir)
+    except Exception:
+        log.exception("gateway kill+relaunch failed")
+
+
 def _restart_server() -> None:
     """Exit the process so the watchdog (DashboardApp task / dashboard.ps1)
-    relaunches it fresh with the latest code, ~10s later."""
+    relaunches it fresh with the latest code, ~10s later. If the IB Gateway link
+    is currently down, also force-kill + relaunch it -- restarting only the app
+    left a stuck gateway untouched, so "Restart" silently didn't fix the thing
+    the user was actually restarting for."""
     import os
     import threading
     from dashboard.core.log import log
-    ui.notify("Restarting — the watchdog relaunches in ~10s. Reload the page shortly.",
-              type="warning", timeout=9000)
-    log.info("restart requested from UI; exiting for watchdog relaunch")
+    from dashboard.execution import broker as _bk
+
+    gw_kicked = False
+    if _bk.is_ib():
+        bc = service.STATE.get("broker_conn") or {}
+        # NOTE: gate on "available" (link up) only -- "ok" means "is a paper acct",
+        # which is EXPECTED False on the live dashboard even when healthy (green/
+        # orange/red header dot: available+ok=green paper, available-only=orange
+        # healthy-live, unavailable=red). Gating on "ok" would kill a fine live
+        # gateway on every single restart click.
+        if not bc.get("available"):
+            _kill_and_relaunch_gateway()
+            gw_kicked = True
+
+    msg = "Restarting app"
+    if gw_kicked:
+        msg += " + IB Gateway (was down — forcing a fresh relaunch/login)"
+    msg += " — app is back in ~10s"
+    if gw_kicked:
+        msg += ", gateway login can take ~30-60s (+2FA if prompted)"
+    msg += ". Reload the page shortly."
+    ui.notify(msg, type="warning", timeout=9000)
+    log.info("restart requested from UI; exiting for watchdog relaunch%s",
+              " (+ gateway kill/relaunch)" if gw_kicked else "")
     threading.Timer(1.2, lambda: os._exit(0)).start()
 
 
@@ -1445,7 +1498,9 @@ def main_page() -> None:
                              "you still transfer the money manually in IBKR")
             ui.button("Restart", icon="restart_alt", on_click=_restart_server)\
                 .props("flat color=negative")\
-                .tooltip("exit the app so the watchdog relaunches it fresh (~10s)")
+                .tooltip("exit the app so the watchdog relaunches it fresh (~10s); "
+                         "if the IB Gateway link is down, also force-kills and "
+                         "relaunches it (~30-60s + 2FA if prompted)")
 
         header_status()
 
