@@ -1,7 +1,7 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-08.
+Last updated 2026-07-09.
 
 ---
 
@@ -78,10 +78,26 @@ run. Full-history is the conservative anchor; OOS (~13-14% CAGR) is the recent-r
 flattered case — don't plan around OOS alone (see the ~4-7%/~33y vs ~10%/~13y split earlier in
 this doc for why).
 
+**⭐ SUPERSEDED 2026-07-09** — 22-ETF book (ASHR added) + the dip-sleeve extended to 11 tickers
+(both this date, see below), re-verified at the SAME actual settings (`--pos-cap 0.25`, 1% risk):
+
+| | Full CAGR | Full maxDD | Sharpe | OOS CAGR | OOS maxDD |
+|---|---|---|---|---|---|
+| **Core only (22 ETFs, no sleeve)** | +8.28% | −9.6% | 1.00 | +13.07% | −9.6% |
+| **+ dip sleeve @10% weight** | +11.96% | −9.5% | 1.26 | +16.63% | −9.5% |
+| **+ dip sleeve @15% weight** | +13.78% | −9.8% | 1.26 | +18.39% | −9.8% |
+
+**This is the current honest number to plan around** — 10-15% sleeve weight is the sweet spot
+(20%+ starts trading Sharpe for CAGR again, see the sleeve-extension entry below). The sleeve
+piece is PAPER-ONLY and backtested-only so far — zero live-observed trades yet on the 8 newly
+added tickers (DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR); don't treat it as confirmed until it's actually
+traded a few real cycles. Core-only (no sleeve) remains what's live on both books today.
+
 **Two phases, auto-switched by equity** (`paper.account_phase()` / `sleeve_active()`, threshold
 `PHASE2_NAV_USD`=$64k ≈ 500K HKD; UI shows a Phase badge):
-- **Phase 1 (<500K): core 17-ETF only**, 1% + 25% cap. (100K start is here for ~1.1y.)
-- **Phase 2 (≥500K): core + panic-MR sleeve** (SPY/QQQ/XLK, ADX>20, 0.5%/1%@VIX>30), same cap/risk.
+- **Phase 1 (<500K): core 22-ETF only** (17 orig. + CWB/VNQI/AMLP/HYD/ASHR), 1% + 25% cap.
+- **Phase 2 (≥500K): core + panic-MR sleeve** (11 tickers as of 2026-07-09 -- SPY/QQQ/XLK/DIA/
+  IWM/HYG/EFA/EEM/VNQ/PFF/ASHR, ADX>20, 0.5%/1%@VIX>30), same cap/risk.
 - **Phase 3 REJECTED** (loosening the cap = pure leverage: worse ratio 0.85→0.66, DD −8.8→−14%,
   trips the −13% halt tripwire; not worth ~+1.5pp nominal).
 **⚠️ Sleeve ORDER EXECUTION is NOT built yet** — only the auto-switch GATE is wired (`mirror_new`
