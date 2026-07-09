@@ -501,6 +501,30 @@ projection is negative (previously always green regardless of sign). Verified: r
 page now shows "USD cash HKD -94 @ 5.5% (margin debit rate, approx)" on both dashboards after
 restart.
 
+### ⭐ UX FIX 2026-07-09: Portfolio panel didn't answer "am I up or down" clearly
+Follow-up to the projected-interest bug above -- the user asked directly "am I profiting or
+losing?" after seeing the raw stat grid (Cash buffer, USD cash, Interest accrued all sitting as
+plain same-size cards right next to Total P&L). Root problem: every figure on the panel looked
+the same (label + number, same size, same color logic), so a NEGATIVE cash/USD-cash reading (which
+is just margin financing for several concurrent positions, not a loss) was easy to misread as
+losing money, while the actual answer (Total P&L) was one card among nine with no visual priority.
+`portfolio_panel()` (`app.py`) restructured into two tiers:
+1. **Headline**: Total P&L now lives alone in its own colored card (green/red bg, trending
+   up/down icon, "You are up/down", large 3xl number) directly under the Portfolio title --
+   unmissable, answers the actual question first.
+2. **Supporting rows**: Total value / Unrealized / Invested directly below (things that explain
+   the headline number), then a `text-grey-6 italic` caption -- "Cash & financing — how positions
+   are funded, NOT profit or loss (see the P&L card above for that)" -- before Cash (buffer),
+   Cash in SGOV, USD cash, Interest accrued, Projected interest. Tooltips on Cash (buffer) and USD
+   cash now explicitly say "NOT a loss" / "NOT profit/loss" and explain the margin-financing
+   mechanic in plain terms.
+Verified both accounts' actual numbers by hand from `equity_history`/`cash_flows` before touching
+any UI: **PAPER is +HKD 1,842 (+0.18%)** since tracking began; **LIVE is +HKD 0 (0.00%)** -- its
+HKD 10,040 balance is entirely the deposit, no trades closed yet. Confirmed the new headline
+("You are up") renders correctly on paper after restart. Chrome extension was unreachable to
+screenshot the visual layout, so this is text-confirmed, not visually confirmed -- worth a look
+next session.
+
 ### ⭐⭐ ETF UNIVERSE: 17 → 21 (2026-07-08) — batch-3/4/5/6 screens, CWB+VNQI+AMLP+HYD adopted
 Also fixed 2026-07-08: THREE real bugs found in this stretch of work.
 

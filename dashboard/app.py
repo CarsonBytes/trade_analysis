@@ -644,22 +644,42 @@ def portfolio_panel() -> None:
             _t = dt.datetime.fromtimestamp(service.STATE["portfolio_ts"])
             ui.label(f"last refreshed {_t.strftime('%m-%d %H:%M')} · refreshing…")\
                 .classes("text-xs text-orange")
-    with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
+
+    # HEADLINE: the one question everything else on this panel supports -- are you up or
+    # down overall. Made deliberately bigger/colored/its-own-card so it can't be mistaken
+    # for just one stat among many -- the cash/financing figures below look similar in
+    # shape (a label + a number) but answer a DIFFERENT question (how positions are
+    # funded) and were getting misread as profit/loss (a negative cash buffer is normal
+    # margin financing, not a loss -- see its tooltip below).
+    with ui.card().classes(("bg-green-1" if total_pl >= 0 else "bg-red-1") + " w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("trending_up" if total_pl >= 0 else "trending_down",
+                    color="green" if total_pl >= 0 else "red").classes("text-2xl")
+            ui.label("You are " + ("up" if total_pl >= 0 else "down")).classes(
+                "text-sm text-grey-7")
+        ui.label(f"{_money(total_pl)}  ({pct:+.2f}%)").classes(
+            "text-3xl font-bold " + ("text-green" if total_pl >= 0 else "text-red"))
+        ui.label("Total trading P&L since tracking began — excludes deposits/withdrawals, "
+                 "includes both open and closed trades").classes("text-xs text-grey-6")
+
+    with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         _stat("Total value", _money(nl), "text-grey-9",
               f"Net liquidation value of the {_bk.name()} account")
-        _stat("Total P&L", f"{_money(total_pl)}  ({pct:+.2f}%)",
-              "text-green" if total_pl >= 0 else "text-red",
-              "Account value now minus when tracking began, EXCLUDING deposits/withdrawals "
-              "in between (realized + unrealized trading P&L only)")
         _stat("Unrealized (open)", _money(upnl),
               "text-green" if upnl >= 0 else "text-red",
               "P&L of currently open positions (USD converted at the HKD peg)")
         if invested is not None:
             _stat("Invested", _money(invested), "text-grey-9",
                   "Market value of strategy ETF positions (excludes SGOV cash parking)")
+
+    ui.label("Cash & financing — how positions are funded, NOT profit or loss (see the "
+             "P&L card above for that)").classes("text-xs text-grey-6 italic mt-3")
+    with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
         if cash is not None:
             _stat("Cash (buffer)", _money(cash), "text-grey-9",
-                  "Un-parked cash kept available for the strategy")
+                  "Un-parked cash kept available for the strategy. Negative just means the "
+                  "open positions' combined size is funded partly on margin (normal with "
+                  "several concurrent positions) — it is NOT a loss.")
         if sgov_base > 0:
             _stat("Cash in SGOV", _money(sgov_base), "text-green",
                   f"Idle cash parked in SGOV (0-3mo T-bill ETF) yielding {sgov_yld} — auto-swept")
@@ -680,8 +700,10 @@ def portfolio_panel() -> None:
             else:
                 _stat("USD cash", f"${usd_c:,.0f}",
                       "text-green" if usd_c >= 0 else "text-red",
-                      "USD cash balance — negative = margin debit (~5-6% interest); auto-converts "
-                      f"idle HKD→USD each cycle. HKD residual: {hkd_c:,.0f}")
+                      "USD cash balance, NOT profit/loss — negative just means the USD side of "
+                      "the account is a margin debit (~5-6% interest), same story as Cash "
+                      f"(buffer) above; auto-converts idle HKD→USD each cycle. "
+                      f"HKD residual: {hkd_c:,.0f}")
         accrued = acct.get("AccruedCash")
         if accrued is not None:
             _stat("Interest accrued", _money(accrued),
