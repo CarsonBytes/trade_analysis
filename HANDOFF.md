@@ -672,6 +672,14 @@ USD balance (root cause: account likely lacks Forex trading permission -- IBKR c
 API-placed IDEALPRO order under "Leveraged Forex", not the separately-held "Currency Conversion"
 permission; user's call whether to enable it or drop the automation).
 
+**CONFIRMED 2026-07-09** via an actual IBKR permissions screenshot: **Currency Conversion is
+enabled, Leveraged Forex is NOT** -- exactly the predicted gap. User is working through enabling
+it on IBKR's side. **Cooldown tightened 20min -> 5min** (`ib_exec.py`) at the user's request, for
+a faster confirmation once the permission clears, while still comfortably above the ~70-90s
+refresh cadence. As of this check the account is still stuck (44+ attempts, `usd_cash=$0`, full
+HKD 10,040 balance unconverted) -- expected until the IBKR permission request is actually
+approved, not a regression. Re-check once the user confirms approval.
+
 **(3)** `sweep_cash()` only
 gated on a $1,500 rebalance-DELTA, not account size -- added `CASH_SWEEP_MIN_NAV_USD=75_000`
 matching the ADOPTED PLAN's own "skip SGOV sweep until ~$75-100k NAV" decision, which the delta
