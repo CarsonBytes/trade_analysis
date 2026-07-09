@@ -1252,13 +1252,32 @@ def _kill_and_relaunch_gateway() -> None:
     START -- this makes the same recovery available on demand from the UI."""
     import subprocess
     ibc_dir = r"C:\IBC-Live" if DASH_MODE == "live" else r"C:\IBC"
+    # Distinguishing java.exe command-line substring for THIS mode's gateway -- "IBC-Live" for
+    # live, "IBC\config.ini" (one backslash) for paper, which does NOT match "IBC-Live\..." (no
+    # regex needed -- -like's wildcard matching treats \ and . as plain literal characters).
+    gw_match = "*IBC-Live*" if DASH_MODE == "live" else "*IBC\\config.ini*"
+    # NOTE: Stop-Process -Force silently fails ("Access is denied") against this Gateway
+    # process -- it runs at a higher integrity/token level than this subprocess's context,
+    # and -ErrorAction SilentlyContinue swallowed the failure (found 2026-07-09: the
+    # watchdog's identical Stop-Process-based kill never actually worked, it just kept
+    # spawning duplicate gateway instances). WMI's Win32_Process.Terminate() uses a
+    # different privilege path and empirically works where Stop-Process doesn't.
+    # ALSO match by COMMAND LINE, not window title -- the title changes throughout login
+    # (Login dialog -> "Authenticating..." -> "Second Factor Authentication" -> only
+    # eventually "IBKR Gateway" once fully connected), so a process stuck mid-login was
+    # completely invisible to the old title-only match (found live, 2026-07-09: a process
+    # sat stuck at "Authenticating..." for 10+ minutes, untouched by repeated kill attempts).
     ps = (
+        "function Kill-Hard($id) { try { "
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$id\" -ErrorAction Stop; "
+        "if ($p) { Invoke-CimMethod -InputObject $p -MethodName Terminate -ErrorAction Stop | Out-Null } "
+        "} catch {} }; "
         "Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" -ErrorAction SilentlyContinue | "
         "Where-Object { $_.CommandLine -match 'StartGateway' } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
-        "Get-Process -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.MainWindowTitle -match 'IBKR Gateway' } | "
-        "ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }; "
+        "ForEach-Object { Kill-Hard $_.ProcessId }; "
+        "Get-CimInstance Win32_Process -Filter \"Name='java.exe'\" -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.CommandLine -like '{gw_match}' }} | "
+        "ForEach-Object { Kill-Hard $_.ProcessId }; "
         "Start-Sleep -Seconds 2; "
         f"Start-Process -FilePath 'wscript.exe' -ArgumentList '//B','//Nologo',"
         f"'{ibc_dir}\\start_hidden.vbs' -WindowStyle Hidden"

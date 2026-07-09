@@ -51,8 +51,8 @@ $env:CASH_SWEEP      = "1"
 # the process stays alive at a stuck login screen, so plain Test-Port-down relaunching is a
 # no-op against it (there's already a process; launching another doesn't help). If port 4001
 # is STILL down after $stuckThresholdMin (comfortably longer than the ~6min natural timeout --
-# conservative, so a legitimately-slow-but-working login is never killed mid-flight) while an
-# "IBKR Gateway" process is confirmed alive, force-kill it before relaunching -- same kill logic
+# conservative, so a legitimately-slow-but-working login is never killed mid-flight) while a
+# live gateway process is confirmed alive, force-kill it before relaunching -- same kill logic
 # app.py's Restart button uses on demand, now automatic. Capped at $maxAutoKills so a problem
 # that ISN'T the stuck-2FA case (e.g. a real credential/config error) doesn't retry forever;
 # after the cap it falls back to passive relaunch-only (today's behavior) until manually fixed.
@@ -60,6 +60,30 @@ $mon = Start-Job -ScriptBlock {
     function Test-Port($p) {
         try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $p); $c.Close(); return $true }
         catch { return $false }
+    }
+    # Stop-Process -Force silently fails ("Access is denied") against this Gateway process --
+    # it runs at a higher integrity/token level than this job's context, and -ErrorAction
+    # SilentlyContinue swallowed the failure, so every "auto-kill" was a no-op that just left
+    # the stuck process alive AND spawned a fresh duplicate on top. WMI's Win32_Process.
+    # Terminate() uses a different privilege path and empirically works where Stop-Process
+    # doesn't -- use that instead.
+    function Kill-ProcessHard($procId) {
+        try {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop
+            if ($p) { Invoke-CimMethod -InputObject $p -MethodName Terminate -ErrorAction Stop | Out-Null }
+        } catch { }
+    }
+    # Find the live gateway java process by its COMMAND LINE (contains "IBC-Live"), not its
+    # window title. The title changes throughout login (Login dialog -> "Authenticating..." ->
+    # "Second Factor Authentication" -> only eventually "IBKR Gateway" once fully connected) --
+    # matching on title alone made a process stuck mid-login completely invisible to this
+    # check (found live, 2026-07-09: a process sat stuck at "Authenticating..." for 10+ min,
+    # untouched by 5 straight "auto-kill" cycles because none of them ever saw it). The command
+    # line's config path is static for the process's whole lifetime, so this can't miss a stuck
+    # state the way the title match could.
+    function Get-LiveGatewayProcs {
+        Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match 'IBC-Live' }
     }
     $stuckSince = $null
     $autoKillCount = 0
@@ -72,17 +96,23 @@ $mon = Start-Job -ScriptBlock {
         } else {
             if (-not $stuckSince) { $stuckSince = Get-Date }
             $downMin = ((Get-Date) - $stuckSince).TotalMinutes
-            $gwProc = Get-Process -ErrorAction SilentlyContinue |
-                Where-Object { $_.MainWindowTitle -match 'IBKR Gateway' }
-            if ($gwProc -and $downMin -ge $stuckThresholdMin -and $autoKillCount -lt $maxAutoKills) {
+            $gwProcs = Get-LiveGatewayProcs
+            if ($gwProcs -and $downMin -ge $stuckThresholdMin -and $autoKillCount -lt $maxAutoKills) {
                 Add-Content -Path 'C:\IBC-Live\watchdog.log' -Value (
                     "$(Get-Date -Format o) auto-kill: gateway alive $([math]::Round($downMin,1))min " +
-                    "without port 4001 open (attempt $($autoKillCount + 1)/$maxAutoKills)")
+                    "without port 4001 open (attempt $($autoKillCount + 1)/$maxAutoKills, pids " +
+                    "$(($gwProcs | ForEach-Object { $_.ProcessId }) -join ','))")
                 Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
                     Where-Object { $_.CommandLine -match 'StartGateway' } |
-                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-                $gwProc | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+                    ForEach-Object { Kill-ProcessHard $_.ProcessId }
+                $gwProcs | ForEach-Object { Kill-ProcessHard $_.ProcessId }
                 Start-Sleep -Seconds 2
+                $stillAlive = Get-LiveGatewayProcs
+                Add-Content -Path 'C:\IBC-Live\watchdog.log' -Value (
+                    "$(Get-Date -Format o) auto-kill result: " +
+                    $(if ($stillAlive) {
+                        "FAILED, still alive ($(($stillAlive | ForEach-Object { $_.ProcessId }) -join ','))"
+                    } else { "confirmed dead" }))
                 $autoKillCount++
                 $stuckSince = Get-Date
             }

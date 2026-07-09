@@ -482,6 +482,50 @@ through a real stuck-gateway episode end-to-end (that failure mode is intermitte
 occurrence will be the real test; the Restart-button path remains available as an immediate
 manual override if needed before then.
 
+### 🐞 FIXED 2026-07-09: the watchdog auto-recovery above NEVER actually worked -- two real bugs
+User reported quant-live still showed "gateway down" after the fixes above. Live-debugged and
+found the auto-recovery had TWO independent bugs, both since fixed:
+
+**(1) `Stop-Process -Force` silently fails against this specific process.** Manually reproduced:
+`Stop-Process -Id <gatewayPid> -Force` returns no error with `-ErrorAction SilentlyContinue` but
+does NOT kill the process; with `-ErrorAction Stop` it throws **"Access is denied."** The Gateway
+process runs at a higher integrity/token level than the watchdog job's (or even an interactive
+`Cap`-user PowerShell's) context, even though the process owner username matches. Confirmed
+`Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=...") -MethodName
+Terminate` succeeds where `Stop-Process` doesn't (`ReturnValue 0`, process actually gone after).
+Every prior "auto-kill" log line was a lie -- it logged the attempt, not success, so 5 straight
+"auto-kill" cycles across two down-episodes (11:54/12:04 and 14:17/14:27/14:38) never killed
+anything; each one's fallthrough relaunch just piled a NEW gateway process on top of the still-
+alive old one. Found **two concurrent "IBKR Gateway" processes** at debug time, the older one
+alive continuously since the very first failed auto-kill attempt.
+
+**(2) The match was on window TITLE, which changes throughout login and can miss a stuck state
+entirely.** The Gateway's window title cycles Login dialog -> "Authenticating..." -> "Second
+Factor Authentication" -> only eventually "IBKR Gateway" once fully connected. A process stuck
+at any earlier stage (confirmed live: one sat at "Authenticating..." for 10+ minutes, genuinely
+waiting past its own `SecondFactorAuthenticationTimeout=180` with no further log activity) is
+titled something OTHER than "IBKR Gateway" and was **completely invisible** to
+`Where-Object { $_.MainWindowTitle -match 'IBKR Gateway' }` -- explaining why the "two processes"
+in (1) included one the watchdog's own logic could never have found regardless of the Stop-Process
+bug.
+
+**Fixed both**, in `run_dashboard_live.ps1`, `C:\Scripts\dashboard.ps1` (both the `$mon` job AND
+its top-level task-start kill block, not repo-tracked), and `app.py`'s `_kill_and_relaunch_gateway`
+(the Restart button): (a) all kills now go through `Invoke-CimMethod ... Terminate` instead of
+`Stop-Process`; (b) gateway process discovery now matches the java.exe **command line's config
+path** (`IBC-Live` for live, `IBC\config.ini` for paper -- stable for the process's entire
+lifetime) instead of the window title. The watchdog also now logs a post-kill verification line
+("confirmed dead" vs "FAILED, still alive (pids)") so a future session can tell from the log
+whether a kill actually worked, instead of trusting that it fired.
+
+**Verified live, end-to-end, real episode (not simulated):** manually cleared both zombie
+processes with the new method, restarted `DashboardAppLive` to load the fix, watched a fresh
+Gateway launch hit "Second Factor Authentication initiated" in `C:\IBC-Live\Logs\...THURSDAY.txt`,
+asked the user to approve the phone push, and confirmed the dashboard flip to
+`IBKR LIVE: acct U12991898 ●`. Restarted `DashboardApp` (paper) afterward too, for the same fixed
+code -- paper's port 4002 was never actually down, confirmed still `IBKR Paper: acct DUK968178 ●`
+after restart. Both `.ps1` files syntax-checked clean (`PSParser::Tokenize`, 0 errors both).
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
