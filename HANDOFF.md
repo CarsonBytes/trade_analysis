@@ -540,6 +540,33 @@ continuously regardless of what caused "port down" -- no separate button-side lo
 Restarted both tasks; verified both dashboards reconnected (`acct DUK968178 ●` / `acct
 U12991898 ●`) on the new thresholds.
 
+### 🔬 TESTED 2026-07-09: turn-of-month calendar effect — REJECTED
+Second of two ideas proposed for a "0.5% risk, closes within days" opportunistic slot (the first,
+the dip-sleeve extension, is the entry below). Classic Lakonishok-Smidt turn-of-month window
+(last trading day of month + first 3 of the next) tested on SPY/QQQ/DIA/IWM/EFA/EEM, 24-33y each.
+
+**Raw effect is real** -- TOM days beat non-TOM days on every ticker but IWM (meanRet, daily):
+SPY +0.077%/+0.041%, QQQ +0.104%/+0.044%, DIA +0.056%/+0.038%, EFA +0.058%/+0.028%, EEM
++0.149%/+0.030% (IWM -0.007% differential, only exception). Built into actual monthly trades
+(enter close of 2nd-to-last day of month, exit close of 3rd trading day of next month, 0.10%
+cost): all 6 tickers show positive per-trade meanR (+0.04% to +0.48%) and win 54-58%.
+
+**Blend into the core book is a clean reject:**
+| | Core only | +5% | +10% | +15% |
+|---|---|---|---|---|
+| CAGR | +8.28% | +8.97% | +9.62% | +10.21% |
+| Max DD | −9.6% | −11.4% | −13.6% | −16.0% |
+| Sharpe | 1.00 | 0.99 | 0.94 | 0.88 |
+
+Sharpe monotonically WORSENS and DD blows out as weight increases -- the opposite of the dip
+sleeve's profile. Root cause: TOM is an UNCONDITIONAL calendar bet on the SAME tickers the core
+book already holds (SPY/QQQ/DIA/IWM/EFA/EEM are all core positions) -- it doesn't wait for a
+dip/stretch like the panic-MR signal does, it just goes long every month regardless of regime.
+When a crash spans a TOM window, it stacks MORE exposure on names the core book is already
+losing on, with zero diversification benefit (vs. the dip sleeve's counter-trend entry, a
+genuinely different risk driver). Same failure signature as the naive all-22 dip-buy extension,
+without the redeeming upside. **Not adopted, no code changes made.**
+
 ### ⭐⭐ BUILT 2026-07-09: panic-MR dip sleeve extended 3 → 11 tickers, DEPLOYED to paper
 User asked for a "1 trade/day, 0.5% risk, closes within days" opportunistic sleeve. Rather than a
 new mechanism, re-tested the ALREADY-VALIDATED panic-MR dip-buy signal (close<20MA*0.975, VIX
