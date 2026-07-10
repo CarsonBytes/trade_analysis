@@ -127,6 +127,13 @@ def mirror_new() -> list[str]:
     done = _mirrored_ids()
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
+    # Error 435 "You must specify an account" (confirmed live 2026-07-10): IBKR requires an
+    # explicit order.account whenever the login manages MORE than one account (this one does:
+    # the real U12991898 + an unrelated empty U20738951) -- without it, orders get silently
+    # cancelled. Fetched ONCE here (outside any call()/_run() closure -- account_id() does its
+    # own loop-thread round-trip, so calling it FROM inside one would self-deadlock) and passed
+    # down to every order-placing helper below.
+    acct = ib_client.account_id()
     # PHASE auto-switch: Phase 1 = core only; Phase 2 (equity >= PHASE2_NAV_USD) also runs the
     # panic-MR sleeve, IF ALSO explicitly enabled (sleeve.sleeve_enabled(), paper-only by
     # default -- see sleeve.py). Both gates independent so the sleeve never silently activates.
@@ -138,13 +145,13 @@ def mirror_new() -> list[str]:
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
                 continue
-            msg = _place_sleeve_bracket(ib, t, equity)                  # sleeve (see sleeve.SLEEVE_UNIVERSE)
+            msg = _place_sleeve_bracket(ib, t, equity, acct)            # sleeve (see sleeve.SLEEVE_UNIVERSE)
         elif t["method"] == MIRROR_METHOD:
             spec = contracts.SPECS.get(t["instrument"])
             if spec is not None:
-                msg = _place_bracket(ib, t, spec, equity)               # futures
+                msg = _place_bracket(ib, t, spec, equity, acct)         # futures
             elif t["instrument"] in ETF_TRADED_BY_KEY:
-                msg = _place_etf_bracket(ib, t, equity)                 # ETF (shares)
+                msg = _place_etf_bracket(ib, t, equity, acct)           # ETF (shares)
             else:
                 continue
         else:
@@ -177,7 +184,8 @@ def current_equity_usd() -> float | None:
     return _equity_usd(ib)
 
 
-def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> str | None:
+def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
+                   acct: str | None = None) -> str | None:
     inst = FUT_BY_KEY.get(t["instrument"])
     contract = ib_client.front_future(spec, dt.date.today())
     if contract is None:
@@ -205,6 +213,8 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> st
         for o in bracket:
             o.tif = "GTC"
             o.orderRef = f"quant#{t['id']}"
+            if acct:
+                o.account = acct
         return [ib.placeOrder(contract, o) for o in bracket]   # non-blocking; loop transmits
     try:
         trades = ib_client.call(send, timeout=15)
@@ -224,7 +234,7 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float) -> st
             f"SL {t['sl']} TP {t['tp']}")
 
 
-def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
+def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) -> str | None:
     """ETF order: SHARE-based sizing (shares = floor(risk_$ / stop_per_share)) and a
     SMART stock bracket. No contract specs/rolls -- ETFs are simpler than futures and
     divide finely, so any account size works."""
@@ -263,6 +273,8 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
         for o in bracket:
             o.tif = "GTC"
             o.orderRef = f"quant#{t['id']}"
+            if acct:
+                o.account = acct
         return [ib.placeOrder(contract, o) for o in bracket]
     try:
         trades = ib_client.call(send, timeout=15)
@@ -279,7 +291,7 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float) -> str | None:
             f"SL {sl_px} TP {tp_px}")
 
 
-def _place_sleeve_bracket(ib, t: dict, equity_usd: float) -> str | None:
+def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) -> str | None:
     """Panic-MR sleeve order: SAME bracket mechanics as _place_etf_bracket (a real broker
     STP -5% / LMT +3% pair protects the position even if this app is offline), but sized at
     the SLEEVE's own risk_pct (0.5% base / 1.0% at VIX>30), read from entry_facts -- NOT the
@@ -339,6 +351,8 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float) -> str | None:
         for o in bracket:
             o.tif = "GTC"
             o.orderRef = f"sleeve#{t['id']}"
+            if acct:
+                o.account = acct
         return [ib.placeOrder(contract, o) for o in bracket]
     try:
         trades = ib_client.call(send, timeout=15)
@@ -364,6 +378,7 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
     ib = _guard()
     if ib is None:
         return None
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     with paper._LOCK, _conn() as c:
         row = c.execute("SELECT con_id, qty, status FROM ib_mirror WHERE paper_id=?",
                         (trade["id"],)).fetchone()
@@ -391,6 +406,8 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
         import ib_async
         market = ib_async.MarketOrder("SELL", abs(qty))
         market.orderRef = f"sleeve-exit#{trade['id']}"
+        if acct:
+            market.account = acct
         return ib.placeOrder(contract, market)
     try:
         sent = ib_client.call(_do, timeout=15)
@@ -407,6 +424,7 @@ def sync_closures() -> list[str]:
     ib = _guard()
     if ib is None:
         return []
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     logs: list[str] = []
     journal = {t["id"]: t for t in paper.all_trades()}
     with paper._LOCK, _conn() as c:
@@ -465,7 +483,7 @@ def sync_closures() -> list[str]:
         spec = contracts.SPECS.get(pt["instrument"])
         exp = _parse_expiry(expiry)
         if spec is not None and exp is not None and contracts.needs_roll(exp, spec):
-            msg = _roll_position(ib, pt, spec, con_id, qty)
+            msg = _roll_position(ib, pt, spec, con_id, qty, acct)
             if msg:
                 logs.append(msg); log.info("ib_exec: %s", msg)
     return logs
@@ -501,7 +519,7 @@ def _last_exit_price(ib, con_id: int) -> float | None:
 
 
 def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
-                   qty: float) -> str | None:
+                   qty: float, acct: str | None = None) -> str | None:
     """Close the expiring front contract and re-open the next month at market,
     keeping the same SL/TP and paper-trade id. Updates the mirror row."""
     new_contract = ib_client.front_future(spec, dt.date.today() +
@@ -515,12 +533,17 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
         old = next((p.contract for p in (ib.positions() or [])
                     if p.contract.conId == old_con_id), None)
         if old is not None:
-            ib.placeOrder(old, ib_async.MarketOrder(close_act, qty))
+            close_o = ib_async.MarketOrder(close_act, qty)
+            if acct:
+                close_o.account = acct
+            ib.placeOrder(old, close_o)
         parent = ib_async.MarketOrder(open_act, qty)
         sl = ib_async.StopOrder(close_act, qty, float(trade["sl"]))
         tp = ib_async.LimitOrder(close_act, qty, float(trade["tp"]))
         for o in (parent, sl, tp):
             o.orderRef = f"quant#{trade['id']}"; o.tif = "GTC"
+            if acct:
+                o.account = acct
         ib.placeOrder(new_contract, parent)
         ib.placeOrder(new_contract, sl)
         ib.placeOrder(new_contract, tp)
@@ -605,6 +628,7 @@ def keep_cash_usd() -> dict:
     ib = _guard()
     if ib is None:
         return status
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     led = _ledger_cash(ib)
     if "USD" not in led and "HKD" not in led:            # ledger read failed -> keep last-good
         return status
@@ -660,6 +684,14 @@ def keep_cash_usd() -> dict:
         ib_client._run(_qualify())
         o = ib_async.MarketOrder("BUY", usd_to_buy)   # BUY USD base, pay HKD
         o.orderRef = "keep-cash-usd"
+        # Without an explicit TIF, IBKR defaults this to DAY "based on order preset" and then
+        # cancels it outright (Error 10349) -- confirmed live 2026-07-10, a SEPARATE bug from
+        # the missing-account one above (both silently blocked every past attempt). GTC (same
+        # as every other order type in this file) reaches Submitted; small size just gets a
+        # benign Warning 399 (below IdealPro's $25k minimum, routed as an odd lot).
+        o.tif = "GTC"
+        if acct:
+            o.account = acct
         trade = ib_client.call(lambda: ib.placeOrder(fx, o))
     except Exception as e:                             # noqa: BLE001
         status["log"] = f"keep-cash-usd: FX order failed ({e})"
@@ -707,6 +739,7 @@ def sweep_cash() -> dict:
     ib = _guard()
     if ib is None:
         return status
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     contract = ib_client.stock_contract(SGOV_SYMBOL)
     if contract is None:
         status["log"] = "cash-sweep: SGOV contract unavailable, retry"
@@ -766,6 +799,8 @@ def sweep_cash() -> dict:
         o = ib_async.MarketOrder(action, qty)
         o.orderRef = "cash-sweep-sgov"
         o.tif = "DAY"
+        if acct:
+            o.account = acct
         return ib.placeOrder(contract, o)
     try:
         ib_client.call(_send)
@@ -820,6 +855,7 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     ib = _guard()
     if ib is None:
         out["log"] = "withdrawal: not a paper IB connection (guard refused)"; return out
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     summ = ib_client.account_summary()
     if not summ or summ.get("TotalCashValue") is None:
         out["log"] = "withdrawal: account read failed, retry"; return out
@@ -861,6 +897,8 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
         def _send():
             o = ib_async.MarketOrder("SELL", sell_shares)
             o.orderRef = "withdraw-sgov"; o.tif = "DAY"
+            if acct:
+                o.account = acct
             return ib.placeOrder(contract, o)
         try:
             ib_client.call(_send); out["sgov_sold"] = sell_shares

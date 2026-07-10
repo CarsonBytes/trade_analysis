@@ -1052,6 +1052,39 @@ test files (incl. the pre-existing `test_contracts.py`) run clean, exit 0.
 **Still pending:** the 7 stale live trades need manual resolution once the user has checked
 IBKR's statement (do NOT fabricate exit prices in the meantime).
 
+### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
+User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
+still wasn't converting HKD→USD. Verified directly against live with an error-event listener
+(the existing code only checks order status in the instant right after `placeOrder()` -- a
+documented "best-effort" check that can't see a delayed rejection) and found the REAL cause had
+nothing to do with the forex permission:
+
+1. **Error 435 "You must specify an account."** This login manages TWO accounts (the real
+   `U12991898` + the unrelated empty `U20738951` — same pair behind the 2026-07-10 HKD-0 and
+   position-reconciliation bugs above). IBKR requires every `Order.account` to be set explicitly
+   once a login has >1 managed account; `ib_exec.py` never set it, ANYWHERE — not just
+   `keep_cash_usd()`. Grepped: 9 order-placement call sites (3 `bracketOrder()` — core/ETF/sleeve
+   entries — plus `manual_close_sleeve`, `_roll_position` x2 legs, `keep_cash_usd`, `sweep_cash`,
+   `prepare_withdrawal`), all missing `.account`. Fixed at all 9, using `ib_client.account_id()`
+   fetched ONCE per outer function call (never from inside an `ib_client.call()`/`_run()`
+   closure — calling it from there would self-deadlock the loop thread, same class of bug as the
+   `reqAllOpenOrders()` fix above) and threaded down as a parameter.
+2. **Error 10349 "Order TIF was set to DAY based on order preset"**, immediate cancel. A SEPARATE
+   bug, `keep_cash_usd()`-specific: every other order type in this file sets `o.tif = "GTC"`;
+   the FX order never did. Fixed the same way.
+
+**Verified against live, not just compiled:** connected directly with an `errorEvent` listener,
+confirmed a test FX order hit Error 435 before the fix, then Error 10349 after fixing #1 alone,
+then reached `Submitted` after fixing both (cancelled the test order manually). Redeployed;
+the next real `keep_cash_usd()` cycle went through for the first time ever — live ledger now
+shows a genuine `USD 100.00` balance (was always $0) and HKD dropped 10,040 → 9,240.27,
+confirming an actual fill, not just a status-log change.
+
+**Root cause note:** this bug predates this session by a long time (every `keep-cash-usd` log
+line ever written said "not yet confirmed filled" and never once said Filled) — it was never a
+forex-permission problem at all; the account may have had FX enabled long before the user's
+recent permission request, but no order ever got far enough to prove or disprove that.
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
