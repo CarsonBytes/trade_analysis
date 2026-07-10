@@ -937,6 +937,23 @@ forever (never actually accepted) -- changed to an explicit `is not None` check.
 Verified: compiled clean, redeployed to both dashboards, confirmed both still show correct
 balances (paper `HKD 1,017,290`, live `HKD 10,040`) after restart.
 
+**⭐ DATA CLEANUP (same day):** the two guards above stop this happening again, but the LIVE
+account's `equity_history` already had 45 corrupted `0.0` points baked in from the incident
+window (2026-07-10 05:10:46 to 12:46:01, cleanly bracketed by genuine `10040.0` readings on both
+sides -- confirmed via direct inspection, not guessed). Since `Drawdown from peak` and the equity
+chart are computed FRESH from `equity_history` on every render (no separately-persisted peak
+value to also reset), removing the bad points was the only cleanup needed. Also checked
+`cash_flows` for any bad entries the incident might have created -- clean, only the genuine
+2026-07-08 HKD 10,000 deposit is there (the OLD `equity_history` guard's `new_val > 0` bug meant
+the confirmed-jump/cash-flow branch never triggered for a zero reading, so no bogus flow was ever
+logged). Removed the 45 points directly from the live SQLite `cache` table (563 -> 518 points),
+verified via `store.cache_get()` (the real read path, not a raw query) that zero corrupted points
+remain and the series is still chronologically sorted. **No restart needed** -- `portfolio_panel()`
+reads `equity_history` fresh from the DB on every render, so the fix was visible immediately.
+Verified on the live dashboard: `Drawdown from peak: now +0.0%` and `You are up -- HKD 0
+(+0.00%)`, both now honest (a fresh account with zero closed trades really is at 0.0%, not the
+fake -25100% from the bug).
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
