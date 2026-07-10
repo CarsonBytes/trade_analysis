@@ -954,6 +954,26 @@ Verified on the live dashboard: `Drawdown from peak: now +0.0%` and `You are up 
 (+0.00%)`, both now honest (a fresh account with zero closed trades really is at 0.0%, not the
 fake -25100% from the bug).
 
+**⭐ AUTOMATIC RETROACTIVE SELF-HEAL (same day, `service.py`):** user asked directly whether stats
+now get "automatically revised and synced" going forward, not just prevented from breaking
+again. Honest answer at the time: no -- the confirm-then-accept guards are PREVENTIVE (stop new
+bad points from being WRITTEN), and the 45-point cleanup above was a one-off MANUAL fix, not an
+automatic process. Built `_self_heal_equity_history()` to close that gap: scans `equity_history`
+for a run of points that deviates >50% (or hits <=0) from the last known-good value AND is later
+bracketed by a clean return to that same normal level -- exactly the pattern of both this
+incident and the earlier "stray 40" one. Deliberately conservative: a run that ISN'T yet
+bracketed by a return to normal (i.e. still ongoing/unconfirmed) is left untouched, so it can
+never delete a genuine ongoing change, only already-resolved glitches -- unresolved cases stay
+governed by the confirm-then-accept guard, not this audit. Runs via `restore_cache()`, called at
+the top of every page load (`main_page()`) -- i.e. before stats are shown, as asked -- throttled
+to once per ~10min via a new `equity_healed_ts` cache key so rapid page refreshes don't re-scan
+repeatedly. Tested against 4 synthetic scenarios before touching real data: bracketed zero-spike
+(removed), a real sustained deposit-like jump with no return (kept, untouched), an unresolved
+anomaly still at the end of the series (left alone), normal small fluctuations (untouched) -- all
+4 passed. Deployed to both dashboards, confirmed `equity_healed_ts` was set on both (ran without
+error) and both still render correctly (paper `HKD 1,017,278`, live `HKD 10,040`, drawdown
+`+0.0%`).
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`

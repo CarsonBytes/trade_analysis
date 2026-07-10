@@ -416,9 +416,58 @@ def refresh_llm(cap: int | None = None) -> str:
     return status
 
 
+def _self_heal_equity_history() -> None:
+    """Auto-detect and remove ISOLATED anomalous points from equity_history -- a point (or a
+    run of consecutive points) that deviates >50% from the last known-good value AND is later
+    bracketed by a clean return to that same normal level. This is a RETROACTIVE audit,
+    complementary to the confirm-then-accept guard in refresh_cheap() (which stops NEW bad
+    points from being WRITTEN going forward) -- this catches anything already sitting in stored
+    history, whether from before that guard existed (2026-07-10's 45-point cleanup, done
+    manually, was exactly this pattern) or from some future bug the guard doesn't cover.
+    DELIBERATELY conservative: an anomalous run that ISN'T yet bracketed by a return to normal
+    (i.e. still ongoing / unconfirmed) is left untouched -- only a run that's cleanly resolved
+    on both sides gets auto-removed, so this can never delete a genuine ongoing change, only
+    already-resolved glitches. Runs on every page load (restore_cache()), throttled to once per
+    ~10min so rapid page refreshes don't re-scan the whole series repeatedly."""
+    import time as _time
+    last_scan, _ = store.cache_get("equity_healed_ts")
+    now_s = _time.time()
+    if last_scan and now_s - last_scan < 600:
+        return
+    hist, _ = store.cache_get("equity_history")
+    if hist and len(hist) >= 3:
+        cleaned: list = []
+        removed: list = []
+        i, n = 0, len(hist)
+        while i < n:
+            prev_good = cleaned[-1][1] if cleaned else None
+            v = hist[i][1]
+            if prev_good and prev_good > 0 and (v <= 0 or not (0.5 <= v / prev_good <= 2.0)):
+                j = i
+                while j < n and (hist[j][1] <= 0 or not (0.5 <= hist[j][1] / prev_good <= 2.0)):
+                    j += 1
+                if j < n and 0.5 <= hist[j][1] / prev_good <= 2.0:
+                    removed.extend(hist[i:j])         # bracketed by a return to normal -> drop
+                    i = j
+                    continue
+                # NOT bracketed (run extends to the end of history, unconfirmed) -- leave it;
+                # the confirm-then-accept guard governs whether it's real, not this audit
+            cleaned.append(hist[i])
+            i += 1
+        if removed:
+            store.cache_set("equity_history", cleaned)
+            log.warning("equity_history: self-heal removed %d anomalous point(s), e.g. %s",
+                        len(removed), removed[0])
+    store.cache_set("equity_healed_ts", now_s)
+
+
 def restore_cache() -> None:
     """Load the last board scan + portfolio snapshot from disk on startup (no broker
     call) so the dashboard shows last-known stats immediately instead of an empty section."""
+    try:
+        _self_heal_equity_history()
+    except Exception as e:                              # noqa: BLE001
+        log.debug("equity self-heal error: %s", e)
     data, ts = store.cache_get("last_board_scan")
     if data:
         STATE["macro_note"] = data.get("macro_note", "")
