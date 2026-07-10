@@ -1,7 +1,7 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-09.
+Last updated 2026-07-10.
 
 ---
 
@@ -973,6 +973,84 @@ anomaly still at the end of the series (left alone), normal small fluctuations (
 4 passed. Deployed to both dashboards, confirmed `equity_healed_ts` was set on both (ran without
 error) and both still render correctly (paper `HKD 1,017,278`, live `HKD 10,040`, drawdown
 `+0.0%`).
+
+### ⭐⭐⭐ BUILT 2026-07-10: auto-reconcile vs IBKR on every fresh login + uncovered a REAL live desync
+User asked: "upon every login, system should auto check all history from ibkr and ensure the
+stats on server is the same as local one" + "build relevant test cases". TWS API has no simple
+"give me historical NAV" call (needs Flex Queries / Client Portal report API — heavier,
+separate integration), so built the realistic version: on every FRESH gateway connection
+(`ib_client._S["needs_reconcile"]`, set True only on a genuine reconnect, not a reuse — see
+`reconcile_needed()`/`mark_reconciled()`), compare IBKR's actual reported positions against
+what the dashboard's mirror table thinks is open. New `dashboard/core/reconcile.py`
+(`compare_positions()` pure + `reconcile_with_broker()` I/O wrapper), triggered from
+`refresh_cheap()`, surfaced as a header badge (`⚠ position mismatch`) in `app.py`.
+
+**Two real bugs found and fixed while building this:**
+1. `ib_client.broker_positions()` used `reqPositionsAsync()` — but that method returns a raw
+   `asyncio.Future`, not a coroutine, incompatible with `_run()`'s
+   `run_coroutine_threadsafe()`. Fixed by wrapping in an inline `async def`.
+2. **The comparison source was wrong.** First version compared against
+   `paper.all_trades() status=='OPEN'` — but that table tracks trading *signals/ideas*
+   (rationale, LLM bias, macro_note), not confirmed broker fills; a signal can be OPEN there
+   without ever having been placed at IBKR. Fixed to compare against `ib_mirror status='OPEN'`
+   instead (new `ib_exec.mirrored_open_symbols()`) — the table that actually records what got
+   sent to the broker.
+
+**Then a real mismatch showed up on live, reproducibly, on every reconnect** — first
+misdiagnosed as a connect-timing race (positions not yet synced) and "fixed" with a generous
+retry (up to ~24s, harmless, kept). Verified against ground truth before trusting that theory
+though (direct `ib.portfolio()` + `accountSummary()` check): **live account U12991898 is
+genuinely 100% cash right now — `GrossPositionValue = HKD 0.00`** — while 7 positions
+(ASHR/AMLP/CWB/CPER/VNQ/DBC/EEM, placed 2026-06-24 to 2026-07-09) are still marked OPEN in both
+`ib_mirror` and the paper journal. Checked daily price history against each position's
+recorded SL/TP: only ASHR's 07-08 close ($34.84) crossed its stop ($34.90) — the other 6 never
+came close to SL or TP, meaning they likely did NOT exit via normal stop/target logic. Given
+this session's earlier ~-$97k HKD margin-debit incident on this same tiny (~$1,287) account, a
+margin-related forced liquidation is a real possibility. **Cannot recover exact historical
+fills via the TWS API** — `reqExecutions()` returned 0 rows (session-local cache doesn't retain
+data that far back); would need a Flex Query report or the IBKR web portal statement.
+
+**Root cause of the stale bookkeeping, found and fixed:** `sync_closures()` (the function that's
+supposed to detect broker-side closes) has been failing intermittently for weeks — 422+
+`executor closure sync error` occurrences since 2026-06-25 in the rotated log, across several
+distinct causes (TimeoutError, socket disconnects). One cause is a **definitively confirmed,
+reproducible bug**: `manual_close_sleeve()`'s inner `_do()` called `ib.reqAllOpenOrders()` (the
+SYNC wrapper) — which internally calls `ib_async.util.run()` →
+`loop.run_until_complete(task)`. But `_do()` itself already runs *on* the dedicated IB event
+loop thread (via `ib_client.call()`), so this nests a second `run_until_complete()` inside an
+already-running loop → `RuntimeError: This event loop is already running`, matching the log
+exactly. Fixed by switching to `ib.openTrades()` (passive in-memory cache, same shape as
+`reqAllOpenOrders()`'s result, no I/O) — the same safe pattern already used for
+`ib.positions()`/`ib.fills()` elsewhere in this file. Confirmed via `inspect.getsource()` that
+`cancelOrder()`/`placeOrder()`/`positions()`/`fills()`/`managedAccounts()` are all safe
+non-blocking sync calls with no nested-run risk; `reqAllOpenOrders()` was the only offender
+anywhere in `dashboard/`.
+
+**User's explicit decision (asked directly, real-money stakes):** do NOT touch the 7 stale
+trade records yet — check the IBKR web portal / account statement for the actual exit
+prices/dates first (possible margin liquidation), then resolve them with real numbers rather
+than an estimate. DO investigate + fix the sync_closures root cause now (done, above).
+
+**Deployed + verified 5 times this session** (each fix redeployed via
+Stop/Start-ScheduledTask + orphan-port kill + curl poll) — reconcile now consistently and
+correctly re-flags the same known real mismatch via the corrected `ib_mirror` source
+(`only_local(ghost)=['AMLP','ASHR','CPER','CWB','DBC','EEM','VNQ']`), confirming the pipeline
+works end-to-end; paper shows clean matches throughout (`match (7 open)` — paper has no
+analogous desync).
+
+**Test suite built** (`dashboard/tests/test_service.py`, `test_ib_client.py`,
+`test_reconcile.py` — matching the existing `test_contracts.py` convention: custom
+`check()`/`approx()` + `_fails` list + `__main__` runner, no pytest): 41 checks across
+`heal_series()` (bracketed spike removed / sustained jump kept / unresolved anomaly left
+alone / normal fluctuations untouched / empty+singleton edges), `is_nl_implausible()` +
+`pending_confirms()` (boundary cases incl. the `pending_val==0.0` falsy trap),
+`parse_account_summary_rows()` (including the exact 2-managed-account regression shape),
+and `compare_positions()` + `mirrored_open_symbols()` (the latter against an isolated temp
+sqlite db via `DASH_DB_NAME` override — never touches the real paper/live journal). All 4
+test files (incl. the pre-existing `test_contracts.py`) run clean, exit 0.
+
+**Still pending:** the 7 stale live trades need manual resolution once the user has checked
+IBKR's statement (do NOT fabricate exit prices in the meantime).
 
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected

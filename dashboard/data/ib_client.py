@@ -38,7 +38,8 @@ from dashboard.data.contracts import FutureSpec
 
 _LOCK = threading.Lock()          # serialises connect + per-call IB access
 _S: dict = {"ib": None, "import": None, "connected": False,
-            "loop": None, "thread": None, "last_attempt": 0.0}
+            "loop": None, "thread": None, "last_attempt": 0.0,
+            "needs_reconcile": False}      # set True on every FRESH connect (not a reuse)
 
 _BARSIZE = {"M1": "1 min", "M5": "5 mins", "M15": "15 mins", "M30": "30 mins",
             "H1": "1 hour", "H4": "4 hours", "D1": "1 day", "W1": "1 week"}
@@ -148,6 +149,8 @@ def _ensure_conn():
                 continue
             break
         _S["ib"], _S["connected"] = ib, True
+        _S["needs_reconcile"] = True    # a FRESH connect (not a reuse) -- flag for the next
+                                         # refresh_cheap() cycle to run a broker reconciliation
         log.info("ib_client: connected %s:%s clientId=%s", host, port, client_id)
         return ib
     log.info("ib_client: connect to %s:%s failed (%s) -- falling back", host, port, last_err)
@@ -158,6 +161,45 @@ def _ensure_conn():
 def is_available() -> bool:
     with _LOCK:
         return _ensure_conn() is not None
+
+
+def reconcile_needed() -> bool:
+    """True once after a FRESH connection (login/reconnect) -- caller (service.py's refresh
+    cycle) should run reconcile.reconcile_with_broker() then call mark_reconciled()."""
+    return _S.get("needs_reconcile", False)
+
+
+def mark_reconciled() -> None:
+    _S["needs_reconcile"] = False
+
+
+def broker_positions() -> dict | None:
+    """{symbol: net_position} for every NON-ZERO position IBKR reports for this account.
+    None if IB down. Used by reconcile.py to cross-check against local OPEN trade records."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+    try:
+        # reqPositionsAsync() actively REQUESTS + waits, same as accountSummaryAsync() --
+        # the passive ib.positions() reads an internal cache that isn't guaranteed populated
+        # yet right after a fresh connect (found live: a reconcile run immediately after
+        # DashboardApp restarted reported 7 false "ghost" positions -- the broker hadn't
+        # pushed its position snapshot yet, not an actual desync). Use the active version.
+        # NOTE: reqPositionsAsync() returns a raw asyncio.Future, not a coroutine -- _run()
+        # needs an actual coroutine for run_coroutine_threadsafe(), so wrap it in one.
+        async def _req():
+            return await ib.reqPositionsAsync()
+        positions = _run(_req(), timeout=10)
+    except Exception:                                  # noqa: BLE001
+        return None
+    out: dict = {}
+    for p in positions:
+        if p.position:
+            sym = getattr(p.contract, "symbol", None)
+            if sym:
+                out[sym] = out.get(sym, 0.0) + float(p.position)
+    return out
 
 
 # ---- contract resolution ---------------------------------------------------
@@ -377,6 +419,38 @@ def account_id() -> str | None:
     return accts[0] if accts else None
 
 
+ACCOUNT_SUMMARY_TAGS = {"NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower",
+                        "UnrealizedPnL", "RealizedPnL", "GrossPositionValue", "ExcessLiquidity",
+                        "AccruedCash"}
+
+
+def parse_account_summary_rows(rows, target_acct: str | None) -> dict | None:
+    """PURE function (no I/O -- unit-testable in isolation): filter+parse
+    accountSummaryAsync()-style rows (each needs .tag/.value/.currency/.account attributes)
+    down to ONLY the target_acct's values. Rows for any OTHER account are skipped entirely.
+
+    FIXED 2026-07-10: accountSummaryAsync() can return rows for MULTIPLE managed accounts
+    under one login (found live -- a second, unrelated, all-zero account U20738951 appeared
+    alongside the real U12991898). Without this filter, whichever account's row was processed
+    LAST silently overwrote the correct one -- a real account showing all-zero on the
+    dashboard while IBKR's own UI was fine. See test_ib_client.py for the regression test."""
+    out: dict = {}
+    ccy = None
+    for v in rows:
+        if target_acct and getattr(v, "account", None) and v.account != target_acct:
+            continue
+        if v.tag in ACCOUNT_SUMMARY_TAGS:
+            try:                                       # (paper acct here is HKD, not USD)
+                out[v.tag] = float(v.value)
+            except (TypeError, ValueError):
+                continue
+            if v.currency:
+                ccy = v.currency
+    if ccy:
+        out["_ccy"] = ccy
+    return out or None
+
+
 def account_summary() -> dict | None:
     """Paper account balances for the dashboard: NetLiquidation, cash, available
     funds, buying power, unrealized/realized PnL, gross position value (USD). None
@@ -396,30 +470,7 @@ def account_summary() -> dict | None:
         vals = _run(ib.accountSummaryAsync(), timeout=10)
     except Exception:                                  # noqa: BLE001
         return None
-    want = {"NetLiquidation", "TotalCashValue", "AvailableFunds", "BuyingPower",
-            "UnrealizedPnL", "RealizedPnL", "GrossPositionValue", "ExcessLiquidity",
-            "AccruedCash"}
-    out: dict = {}
-    ccy = None
-    for v in vals:
-        # FIXED 2026-07-10: accountSummaryAsync() can return rows for MULTIPLE managed
-        # accounts under one login (found live -- a second, unrelated, all-zero account
-        # U20738951 appeared alongside the real U12991898). Without filtering by account,
-        # whichever account's row was processed LAST silently overwrote the correct one --
-        # a real account showing all-zero on the dashboard while IBKR's own UI was fine.
-        # Only accept rows for the PRIMARY managed account (same account account_id() uses).
-        if target_acct and v.account and v.account != target_acct:
-            continue
-        if v.tag in want:                              # accept the account's base ccy
-            try:                                       # (paper acct here is HKD, not USD)
-                out[v.tag] = float(v.value)
-            except (TypeError, ValueError):
-                continue
-            if v.currency:
-                ccy = v.currency
-    if ccy:
-        out["_ccy"] = ccy
-    return out or None
+    return parse_account_summary_rows(vals, target_acct)
 
 
 def is_paper() -> bool:

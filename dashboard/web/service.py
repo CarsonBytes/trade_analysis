@@ -98,6 +98,27 @@ def _score_one(inst):
     return inst.key, score, source, live_px, live_src, spread, age, spark
 
 
+# ---- pure sanity-guard logic (no I/O -- unit-testable in isolation) --------------------
+def is_nl_implausible(new_nl: float, prev_nl: float | None, lo: float = 0.5, hi: float = 2.0) -> bool:
+    """Does a new NetLiquidation reading look wrong relative to the last known-good value?
+    False if there's no real baseline yet (prev_nl is None/<=0 -- nothing to compare against,
+    so the first-ever reading is always accepted). True if the new value hits zero/negative,
+    or moves outside a [lo, hi] x prev_nl band (default: outside 0.5x-2x)."""
+    if prev_nl is None or prev_nl <= 0:
+        return False
+    if new_nl <= 0:
+        return True
+    return not (lo <= (new_nl / prev_nl) <= hi)
+
+
+def pending_confirms(pending_val: float | None, new_val: float, tol: float = 0.01) -> bool:
+    """Does new_val match a previously-held pending anomaly (within tol)? Explicit
+    'is not None' rather than truthiness -- pending_val==0.0 is a legitimate (if rare) value
+    to confirm, and treating it as falsy would leave a genuine confirmed drop-to-zero stuck in
+    pending limbo forever."""
+    return pending_val is not None and abs(pending_val - new_val) < tol
+
+
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
@@ -129,6 +150,18 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["broker_conn"] = None
         log.debug("broker.connection error: %s", e)
+    # broker reconciliation: once per FRESH connection (login/reconnect, not every cycle --
+    # see ib_client.reconcile_needed()), diff broker-reported positions against local OPEN
+    # trade records and surface any mismatch (the "ghost mirror" bug class).
+    if broker.is_ib():
+        try:
+            from dashboard.data import ib_client
+            if ib_client.reconcile_needed():
+                from dashboard.core import reconcile
+                STATE["reconcile"] = reconcile.reconcile_with_broker()
+                ib_client.mark_reconciled()
+        except Exception as e:
+            log.debug("reconcile error: %s", e)
     # keep last-good account: a momentary gateway/connection hiccup returns None ->
     # don't clobber the cached balances (the panel would flash "data unavailable").
     # SANITY GUARD, confirm-then-accept (2026-07-10, same pattern as equity_history's guard
@@ -145,16 +178,10 @@ def refresh_cheap() -> None:
         _prev_nl = (STATE.get("account") or {}).get("NetLiquidation")
         if _acct and _acct.get("NetLiquidation") is not None:
             _new_nl = float(_acct["NetLiquidation"])
-            _ratio = (_new_nl / _prev_nl) if _prev_nl else None
-            # implausible = we HAD a real last-good reading, and the new one either hits
-            # exactly zero/negative or moves outside a 2x-either-way band from it
-            _implausible = (_prev_nl is not None and _prev_nl > 0
-                            and (_new_nl <= 0 or _ratio is None
-                                 or not (0.5 <= _ratio <= 2.0)))
-            if _implausible:
+            if is_nl_implausible(_new_nl, _prev_nl):
                 _pending, _ = store.cache_get("account_pending_anomaly")
-                if (_pending and _pending.get("val") is not None and
-                        abs(_pending["val"] - _new_nl) < 0.01):
+                _pending_val = _pending.get("val") if _pending else None
+                if pending_confirms(_pending_val, _new_nl):
                     STATE["account"] = _acct         # confirmed on 2 consecutive reads -> accept
                     store.cache_set("account_pending_anomaly", None)
                     log.warning("account_summary: CONFIRMED sustained change %.2f -> %.2f",
@@ -416,19 +443,45 @@ def refresh_llm(cap: int | None = None) -> str:
     return status
 
 
+def heal_series(hist: list, lo: float = 0.5, hi: float = 2.0) -> tuple[list, list]:
+    """PURE function (no I/O -- unit-testable in isolation): given a [[ts, val, ccy], ...]
+    series, return (cleaned, removed). Detects a run of consecutive points that deviates
+    outside [lo, hi] x the last known-good value (or hits <=0) AND is later bracketed by a
+    clean return to that same normal level -- exactly the shape of the 2026-07-10 incident (and
+    the earlier 'stray 40' one). DELIBERATELY conservative: a run that ISN'T yet bracketed by a
+    return to normal (still ongoing / unconfirmed, e.g. sitting at the end of the series) is
+    left untouched -- this can never delete a genuine ongoing change, only already-resolved
+    glitches. See test_service.py for the scenarios this is checked against."""
+    cleaned: list = []
+    removed: list = []
+    i, n = 0, len(hist)
+    while i < n:
+        prev_good = cleaned[-1][1] if cleaned else None
+        v = hist[i][1]
+        if prev_good and prev_good > 0 and (v <= 0 or not (lo <= v / prev_good <= hi)):
+            j = i
+            while j < n and (hist[j][1] <= 0 or not (lo <= hist[j][1] / prev_good <= hi)):
+                j += 1
+            if j < n and lo <= hist[j][1] / prev_good <= hi:
+                removed.extend(hist[i:j])             # bracketed by a return to normal -> drop
+                i = j
+                continue
+            # NOT bracketed (run extends to the end of history, unconfirmed) -- leave it;
+            # the confirm-then-accept guard governs whether it's real, not this audit
+        cleaned.append(hist[i])
+        i += 1
+    return cleaned, removed
+
+
 def _self_heal_equity_history() -> None:
-    """Auto-detect and remove ISOLATED anomalous points from equity_history -- a point (or a
-    run of consecutive points) that deviates >50% from the last known-good value AND is later
-    bracketed by a clean return to that same normal level. This is a RETROACTIVE audit,
-    complementary to the confirm-then-accept guard in refresh_cheap() (which stops NEW bad
-    points from being WRITTEN going forward) -- this catches anything already sitting in stored
-    history, whether from before that guard existed (2026-07-10's 45-point cleanup, done
-    manually, was exactly this pattern) or from some future bug the guard doesn't cover.
-    DELIBERATELY conservative: an anomalous run that ISN'T yet bracketed by a return to normal
-    (i.e. still ongoing / unconfirmed) is left untouched -- only a run that's cleanly resolved
-    on both sides gets auto-removed, so this can never delete a genuine ongoing change, only
-    already-resolved glitches. Runs on every page load (restore_cache()), throttled to once per
-    ~10min so rapid page refreshes don't re-scan the whole series repeatedly."""
+    """I/O wrapper around heal_series(): loads equity_history, heals it, saves back if
+    anything changed. This is a RETROACTIVE audit, complementary to the confirm-then-accept
+    guard in refresh_cheap() (which stops NEW bad points from being WRITTEN going forward) --
+    this catches anything already sitting in stored history, whether from before that guard
+    existed (2026-07-10's 45-point cleanup, done manually, was exactly this pattern) or from
+    some future bug the guard doesn't cover. Runs on every page load (restore_cache()),
+    throttled to once per ~10min so rapid page refreshes don't re-scan the whole series
+    repeatedly."""
     import time as _time
     last_scan, _ = store.cache_get("equity_healed_ts")
     now_s = _time.time()
@@ -436,24 +489,7 @@ def _self_heal_equity_history() -> None:
         return
     hist, _ = store.cache_get("equity_history")
     if hist and len(hist) >= 3:
-        cleaned: list = []
-        removed: list = []
-        i, n = 0, len(hist)
-        while i < n:
-            prev_good = cleaned[-1][1] if cleaned else None
-            v = hist[i][1]
-            if prev_good and prev_good > 0 and (v <= 0 or not (0.5 <= v / prev_good <= 2.0)):
-                j = i
-                while j < n and (hist[j][1] <= 0 or not (0.5 <= hist[j][1] / prev_good <= 2.0)):
-                    j += 1
-                if j < n and 0.5 <= hist[j][1] / prev_good <= 2.0:
-                    removed.extend(hist[i:j])         # bracketed by a return to normal -> drop
-                    i = j
-                    continue
-                # NOT bracketed (run extends to the end of history, unconfirmed) -- leave it;
-                # the confirm-then-accept guard governs whether it's real, not this audit
-            cleaned.append(hist[i])
-            i += 1
+        cleaned, removed = heal_series(hist)
         if removed:
             store.cache_set("equity_history", cleaned)
             log.warning("equity_history: self-heal removed %d anomalous point(s), e.g. %s",

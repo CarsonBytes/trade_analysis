@@ -106,6 +106,16 @@ def _mirrored_ids() -> set[int]:
         return {r[0] for r in c.execute("SELECT paper_id FROM ib_mirror").fetchall()}
 
 
+def mirrored_open_symbols() -> set[str]:
+    """Symbols this dashboard believes are ACTUALLY OPEN at the broker (i.e. an order
+    was placed and mirrored, and not yet marked closed) -- the correct comparison set
+    for broker reconciliation. NOT the same as paper.all_trades() status=='OPEN', which
+    tracks signal/idea state and can be OPEN for a trade that was never mirrored/filled."""
+    with paper._LOCK, _conn() as c:
+        return {r[0] for r in c.execute(
+            "SELECT local_symbol FROM ib_mirror WHERE status='OPEN'").fetchall()}
+
+
 # ---- actions ----------------------------------------------------------------
 
 def mirror_new() -> list[str]:
@@ -366,7 +376,16 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
                          if p.contract.conId == con_id), None)
         if contract is None:
             return None                                  # already flat; sync_closures handles it
-        for o in (ib.reqAllOpenOrders() or []):
+        # ib.reqAllOpenOrders() is a SYNC wrapper that internally calls
+        # util.run() -> loop.run_until_complete() -- illegal from inside a callback
+        # already executing ON that same running loop (which is exactly where _do()
+        # runs, via ib_client.call() below), and raises "This event loop is already
+        # running" (confirmed live: 422+ occurrences in logs since 2026-06-25, several
+        # of which cascaded into sync_closures() failures on the next cycle). Use the
+        # passive in-memory cache (ib.openTrades(), same shape as reqAllOpenOrders()'s
+        # result) instead -- no I/O, just reads what the account-sync subscription has
+        # already delivered, same pattern as ib.positions()/ib.fills() elsewhere here.
+        for o in (ib.openTrades() or []):
             if o.contract.conId == con_id:
                 ib.cancelOrder(o.order)
         import ib_async

@@ -239,6 +239,14 @@ def header_status() -> None:
                              "DU… paper account on a paper port), or the LIVE account when "
                              "IB_ALLOW_LIVE is armed (guard requires the exact configured "
                              "live account on a live port)")
+                _rec = service.STATE.get("reconcile") or {}
+                if _rec.get("only_local") or _rec.get("only_broker"):
+                    ui.badge("⚠ position mismatch", color="red").tooltip(
+                        f"Broker reconciliation (run on last login) found a desync -- "
+                        f"local-only (ghost, no broker position): {_rec.get('only_local')}; "
+                        f"broker-only (no local record): {_rec.get('only_broker')}. "
+                        f"Check ib_mirror vs paper_trades and the broker's own position list "
+                        f"directly before trusting P&L numbers.")
                 acct = service.STATE.get("account") or {}
                 if acct:
                     cc = acct.get("_ccy", "")
