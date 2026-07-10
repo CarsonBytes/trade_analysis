@@ -683,7 +683,15 @@ def portfolio_panel() -> None:
     # trading P&L, so they must be excluded (see service.py's equity_history cash-flow logging)
     net_flows = sum(f[1] for f in (flows or []) if f[0] >= base0_ts)
     total_pl = nl - base0 - net_flows
-    pct = (total_pl / base0 * 100.0) if base0 else 0.0
+    # BUG FIXED 2026-07-10: pct used to divide by base0 alone -- fine when tracking starts
+    # AFTER the account is funded, but wrong once a deposit lands on top of a tiny/near-zero
+    # starting snapshot (confirmed live: base0=HKD 40 from before the account's real HKD
+    # 10,000 deposit, so a genuine -HKD 31 cost showed as -78% instead of the true ~-0.3%).
+    # The capital base P&L should be measured against is base0 PLUS everything deposited
+    # since, not the original snapshot alone -- same denominator the numerator already
+    # implicitly uses (total_pl nets deposits OUT of the delta; pct must net them INTO the base).
+    capital_base = base0 + net_flows
+    pct = (total_pl / capital_base * 100.0) if capital_base else 0.0
 
     def _money(x):
         return f"{ccy} {x:,.0f}"
@@ -745,21 +753,62 @@ def portfolio_panel() -> None:
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         _stat("Total value", _money(nl), "text-grey-9",
               f"Net liquidation value of the {_bk.name()} account")
-        _stat("Unrealized (open)", _money(upnl),
-              "text-green" if upnl >= 0 else "text-red",
-              "P&L of currently open positions (USD converted at the HKD peg)")
-        if invested is not None:
-            _stat("Invested", _money(invested), "text-grey-9",
-                  "Market value of strategy ETF positions (excludes SGOV cash parking)")
+        # "Unrealized (open)" and "Invested" are only meaningful once there's something
+        # actually open -- showing two redundant "HKD 0" stats when the account is fully in
+        # cash was just clutter (user feedback 2026-07-10). Gate both on real GPV.
+        if gpv is not None and gpv > 0:
+            _stat("Unrealized (open)", _money(upnl),
+                  "text-green" if upnl >= 0 else "text-red",
+                  "P&L of currently open positions (USD converted at the HKD peg)")
+            if invested is not None:
+                _stat("Invested", _money(invested), "text-grey-9",
+                      "Market value of strategy ETF positions (excludes SGOV cash parking)")
+        else:
+            ui.label("Fully in cash — no open positions").classes(
+                "text-sm text-grey-6 self-center")
 
     ui.label("Cash & financing — how positions are funded, NOT profit or loss (see the "
              "P&L card above for that)").classes("text-xs text-grey-6 italic mt-3")
+    # Two intentional rows: line 1 groups Cash (buffer) with what it's ACTUALLY COSTING OR
+    # EARNING (Interest accrued + Projected interest) so the causality is obvious at a glance
+    # -- a negative buffer directly explains a negative projected interest, and vice versa
+    # (user feedback 2026-07-10: these used to be split across two separate rows, which hid
+    # that link). Line 2 is the currency/form BREAKDOWN of that cash, plus buying power as
+    # the financing-capacity reference.
+    MARGIN_DEBIT_RATE = 5.5   # approx IBKR HKD/USD margin rate; not account-specific (no API
+                              # field for the live per-account rate) -- see HANDOFF ~5-6% figure
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch"):
         if cash is not None:
             _stat("Cash (buffer)", _money(cash), "text-grey-9",
                   "Un-parked cash kept available for the strategy. Negative just means the "
                   "open positions' combined size is funded partly on margin (normal with "
                   "several concurrent positions) — it is NOT a loss.")
+        accrued = acct.get("AccruedCash")
+        if accrued is not None:
+            _stat("Interest accrued", _money(accrued),
+                  "text-green" if accrued >= 0 else "text-red",
+                  "IB interest accrued on CASH balances since the last monthly payout "
+                  "(running total, resets monthly). NOT from SGOV — SGOV pays separate monthly "
+                  "distributions. Negative = net margin interest owed.")
+        # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB credit/debit rate.
+        # Borrow and lend rates are NOT symmetric -- a positive cash buffer earns the ~benchmark
+        # credit rate (ib_rate), but a NEGATIVE buffer is a margin debit charged ~5-6% (see the
+        # "USD cash" tooltip below), a materially higher rate. Using ib_rate for both understated
+        # the true cost of the (normal, expected) small margin debit that comes from sizing
+        # multiple concurrent ETF positions independently -- fixed 2026-07-09.
+        if sgov_rate is not None:
+            sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
+            cash_val = cash or 0.0
+            cash_rate = (ib_rate or 0.0) if cash_val >= 0 else MARGIN_DEBIT_RATE
+            cash_mo = cash_val * cash_rate / 100.0 / 12.0
+            proj = sgov_mo + cash_mo
+            _stat("Projected interest (1mo)", _money(proj),
+                  "text-green" if proj >= 0 else "text-red",
+                  f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
+                  f"USD cash {_money(cash_mo)} @ {cash_rate:.1f}% "
+                  f"({'margin debit rate, approx' if cash_val < 0 else 'live ^IRX-derived rate'})")
+
+    with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         if sgov_base > 0:
             _stat("Cash in SGOV", _money(sgov_base), "text-green",
                   f"Idle cash parked in SGOV (0-3mo T-bill ETF) yielding {sgov_yld} — auto-swept")
@@ -767,6 +816,11 @@ def portfolio_panel() -> None:
         if fx.get("enabled"):
             usd_c = fx.get("usd_cash", 0.0)
             hkd_c = fx.get("hkd_cash", 0.0)
+            _stat("HKD cash", f"HKD {hkd_c:,.0f}",
+                  "text-green" if hkd_c >= 0 else "text-red",
+                  "HKD cash balance -- the keep-cash-usd feature converts this down to a small "
+                  "residual buffer each cycle, moving the rest into USD cash (next stat) to earn "
+                  "USD yield instead of sitting idle in HKD.")
             if fx.get("stuck"):
                 with ui.column().classes("items-start gap-0"):
                     ui.label("USD cash").classes("text-xs text-grey-6 uppercase")
@@ -784,32 +838,15 @@ def portfolio_panel() -> None:
                       "the account is a margin debit (~5-6% interest), same story as Cash "
                       f"(buffer) above; auto-converts idle HKD→USD each cycle. "
                       f"HKD residual: {hkd_c:,.0f}")
-        accrued = acct.get("AccruedCash")
-        if accrued is not None:
-            _stat("Interest accrued", _money(accrued),
-                  "text-green" if accrued >= 0 else "text-red",
-                  "IB interest accrued on CASH balances since the last monthly payout "
-                  "(running total, resets monthly). NOT from SGOV — SGOV pays separate monthly "
-                  "distributions. Negative = net margin interest owed.")
-        # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB credit/debit rate.
-        # Borrow and lend rates are NOT symmetric -- a positive cash buffer earns the ~benchmark
-        # credit rate (ib_rate), but a NEGATIVE buffer is a margin debit charged ~5-6% (see the
-        # "USD cash" tooltip above), a materially higher rate. Using ib_rate for both understated
-        # the true cost of the (normal, expected) small margin debit that comes from sizing
-        # multiple concurrent ETF positions independently -- fixed 2026-07-09.
-        MARGIN_DEBIT_RATE = 5.5   # approx IBKR HKD/USD margin rate; not account-specific (no API
-                                  # field for the live per-account rate) -- see HANDOFF ~5-6% figure
-        if sgov_rate is not None:
-            sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
-            cash_val = cash or 0.0
-            cash_rate = (ib_rate or 0.0) if cash_val >= 0 else MARGIN_DEBIT_RATE
-            cash_mo = cash_val * cash_rate / 100.0 / 12.0
-            proj = sgov_mo + cash_mo
-            _stat("Projected interest (1mo)", _money(proj),
-                  "text-green" if proj >= 0 else "text-red",
-                  f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
-                  f"USD cash {_money(cash_mo)} @ {cash_rate:.1f}% "
-                  f"({'margin debit rate, approx' if cash_val < 0 else 'live ^IRX-derived rate'})")
+        buying_power = acct.get("BuyingPower")
+        if buying_power is not None:
+            _stat("Buying power (購買力)", _money(buying_power), "text-grey-9",
+                  "Total purchasing capacity IBKR will extend right now (cash + available "
+                  "margin). On a MARGIN account this exceeds Total value (e.g. paper: ~5x, "
+                  "reflecting the ETF_POS_CAP leverage design); on a CASH-only account it's "
+                  "capped near available cash with no multiple. If this stays equal to Total "
+                  "value on an account you expect to be margin-enabled, margin capacity likely "
+                  "isn't actually active — confirm in IBKR's Account Management portal.")
 
     # Period control: governs BOTH charts below. The drawdown "now" badge + the peak-tracking
     # always use the FULL history (correctness -- a window can't hide the true current DD from

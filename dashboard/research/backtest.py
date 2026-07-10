@@ -50,6 +50,16 @@ POS_CAP: float | None = None     # --pos-cap: max per-position NOTIONAL as a fra
                                  # None = legacy (cap dep at 100% equity, full 0.5% risk always).
                                  # A float caps notional AND scales risk down when a low-vol ETF's
                                  # full-risk notional exceeds the cap (models a small-account limit).
+PORTFOLIO_CAP: float | None = None  # --portfolio-cap: max TOTAL deployed notional (all open
+                                 # positions summed) as a fraction of equity, e.g. 1.0 = never
+                                 # exceed 100% gross exposure. Tested 2026-07-11: hybrid idea --
+                                 # keep POS_CAP generous (full-size bets when few positions are
+                                 # open) but cap the AGGREGATE so margin debit only kicks in when
+                                 # many positions stack up concurrently (the actual cause, not the
+                                 # per-position cap alone -- see HANDOFF). None = no portfolio-level
+                                 # ceiling (legacy). New entries are scaled down (not skipped) to
+                                 # fit whatever budget remains, same "scale don't skip" philosophy
+                                 # as POS_CAP itself.
 CASH_YIELD = None                # --cash-yield: annualised rate Series (decimal) by date;
                                  # credits idle (un-deployed) equity = execution-layer realism
 MARGIN_DEBIT_RATE = 0.055         # FIXED 2026-07-09: when deployed notional exceeds equity
@@ -413,6 +423,9 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
             eff_risk = risk_money                                  # full 0.5% risk always taken
         else:                                                      # small-account notional cap:
             notional = min(desired, equity * POS_CAP)              # cap notional per position...
+            if PORTFOLIO_CAP is not None:                          # ...then cap the AGGREGATE too:
+                room = max(equity * PORTFOLIO_CAP - dep[0], 0.0)    # scale this entry down (not
+                notional = min(notional, room)                     # skip it) to whatever budget
             eff_risk = risk_money * (notional / desired) if desired > 0 else risk_money
         dep[0] += notional                                        # ...and scale risk to what fits
         open_pos[nid] = {"exit_date": c["exit_date"], "key": c["key"], "cls": cls,
@@ -554,6 +567,11 @@ def main():
                          "low-vol ETF's full-risk notional exceeds it). Prevents small-account "
                          "over-leverage; ~0.20 costs ~-1pp CAGR but cuts maxDD & lifts Sharpe. "
                          "LIVE default = 0.25 (ETF_POS_CAP env, unset -> code default).")
+    ap.add_argument("--portfolio-cap", type=float, default=None, metavar="FRAC",
+                    help="cap TOTAL deployed notional (all open positions summed) at FRAC of "
+                         "equity, e.g. 1.0 = never exceed 100%% gross exposure. Hybrid with "
+                         "--pos-cap: keeps per-position sizing generous, only scales down NEW "
+                         "entries once several positions are already stacked concurrently.")
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
@@ -680,6 +698,10 @@ def main():
         global POS_CAP
         POS_CAP = args.pos_cap
         print(f"[POS-CAP: per-position notional <= {POS_CAP:.0%} of equity (+risk-scaled)]")
+    if args.portfolio_cap is not None:
+        global PORTFOLIO_CAP
+        PORTFOLIO_CAP = args.portfolio_cap
+        print(f"[PORTFOLIO-CAP: total deployed notional <= {PORTFOLIO_CAP:.0%} of equity]")
     if args.direction:                            # explicit override; else keep config default
         _DIRECTIONS = {"both": ("long", "short"), "long": ("long",),
                        "short": ("short",)}[args.direction]

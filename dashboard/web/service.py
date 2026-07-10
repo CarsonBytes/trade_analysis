@@ -119,6 +119,32 @@ def pending_confirms(pending_val: float | None, new_val: float, tol: float = 0.0
     return pending_val is not None and abs(pending_val - new_val) < tol
 
 
+def is_equity_jump_implausible(new_val: float, prev_val: float, gpv: float | None) -> bool:
+    """Does a new equity_history reading look like an unexplained jump (a deposit/withdrawal,
+    or corrupted data) rather than ordinary trading movement -- i.e. should it be held for
+    confirmation before being recorded, and logged as a cash flow (not P&L) once confirmed?
+
+    FOUND 2026-07-10: the original fixed 0.5x-2.0x band only ever caught LARGE jumps -- it
+    correctly flagged a ~10x deposit, but would silently miss a routine ~30% monthly
+    contribution (the user's actual funding plan) once the account is big enough that the
+    contribution is a smaller fraction of NAV, letting it get counted as fake trading P&L.
+
+    Fix: when there are NO open positions (gpv <= ~0), NOTHING legitimate should move
+    NetLiquidation beyond tiny interest/FX noise -- so ANY change past a small noise band is
+    flagged, catching deposits/withdrawals of any size. With open positions, mark-to-market
+    P&L can legitimately swing equity a lot, so fall back to the wider ratio band (a tight
+    absolute band would misfire constantly on ordinary position price moves)."""
+    if prev_val <= 0:
+        return False
+    if new_val <= 0:
+        return True
+    no_positions = gpv is not None and gpv <= 1.0
+    if no_positions:
+        noise_band = max(100.0, prev_val * 0.005)   # generous vs typical interest/FX noise
+        return abs(new_val - prev_val) > noise_band
+    return not (0.5 <= new_val / prev_val <= 2.0)
+
+
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
@@ -227,8 +253,14 @@ def refresh_cheap() -> None:
             # explicitly caught. (The account_summary()-level guard above now also blocks a bad
             # zero from ever reaching STATE["account"] in the first place -- this is defense in
             # depth for whatever still gets through, or a genuine real-world case.)
-            implausible = (hist and hist[-1][1] > 0
-                          and (new_val <= 0 or not (0.5 <= new_val / hist[-1][1] <= 2.0)))
+            # Root-caused a FOURTH time 2026-07-10: the fixed 0.5x-2.0x band only ever caught
+            # LARGE jumps (it correctly flagged this account's ~10x deposit), but would silently
+            # miss a routine ~30% monthly contribution (the user's actual funding plan) once the
+            # account is big enough -- letting a real deposit get counted as fake trading P&L.
+            # is_equity_jump_implausible() tightens this to catch ANY unexplained change while
+            # flat (no open positions -- see its docstring).
+            implausible = bool(hist) and is_equity_jump_implausible(
+                new_val, hist[-1][1], acct.get("GrossPositionValue"))
             if implausible:
                 pending, _pts = store.cache_get("equity_pending_jump")
                 _pv = pending.get("val") if pending else None

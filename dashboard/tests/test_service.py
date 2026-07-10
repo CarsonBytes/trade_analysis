@@ -4,7 +4,8 @@ self-heal and the account-summary confirm-then-accept guard. Run:
 """
 from __future__ import annotations
 
-from dashboard.web.service import heal_series, is_nl_implausible, pending_confirms
+from dashboard.web.service import (heal_series, is_nl_implausible, pending_confirms,
+                                   is_equity_jump_implausible)
 
 _fails = []
 
@@ -88,12 +89,39 @@ def test_pending_confirms():
     check("different anomaly value -> does not confirm", pending_confirms(0.0, 50.0), False)
 
 
+def test_is_equity_jump_implausible():
+    print("is_equity_jump_implausible:")
+    check("no baseline yet -> always plausible", is_equity_jump_implausible(10_000.0, 0.0, 0.0), False)
+    check("drop to zero -> implausible", is_equity_jump_implausible(0.0, 10_040.0, 0.0), True)
+    # FLAT (no open positions): tight noise-band check, regardless of jump size in ratio terms
+    check("flat, tiny noise -> plausible", is_equity_jump_implausible(10_090.0, 10_040.0, 0.0), False)
+    check("flat, exactly at noise-band boundary -> plausible",
+          is_equity_jump_implausible(10_140.0, 10_040.0, 0.0), False)  # noise_band = max(100, 50.2) = 100
+    check("flat, just past noise-band boundary -> implausible",
+          is_equity_jump_implausible(10_140.01, 10_040.0, 0.0), True)
+    # THE KEY REGRESSION CHECK: a ~30% deposit-sized jump used to be MISSED (within the old
+    # 0.5x-2.0x band) -- now correctly flagged while flat, since nothing legitimate explains it.
+    check("flat, ~30% deposit-sized jump -> now correctly implausible (was missed before)",
+          is_equity_jump_implausible(13_000.0, 10_040.0, 0.0), True)
+    # a large confirmed jump (the actual live incident) still correctly flagged too
+    check("flat, ~10x jump -> implausible", is_equity_jump_implausible(99_994.0, 10_040.0, 0.0), True)
+    # WITH open positions: falls back to the wider ratio band (mark-to-market P&L is legitimate)
+    check("open positions, 30% move -> plausible (within wide band)",
+          is_equity_jump_implausible(13_000.0, 10_040.0, 5_000.0), False)
+    check("open positions, >2x move -> implausible",
+          is_equity_jump_implausible(21_000.0, 10_040.0, 5_000.0), True)
+    # gpv unknown (None, e.g. a connection hiccup before GrossPositionValue populates) -> must
+    # NOT be treated as "flat" (we don't actually know) -- falls back to the wide band
+    check("gpv unknown -> falls back to wide band, 30% move plausible",
+          is_equity_jump_implausible(13_000.0, 10_040.0, None), False)
+
+
 if __name__ == "__main__":
     for t in (test_heal_series_bracketed_zero_spike, test_heal_series_real_sustained_jump_kept,
               test_heal_series_unresolved_anomaly_left_alone,
               test_heal_series_normal_fluctuations_untouched,
               test_heal_series_empty_and_singleton, test_is_nl_implausible,
-              test_pending_confirms):
+              test_pending_confirms, test_is_equity_jump_implausible):
         t()
     print()
     if _fails:

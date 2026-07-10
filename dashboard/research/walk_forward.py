@@ -11,6 +11,9 @@ than "narrow, strong robustness" would look like. Meaningfully weaker in 1996-20
 (CAGR +1.2% to +4.6%, one negative window 2001-2006) than 2016-2026 (CAGR +11-12%).
 Honest read: the edge is real but regime-dependent, not uniformly stable -- see
 HANDOFF.md 2026-07-09 for the full table.
+
+Usage: uv run python -m dashboard.research.walk_forward [pos_cap] [portfolio_cap]
+  (defaults: pos_cap=0.25, portfolio_cap=None -- pass e.g. 0.25 1.0 for the hybrid)
 """
 import os
 os.environ.setdefault("BROKER", "ib"); os.environ.setdefault("UNIVERSE", "etf")
@@ -20,7 +23,9 @@ import dashboard.research.backtest as bt
 from dashboard.instruments import active_universe
 
 bt.CASH_YIELD = None
-bt.POS_CAP = 0.25
+bt.POS_CAP = float(sys.argv[1]) if len(sys.argv) > 1 else 0.25
+bt.PORTFOLIO_CAP = float(sys.argv[2]) if len(sys.argv) > 2 else None
+print(f"[POS-CAP: {bt.POS_CAP:.3f}]  [PORTFOLIO-CAP: {bt.PORTFOLIO_CAP}]")
 universe = active_universe()
 
 cands = []

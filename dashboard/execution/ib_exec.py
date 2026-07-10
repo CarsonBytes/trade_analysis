@@ -46,6 +46,22 @@ SLEEVE_MAX_SPREAD_PCT = 0.005  # 0.5% of mid -- skip a sleeve entry if the live 
                                # a rolling per-ticker baseline, so this is a fixed absolute cap.
 
 
+# ---- pure sizing logic (no I/O -- unit-testable in isolation) ---------------
+
+def cap_qty_to_portfolio_room(qty: int, price: float, equity_usd: float,
+                              portfolio_cap: float, deployed_usd: float) -> int:
+    """Scale a proposed share count DOWN (never up, never below 0) so this position's
+    notional fits within whatever portfolio-level budget remains, given what's already
+    deployed. Mirrors research.backtest's PORTFOLIO_CAP hybrid (see HANDOFF 2026-07-11):
+    the per-position cap (ETF_POS_CAP) alone lets several concurrent positions each near
+    25% stack past 100% total exposure -- this caps the AGGREGATE instead, without touching
+    per-position sizing when there's room (0 disables, matching ETF_POS_CAP's convention)."""
+    if portfolio_cap <= 0 or price <= 0:
+        return qty
+    room = max(equity_usd * portfolio_cap - deployed_usd, 0.0)
+    return min(qty, int(room // price))
+
+
 # ---- paper guard (non-negotiable) ------------------------------------------
 
 def is_paper() -> bool:
@@ -127,6 +143,18 @@ def mirror_new() -> list[str]:
     done = _mirrored_ids()
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
+    # PORTFOLIO_CAP (2026-07-11): ETF_POS_CAP alone only limits any ONE position -- with
+    # several concurrent positions each near that cap, the total can still stack well past
+    # 100% of equity (confirmed live: 7 positions summing to ~127%), which is what actually
+    # drives the margin-debit interest cost, not the per-position cap itself. Backtested
+    # hybrid (keep ETF_POS_CAP generous, cap the AGGREGATE too) strictly dominated every
+    # pure-per-position-cap alternative tested (more CAGR AND better maxDD -- see HANDOFF).
+    # `deployed` is a running total seeded from the broker's real GrossPositionValue and
+    # incremented as each new position is placed THIS cycle, so multiple signals firing in
+    # the same cycle can't collectively overshoot the cap (each only sees room actually left
+    # after earlier ones in the same batch, same "walk the book chronologically" logic the
+    # backtest itself uses).
+    deployed = [_gpv_usd(ib)]
     # Error 435 "You must specify an account" (confirmed live 2026-07-10): IBKR requires an
     # explicit order.account whenever the login manages MORE than one account (this one does:
     # the real U12991898 + an unrelated empty U20738951) -- without it, orders get silently
@@ -145,13 +173,13 @@ def mirror_new() -> list[str]:
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
                 continue
-            msg = _place_sleeve_bracket(ib, t, equity, acct)            # sleeve (see sleeve.SLEEVE_UNIVERSE)
+            msg = _place_sleeve_bracket(ib, t, equity, acct, deployed)  # sleeve (see sleeve.SLEEVE_UNIVERSE)
         elif t["method"] == MIRROR_METHOD:
             spec = contracts.SPECS.get(t["instrument"])
             if spec is not None:
-                msg = _place_bracket(ib, t, spec, equity, acct)         # futures
+                msg = _place_bracket(ib, t, spec, equity, acct)         # futures (no portfolio-cap yet)
             elif t["instrument"] in ETF_TRADED_BY_KEY:
-                msg = _place_etf_bracket(ib, t, equity, acct)           # ETF (shares)
+                msg = _place_etf_bracket(ib, t, equity, acct, deployed)  # ETF (shares)
             else:
                 continue
         else:
@@ -172,6 +200,20 @@ def _equity_usd(ib) -> float:
         if rate:
             return nl * rate
     return paper.ACCOUNT
+
+
+def _gpv_usd(ib) -> float:
+    """Current GrossPositionValue in USD -- the broker's own real-time mark of everything
+    already deployed (not a local reconstruction from entry prices, which can drift from
+    reality -- see the 2026-07-10 ghost-position incident). 0.0 if unavailable (fails open:
+    a missing reading means the portfolio-cap check below just sees no deployed exposure
+    yet, same conservative direction as _equity_usd falling back to paper.ACCOUNT)."""
+    summ = ib_client.account_summary()
+    if summ and summ.get("GrossPositionValue") is not None:
+        rate = ib_client.fx_to_usd(summ.get("_ccy", "USD"))
+        if rate:
+            return summ["GrossPositionValue"] * rate
+    return 0.0
 
 
 def current_equity_usd() -> float | None:
@@ -234,7 +276,8 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
             f"SL {t['sl']} TP {t['tp']}")
 
 
-def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) -> str | None:
+def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
+                       deployed: list[float] | None = None) -> str | None:
     """ETF order: SHARE-based sizing (shares = floor(risk_$ / stop_per_share)) and a
     SMART stock bracket. No contract specs/rolls -- ETFs are simpler than futures and
     divide finely, so any account size works."""
@@ -255,10 +298,22 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) 
     price = float(t["entry"])
     if pos_cap > 0 and price > 0:
         qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))
+    # PORTFOLIO_CAP (2026-07-11): the per-position cap alone lets several concurrent positions
+    # each near 25% stack past 100% total exposure (confirmed live: 7 positions -> ~127%,
+    # driving the margin-debit interest cost). Backtested hybrid (keep ETF_POS_CAP generous,
+    # cap the AGGREGATE too via research.backtest's PORTFOLIO_CAP) strictly beat every pure
+    # per-position-cap alternative -- more CAGR AND better maxDD (see HANDOFF). Scales this
+    # entry DOWN to whatever room is left (never skips outright), same "scale don't skip"
+    # philosophy as the per-position cap above. 0 disables (matches ETF_POS_CAP's convention).
+    portfolio_cap = float(os.environ.get("PORTFOLIO_CAP", "1.0"))
+    if deployed is not None:
+        qty = cap_qty_to_portfolio_room(qty, price, equity_usd, portfolio_cap, deployed[0])
     if qty < 1:
         return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
     action = "BUY" if t["direction"] == "long" else "SELL"
     risk_money = equity_usd * paper.RISK_PER_TRADE
+    if deployed is not None:
+        deployed[0] += qty * price          # so later signals THIS cycle see the updated total
     # US ETFs trade on a $0.01 tick; IB rejects (Error 110) child legs whose price
     # carries sub-penny precision, leaving the position UNPROTECTED. Round to cents.
     tp_px = round(float(t["tp"]), 2)
@@ -291,7 +346,8 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) 
             f"SL {sl_px} TP {tp_px}")
 
 
-def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = None) -> str | None:
+def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
+                          deployed: list[float] | None = None) -> str | None:
     """Panic-MR sleeve order: SAME bracket mechanics as _place_etf_bracket (a real broker
     STP -5% / LMT +3% pair protects the position even if this app is offline), but sized at
     the SLEEVE's own risk_pct (0.5% base / 1.0% at VIX>30), read from entry_facts -- NOT the
@@ -313,6 +369,10 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
     price = float(t["entry"])
     if pos_cap > 0 and price > 0:
         qty = min(qty, int(math.floor(equity_usd * pos_cap / price)))
+    # PORTFOLIO_CAP: same aggregate-exposure guard as _place_etf_bracket -- see its comment.
+    portfolio_cap = float(os.environ.get("PORTFOLIO_CAP", "1.0"))
+    if deployed is not None:
+        qty = cap_qty_to_portfolio_room(qty, price, equity_usd, portfolio_cap, deployed[0])
     if qty < 1:
         return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
     # SPREAD-WIDENING GUARD (2026-07-09): the sleeve's whole thesis is entering during a VIX
@@ -338,6 +398,8 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
     # deliberately fall through and place the order anyway, matching how the rest of this
     # codebase treats missing live quotes elsewhere -- a permanent block on every missing-quote
     # cycle would silently starve the sleeve of all its trades on a delayed-data account.
+    if deployed is not None:                # only reserve budget once past every skip check
+        deployed[0] += qty * price
     action = "BUY"                                       # sleeve is long-only
     risk_money = equity_usd * risk_pct
     tp_px = round(float(t["tp"]), 2)
