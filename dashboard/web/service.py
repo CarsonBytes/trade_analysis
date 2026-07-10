@@ -131,10 +131,43 @@ def refresh_cheap() -> None:
         log.debug("broker.connection error: %s", e)
     # keep last-good account: a momentary gateway/connection hiccup returns None ->
     # don't clobber the cached balances (the panel would flash "data unavailable").
+    # SANITY GUARD, confirm-then-accept (2026-07-10, same pattern as equity_history's guard
+    # below): "is not None" alone let a genuinely wrong reading straight through -- found live,
+    # a second managed account under this login clobbered account_summary()'s output to all
+    # zeros (now fixed in ib_client.py, but this is the layer that should have caught the
+    # SYMPTOM regardless of which underlying cause produces it next time). A NetLiquidation
+    # that suddenly reads implausibly (drops >50% or hits exactly 0 vs the last-good value) is
+    # held pending -- STATE["account"] keeps the last-good reading -- and only accepted once
+    # the SAME anomalous value repeats on the next cycle (a real, sustained change), same as a
+    # transient blip gets silently discarded if the next reading reverts to normal.
     try:
         _acct = broker.account_summary()
+        _prev_nl = (STATE.get("account") or {}).get("NetLiquidation")
         if _acct and _acct.get("NetLiquidation") is not None:
-            STATE["account"] = _acct
+            _new_nl = float(_acct["NetLiquidation"])
+            _ratio = (_new_nl / _prev_nl) if _prev_nl else None
+            # implausible = we HAD a real last-good reading, and the new one either hits
+            # exactly zero/negative or moves outside a 2x-either-way band from it
+            _implausible = (_prev_nl is not None and _prev_nl > 0
+                            and (_new_nl <= 0 or _ratio is None
+                                 or not (0.5 <= _ratio <= 2.0)))
+            if _implausible:
+                _pending, _ = store.cache_get("account_pending_anomaly")
+                if (_pending and _pending.get("val") is not None and
+                        abs(_pending["val"] - _new_nl) < 0.01):
+                    STATE["account"] = _acct         # confirmed on 2 consecutive reads -> accept
+                    store.cache_set("account_pending_anomaly", None)
+                    log.warning("account_summary: CONFIRMED sustained change %.2f -> %.2f",
+                                _prev_nl, _new_nl)
+                else:
+                    store.cache_set("account_pending_anomaly", {"val": _new_nl})
+                    log.warning("account_summary: implausible NetLiquidation %.2f (prev %.2f) "
+                               "-- held pending confirmation, keeping last-good on screen",
+                               _new_nl, _prev_nl)
+                    # do NOT update STATE["account"] -- last-good value stays displayed
+            else:
+                store.cache_set("account_pending_anomaly", None)
+                STATE["account"] = _acct
     except Exception as e:
         log.debug("account_summary error: %s", e)
     # record an equity (NetLiq) snapshot for the portfolio line chart (throttled ~10min)
@@ -159,11 +192,24 @@ def refresh_cheap() -> None:
             # line at that point. Root-caused again 2026-07-08: the original one-shot-reject
             # version of this guard permanently stuck the chart after a REAL HKD 10,000 deposit,
             # since every future reading was >2x the stale pre-deposit baseline forever.
-            implausible = hist and new_val > 0 and not (0.5 <= new_val / hist[-1][1] <= 2.0)
+            # Root-caused a THIRD time 2026-07-10: this check's `new_val > 0` condition meant a
+            # drop TO zero/negative was never flagged as implausible at all (it short-circuited
+            # to False, skipping the check entirely) -- a genuinely wrong zero reading (the
+            # account_summary multi-account bug, see HANDOFF) sailed straight into equity_history
+            # unflagged. Now checks the PREVIOUS point's validity instead, so new_val<=0 is
+            # explicitly caught. (The account_summary()-level guard above now also blocks a bad
+            # zero from ever reaching STATE["account"] in the first place -- this is defense in
+            # depth for whatever still gets through, or a genuine real-world case.)
+            implausible = (hist and hist[-1][1] > 0
+                          and (new_val <= 0 or not (0.5 <= new_val / hist[-1][1] <= 2.0)))
             if implausible:
                 pending, _pts = store.cache_get("equity_pending_jump")
-                if (pending and pending.get("val") and
-                        0.95 <= new_val / pending["val"] <= 1.05):
+                _pv = pending.get("val") if pending else None
+                # "is not None" not truthiness -- 0 is a legitimate (if rare) value to confirm,
+                # and `pending.get("val")` alone treats 0 as falsy = "no pending value", which
+                # would leave a genuine confirmed drop-to-zero stuck in pending limbo forever.
+                if (_pv is not None and (0.95 <= new_val / _pv <= 1.05 if _pv
+                                          else new_val == 0)):
                     flows, _fts = store.cache_get("cash_flows")
                     flows = flows or []
                     flows.append([now_s, new_val - hist[-1][1], acct.get("_ccy", "")])

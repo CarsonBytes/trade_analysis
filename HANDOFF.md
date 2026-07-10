@@ -910,6 +910,33 @@ to the live dashboard (restarted `DashboardAppLive`), confirmed the UI shows `HK
 worth asking IBKR / checking Client Portal for any newly-linked account, though it doesn't affect
 correctness anymore now that `account_summary()` is properly scoped.
 
+**⭐ FOLLOW-UP (same day): added a general sanity guard, not just this one root-cause fix.**
+User's suggestion: "check balance history before showing stats, to avoid unsync problems" --
+right diagnosis of the actual gap. The upstream `ib_client.py` fix stops THIS specific cause, but
+`service.py`'s `STATE["account"]` assignment had NO plausibility check at all before this, only
+`is not None` -- the bad zero reading (`0.0 is not None` == True) sailed straight through and
+got displayed. Added a confirm-then-accept guard (`account_pending_anomaly` cache key, same
+pattern as the existing `equity_pending_jump` guard): a `NetLiquidation` reading that drops to
+zero/negative or moves outside a 2x-either-way band from the last-good value is held pending --
+`STATE["account"]` keeps showing the LAST-GOOD reading, not the suspicious one -- and is only
+accepted once the SAME anomalous value repeats on the next cycle (a real, sustained change, e.g.
+an actual large deposit/withdrawal or a genuine loss), same as a one-off blip gets silently
+dropped if the next reading reverts to normal.
+
+**Also found and fixed a related latent gap while implementing this**, in the ALREADY-EXISTING
+`equity_history` guard (not the new one): its `implausible = hist and new_val > 0 and ...` check
+explicitly EXCLUDED `new_val <= 0` from ever being flagged -- meaning a drop to exactly zero
+would have sailed past that guard too and gotten recorded into the permanent equity_history chart
+un-flagged (confirmed: the earlier bug episode DID leave a few `[ts, 0.0, 'HKD']` points in
+`equity_history` before the STATE-level fix would have caught it upstream). Fixed to check the
+PREVIOUS point's validity instead, explicitly catching `new_val<=0`. Also fixed a secondary bug
+in the SAME guard's confirm branch: `pending.get("val")` was used as a truthiness check, and `0`
+is falsy in Python, so a genuine CONFIRMED drop-to-zero would have stayed stuck in pending limbo
+forever (never actually accepted) -- changed to an explicit `is not None` check.
+
+Verified: compiled clean, redeployed to both dashboards, confirmed both still show correct
+balances (paper `HKD 1,017,290`, live `HKD 10,040`) after restart.
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`
