@@ -874,6 +874,42 @@ Infra added: `ETF_SCREEN_BATCH_10` (USFR/MBB/FLOT/WIP remain, deferred/rejected 
 same reversibility principle as EMB/BKLN/FM) + `--etf-screen10` in `backtest.py`, mirroring the
 existing batch pattern exactly.
 
+### 🐞 FIXED 2026-07-10: live dashboard showed HKD 0 -- a second managed account clobbered the real one
+User reported the live dashboard's headline P&L flipped to "HKD -10,040 (-25100.00%)". Investigated
+and found the account snapshot itself was reading ALL ZERO (`NetLiquidation`, `TotalCashValue`,
+`GrossPositionValue`, `AvailableFunds`, `ExcessLiquidity` all 0.0) -- not a display-math bug, the
+underlying account read really was zero. User confirmed IBKR's own Client Portal/TWS showed the
+correct, UNCHANGED balance -- ruling out an actual account/fund issue and confirming this was a
+read-side bug somewhere in this codebase.
+
+**Investigation path (each step ruled out one layer):** (1) found two "IBKR Gateway" processes
+running simultaneously (one from 5am, one from the 8am daily restart) -- looked like the same
+"duplicate stuck session" bug fixed 2026-07-09, killed both, fresh relaunch confirmed clean login
+via the IBC log ("Login has completed", no 2FA needed) -- **still zero**. (2) restarted the
+`DashboardAppLive` app process itself in case its `ib_client` connection object was stale --
+**still zero**. (3) wrote a minimal, isolated script bypassing the whole dashboard/ib_client
+layer, connecting fresh with its own clientId and calling `accountSummaryAsync()` directly --
+**this revealed the real cause**: `ib.managedAccounts()` now returns TWO accounts under this
+login, `U12991898` (the real one, correctly showing NetLiquidation HKD 10,040) AND a second,
+unrelated, genuinely-empty account `U20738951` (all zeros).
+
+**Root cause:** `ib_client.account_summary()` iterated `accountSummaryAsync()`'s returned rows
+by TAG ONLY (`NetLiquidation`, `TotalCashValue`, etc.), with no filter on WHICH account a row
+belongs to. Once the gateway started returning rows for both accounts, whichever account's row
+was processed LAST silently overwrote the correct one in the output dict -- with U20738951 (all
+zero) apparently sorting after U12991898, every field ended up zeroed. `account_id()` (used by
+`is_paper()`/the live-trading guard) was NOT affected -- it already used `accts[0]`, and
+U12991898 is first in the list, so the trading-safety guard was correctly scoped throughout; this
+was a DISPLAY bug, not a guard/safety bug -- no orders were at risk of hitting the wrong account.
+
+**Fixed:** `account_summary()` now resolves the same primary account (`managedAccounts()[0]`) and
+filters every row to `v.account == target_acct` before accepting it. Verified: an isolated
+re-test of the fixed function returned the correct `NetLiquidation: 10040.0` immediately; deployed
+to the live dashboard (restarted `DashboardAppLive`), confirmed the UI shows `HKD 10,040` again.
+**Still open:** why a second managed account appeared under this login at all is unexplained --
+worth asking IBKR / checking Client Portal for any newly-linked account, though it doesn't affect
+correctness anymore now that `account_summary()` is properly scoped.
+
 ### 🐞 FIXED 2026-07-09: "Projected interest (1mo)" ignored the margin-debit rate on negative cash
 User asked whether a paper-account "Cash (buffer) HKD -20,547 / USD cash $-2,684 / Projected
 interest HKD -54" reading was correct. The negative cash itself is NOT a bug: `GrossPositionValue`

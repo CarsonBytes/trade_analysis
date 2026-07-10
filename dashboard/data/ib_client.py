@@ -386,6 +386,11 @@ def account_summary() -> dict | None:
         if ib is None:
             return None
     try:
+        accts = call(lambda: ib.managedAccounts())
+    except Exception:                                  # noqa: BLE001
+        accts = []
+    target_acct = accts[0] if accts else None
+    try:
         # accountSummaryAsync REQUESTS + waits -- accountValues() is empty right
         # after connect (populated asynchronously).
         vals = _run(ib.accountSummaryAsync(), timeout=10)
@@ -397,6 +402,14 @@ def account_summary() -> dict | None:
     out: dict = {}
     ccy = None
     for v in vals:
+        # FIXED 2026-07-10: accountSummaryAsync() can return rows for MULTIPLE managed
+        # accounts under one login (found live -- a second, unrelated, all-zero account
+        # U20738951 appeared alongside the real U12991898). Without filtering by account,
+        # whichever account's row was processed LAST silently overwrote the correct one --
+        # a real account showing all-zero on the dashboard while IBKR's own UI was fine.
+        # Only accept rows for the PRIMARY managed account (same account account_id() uses).
+        if target_acct and v.account and v.account != target_acct:
+            continue
         if v.tag in want:                              # accept the account's base ccy
             try:                                       # (paper acct here is HKD, not USD)
                 out[v.tag] = float(v.value)
