@@ -1,7 +1,7 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-10.
+Last updated 2026-07-11.
 
 ---
 
