@@ -1156,6 +1156,52 @@ tickers, 5MA-touch exits), so it can't be used as a quick stand-in without misre
 real thing. Flagged as unverified; a faithful test needs a dedicated script that actually wires
 in `core/sleeve.py`'s real logic, not a quick reproduction -- not done here.
 
+### 🔬🔬 TESTED 2026-07-11: sleeve activation -- a REAL number, finally, and it refutes every prior claim
+A THIRD critique doubled down on the unverified sleeve figures from the prior round, claiming
+"HANDOFF confirms" sleeve@15% and citing a brand-NEW invented figure for sleeve@20% (+15.19%/
+-12.6%) that appears in no prior document at all -- a direct misreading of the entry above
+("not explicitly denied" was twisted into "confirmed"; the entry actually says "unverified...
+not done here"). Given this is now the third round citing numbers with no backtest behind them,
+built the faithful reproduction flagged as needed: reused `dipbuy_refine3.py`'s exact ADOPTED
+entry/exit spec (SPY+QQQ+XLK; entry = price<97.5%*20MA & VIX+15%/5d & RSI14<35 & ADX>20; exit =
+first of 5MA-touch / +3% TP / -5% SL / 10 trading days; 10bp cost) blended against the CURRENT
+core book (hybrid `PORTFOLIO_CAP`, current cash-yield/margin-debit model) -- not a proxy, the
+real adopted methodology, just re-run at the current config instead of the old 18-ETF/flat-cap
+one.
+
+| config | CAGR | maxDD | Sharpe | Calmar |
+|---|---|---|---|---|
+| core only (hybrid cap) | +6.44% | -6.83% | 1.032 | 0.943 |
+| core + sleeve @5% | +7.32% | -6.52% | 1.163 | 1.122 |
+| **core + sleeve @10%** | **+8.19%** | **-6.59%** | **1.263** | **1.244** |
+| core + sleeve @15% | +9.07% | -7.52% | 1.327 | 1.206 |
+| core + sleeve @20% | +9.94% | -8.45% | 1.360 | 1.176 |
+
+**Every critique-cited figure was substantially overstated:** claimed sleeve@10% (+10.78%/
+-10.8%) vs real (+8.19%/-6.59%) -- CAGR overstated 2.6pp, MDD overstated 4.2pp. Claimed @15%
+(+12.58%/-11.1%) vs real (+9.07%/-7.52%) -- overstated 3.5pp. The invented @20% figure
+(+15.19%/-12.6%) vs real (+9.94%/-8.45%) -- overstated 5.3pp.
+
+**And the real data contradicts the critiques' central claim.** They argued 15% beats 10% as
+the "sweet spot". The real test shows Calmar PEAKS at 10% (1.244) and DECLINES at 15%/20%
+(1.206, 1.176) -- sizing the sleeve up further trades Calmar for raw CAGR, the same leverage-
+style trade-off found everywhere else in this research. If Calmar is the objective, **10% is
+better than 15%, the opposite of every prior claim.**
+
+**Two honest scope limits on this result:** (1) only tests the ORIGINAL 3-ticker (SPY/QQQ/XLK)
+spec, NOT the 11-ticker staged-rollout universe actually configured to run live (expanded later
+without a matching backtest at that broader universe -- still an open gap). (2) Sharpe here uses
+daily-interpolated resampling, methodologically different from the `_metrics()`-based Sharpe
+quoted elsewhere this session -- don't cross-compare the "core only" baseline (1.032 here) 
+against the 1.19 figure quoted in other entries; the RELATIVE comparison across sleeve weights
+within this test is what's trustworthy, not the absolute baseline Sharpe.
+
+**No config change made** -- this settles the NUMBERS question (real backtest now exists,
+proving the alleged figures wrong) but does NOT settle the DEPLOY question (zero real trading
+history exists for this sleeve, confirmed via a direct database check the same day -- see the
+"check paper account for sleeve trades" finding). Real numbers now available if/when a genuine
+activation decision is made; not acted on here.
+
 **PORTFOLIO_CAP 100%->80% (critique 1) -- tested, NOT the clean win claimed:**
 | config | Full Sharpe | Full maxDD | OOS Sharpe | OOS maxDD | OOS ratio |
 |---|---|---|---|---|---|
