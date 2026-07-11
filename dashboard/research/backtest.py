@@ -926,6 +926,15 @@ def main():
             print("[CASH-YIELD: ^IRX fetch failed -- idle cash stays at 0%]")
     if args.mom_filter:                               # relative-strength (XSMOM) overlay
         N, LB = args.mom_filter, 13                    # top-N by trailing ~3mo (13wk) return
+        # GUARD (2026-07-11): LB=13 assumes WEEKLY bars; run without --weekly/--longweekly
+        # and it silently becomes a 13-DAY lookback on daily bars instead -- same class of
+        # bug caught in _exit_test() above.
+        any_df = next(iter(data.values()))
+        median_gap_days = any_df.index.to_series().diff().dt.days.median()
+        if median_gap_days < 4:
+            raise SystemExit(
+                f"--mom-filter: bar spacing looks DAILY (median {median_gap_days:.1f}d "
+                f"apart), not weekly -- pass --weekly or --longweekly (LB=13 means 13 weeks).")
         rets = {k: df["close"].pct_change(LB) for k, df in data.items()}
 
         def _topN(asof):
@@ -1170,13 +1179,68 @@ def _resolve_exhaustion(direction, entry, sl, tp, bars, arm_r=0.5, rsi_drop=15.0
     return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
 
 
+def _resolve_time_decay(direction, entry, sl, tp, bars, decay_bar=3, decay_sl_r=0.0):
+    """TIME-DECAY exit (2026-07-11 critique test): after `decay_bar` bars with the trade
+    neither stopped out nor meaningfully in profit (< 1R), tighten the stop to
+    entry + `decay_sl_r` x risk (0.0 = breakeven, -0.5 = a half-loss floor) -- the
+    'dead money, cut it looser-but-sooner' idea. NOTE: `paper.HORIZON_DAYS=5` means the
+    full trade horizon is already only 5 bars, so `decay_bar` must be LESS than 5 to have
+    any effect (the critique's own suggested '5 weeks' would be a no-op -- that's already
+    when the trade force-closes anyway)."""
+    risk = abs(entry - sl)
+    if risk <= 0 or len(bars) == 0:
+        return None
+    sgn = 1 if direction == "long" else -1
+    cur_sl = sl
+    decayed = False
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo, close = row["high"], row["low"], row["close"]
+        if direction == "long":
+            if lo <= cur_sl:
+                return ("WIN" if cur_sl > entry else "LOSS"), cur_sl, n
+            if hi >= tp:
+                return "WIN", tp, n
+        else:
+            if hi >= cur_sl:
+                return ("WIN" if cur_sl < entry else "LOSS"), cur_sl, n
+            if lo <= tp:
+                return "WIN", tp, n
+        if not decayed and n >= decay_bar:
+            favor = sgn * (close - entry)
+            if favor < 1.0 * risk:                      # not yet a "big win"
+                new_sl = entry + sgn * decay_sl_r * risk
+                cur_sl = max(cur_sl, new_sl) if direction == "long" else min(cur_sl, new_sl)
+            decayed = True
+    return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
+
+
 def _exit_test(data, span, years) -> None:
     """Pre-specified EXIT-METHOD comparison on the CURRENT locked config (the prior
     breakeven test was on the old spot/daily universe -- doesn't transfer). One run,
     OOS @0.5%, then lock. Fixed SL/TP is the baseline trend-following exit; the rest
-    'lock profit early', which theory says should HURT a trend system -- we verify."""
+    'lock profit early', which theory says should HURT a trend system -- we verify.
+
+    EXTENDED 2026-07-11: two critiques converged on this exact question after the OOS-only
+    table showed breakeven@+1R and pure-trail apparently beating fixed by a wide margin --
+    too large a claim to accept from ONE OOS slice without checking whether it holds
+    IN-SAMPLE too (a real edge should show up in both; an OOS-only "win" is a classic
+    lucky-window red flag). Now reports IS, OOS, and FULL for each method."""
     from functools import partial
     from dashboard.research.ab_meanrev import _atr, _rsi
+    # GUARD (2026-07-11): --exit-test run WITHOUT --weekly/--longweekly silently gets
+    # main()'s DEFAULT 5-YEAR DAILY bars, not the live system's weekly bars -- caught this
+    # session after a "breakeven@+1R massively improves Calmar" result on that wrong scope
+    # completely reversed (became a clear LOSS) once re-run on the real full-history weekly
+    # data HORIZON_DAYS=5 means bars/weeks, not bars/days. Refuse to silently produce
+    # misleading numbers a second time.
+    any_df = next(iter(data.values()))
+    median_gap_days = any_df.index.to_series().diff().dt.days.median()
+    if median_gap_days < 4:
+        raise SystemExit(
+            f"--exit-test: bar spacing looks DAILY (median {median_gap_days:.1f}d apart), "
+            f"not weekly -- pass --weekly or --longweekly. paper.HORIZON_DAYS is counted in "
+            f"BARS, so running this on daily bars silently tests a completely different "
+            f"(much shorter) horizon than the live weekly system.")
     # per-bar ATR for the volatility-adaptive trail (chandelier needs CURRENT ATR);
     # per-bar RSI for the momentum-exhaustion exit (needs CURRENT RSI each bar)
     for df in data.values():
@@ -1191,6 +1255,8 @@ def _exit_test(data, span, years) -> None:
         "STRUCT SL/TP":       ("STRUCT", None),
         "breakeven @+1R":     ("ATR",    partial(_resolve_daily, breakeven_at=1.0)),
         "pure trail 2R arm0": ("ATR",    partial(_resolve_trail, arm_r=0.0, dist_r=2.0)),
+        "trail arm1.5R dist2R": ("ATR",  partial(_resolve_trail, arm_r=1.5, dist_r=2.0)),
+        "trail arm1.5R dist1.5R": ("ATR", partial(_resolve_trail, arm_r=1.5, dist_r=1.5)),
         "vol-trail 1.5xATR":  ("ATR",    partial(_resolve_voltrail, mult=1.5)),
         "vol-trail 2xATR":    ("ATR",    partial(_resolve_voltrail, mult=2.0)),
         "vol-trail 3xATR":    ("ATR",    partial(_resolve_voltrail, mult=3.0)),
@@ -1201,33 +1267,44 @@ def _exit_test(data, span, years) -> None:
         "exhaustion RSI-10pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=10.0)),
         "exhaustion RSI-15pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=15.0)),
         "exhaustion RSI-20pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=20.0)),
+        "time-decay bar3->BE": ("ATR",   partial(_resolve_time_decay, decay_bar=3, decay_sl_r=0.0)),
+        "time-decay bar3->-0.5R": ("ATR", partial(_resolve_time_decay, decay_bar=3, decay_sl_r=-0.5)),
     }
     cut = min(min(df.index) for df in data.values()) + (span * 0.6)
-    print("\nEXIT-METHOD TEST (current config: {metal,index,rate}, 5wk, RR3, "
-          "OOS @0.5%). Data fetched once.\n")
-    print(f"  {'exit method':<20}{'OOS expR':>10}{'OOS CAGR%':>11}{'OOS DD%':>9}"
-          f"{'CAGR/DD':>9}{'win%':>7}")
-    base = None
+    print(f"\nEXIT-METHOD TEST ({len(data)} instruments, current live config, "
+          "IS/OOS/FULL @0.5%). Data fetched once.\n")
+
+    def _row(cands):
+        if len(cands) < 2:
+            return None
+        yrs = _span_years(cands)
+        eq, real = _portfolio(cands, 0.005)
+        m = _metrics(eq, real, yrs); ss = paper.stats(real)
+        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+        return {"n": len(real), "expR": ss["expectancy_R"], "cagr": m["cagr"],
+                "dd": m["maxdd"], "cd": cd, "win": ss["win_rate"]}
+
+    print(f"  {'exit method':<26}{'IS n':>5}{'IS cd':>7}{'OOS n':>6}{'OOS expR':>9}"
+          f"{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}{'FULL cd':>8}")
     for label, (sl_method, resolver) in methods.items():
         cands = []
         for key, df in data.items():
             cands += _signals(df, key, resolver=resolver, sl_method=sl_method)
-        oos = [c for c in cands if c["entry_date"] > cut]
-        if len(oos) < 2:
+        is_r = _row([c for c in cands if c["entry_date"] <= cut])
+        oos_r = _row([c for c in cands if c["entry_date"] > cut])
+        full_r = _row(cands)
+        if oos_r is None:
             continue
-        yrs = _span_years(oos)
-        eq, real = _portfolio(oos, 0.005)
-        m = _metrics(eq, real, yrs); ss = paper.stats(real)
-        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
-        row = {"expR": ss["expectancy_R"], "cagr": m["cagr"], "cd": cd}
-        if base is None:
-            base = row
         tag = "  <- baseline" if label.startswith("fixed") else ""
-        print(f"  {label:<20}{ss['expectancy_R']:>+10.3f}{m['cagr']*100:>11.1f}"
-              f"{m['maxdd']*100:>9.1f}{cd:>9.2f}{ss['win_rate']*100:>7.0f}{tag}")
+        print(f"  {label:<26}{(is_r['n'] if is_r else 0):>5}"
+              f"{(is_r['cd'] if is_r else 0):>7.2f}{oos_r['n']:>6}"
+              f"{oos_r['expR']:>+9.3f}{oos_r['cagr']*100:>10.1f}{oos_r['dd']*100:>8.1f}"
+              f"{oos_r['cd']:>7.2f}{(full_r['cd'] if full_r else 0):>8.2f}{tag}")
     print()
-    print("  RULE: adopt a dynamic exit ONLY if it beats fixed on BOTH OOS expR and "
-          "CAGR/DD. Trend-following theory says cutting winners early should LOSE.")
+    print("  RULE: adopt a dynamic exit ONLY if it beats fixed on OOS expR, OOS CAGR/DD,")
+    print("  AND IS CAGR/DD -- an OOS-only 'win' with a weak/negative IS number is a lucky-")
+    print("  window red flag, not a real edge. Trend-following theory says cutting winners")
+    print("  early should LOSE; a method that only wins in one slice hasn't refuted that.")
 
 
 def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:

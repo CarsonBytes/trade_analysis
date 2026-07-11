@@ -1277,6 +1277,49 @@ optimal weight if/when the sleeve is activated; still NOT deployed** (zero real 
 exist in the paper journal as of this date, confirmed via a direct DB check) -- this is the
 numbers-only answer, not a decision to go live.
 
+### ⚠️⚠️⚠️ CORRECTION 2026-07-11 (later same day): every `--exit-test`/`--vol-horizon`/`--dd-scale`/
+`--mom-filter` figure in the three critique-round entries just below was computed on the WRONG
+dataset -- read this before trusting any number in them. `research/backtest.py`'s `main()`
+fetches DAILY bars over only 5 YEARS by default; `--weekly`/`--longweekly` is required to get
+the real live system's 30-year WEEKLY bars. Every command run today for the 4th and 5th critique
+rounds (`--exit-test`, `--vol-horizon`, `--dd-scale`) omitted that flag. Since
+`paper.HORIZON_DAYS=5` is counted in BARS not days, this silently tested a completely different,
+much shorter (~1 week, not ~5 week) horizon system all day.
+
+**Caught it via a sixth critique that (correctly) pushed on the exit-method question again**: an
+IS/OOS breakdown of `breakeven@+1R` on the (still-buggy) data showed an enormous, walk-forward-
+suspicious improvement (ratio 1.19→1.96). Rather than trust it, built an independent script using
+the SAME direct weekly-fetch pattern as `sleeve_blend.py`/`param_sensitivity.py` (which were
+never affected -- they don't go through `main()`'s CLI data loader) to cross-check. **The result
+completely reversed on the correct data**: breakeven@+1R is WORSE than fixed at every risk level
+(1% risk Calmar 0.854→0.678) and in 5/6 walk-forward windows. Re-ran everything properly:
+
+| test | WRONG (5y daily) conclusion | CORRECTED (30y weekly) conclusion |
+|---|---|---|
+| breakeven@+1R / trailing-stop | (not tested at the time) | REJECTED -- worse at every risk level, 5/6 WF windows |
+| vol-horizon (`--vol-horizon`) | "mixed, helps at low risk" | REJECTED -- worse at EVERY risk level + OOS (0.827/0.638/0.692/1.709 vs baseline 0.849/0.774/0.854/2.335) |
+| DD-scale (`--dd-scale`, mild) | "both CAGR and maxDD worse" | Essentially INERT (0.853 vs baseline 0.854 at 1% risk) -- still not adopted, but the "makes it worse" framing was itself a wrong-scope artifact |
+| exhaustion-exit | "noise, ~0 effect" | Same conclusion, correct on re-check -- numbers below corrected |
+| momentum-filter (`--mom-filter`) | (not tested at the time) | REJECTED -- worse at every risk level (0.475 vs baseline 0.540 at 1% risk) |
+| time-decay exit | (not tested at the time) | Walk-forward MIXED (wins 2/6 windows, loses 2/6, ties 2/6, aggregate ratio ~identical 0.985 vs 0.986) and WORSE at the live 1% risk setting (0.826 vs 0.854) despite looking good in one IS/OOS split -- REJECTED, same lucky-split lesson as breakeven |
+
+**Every dynamic-exit and regime-overlay idea tested today, on the correct data, loses to the
+current fixed 3R-TP/ATR-SL system or is a wash.** This is not a new finding -- it's the SAME
+conclusion the futures-universe `LOCKED STRATEGY SPEC` already reached (26.4y, `{metal,index,
+rate}`, 2026-06-23-25: "no dynamic exit beats fixed"), now independently reconfirmed on the
+current 22-ETF weekly book too, after nearly being overturned by a scope bug.
+
+**Fixed the root cause, not just the numbers**: added a guard to both `_exit_test()` and the
+`--mom-filter` handler in `research/backtest.py` -- either now raises `SystemExit` if the
+fetched data's median bar spacing looks daily (<4 days) instead of weekly, so this can't
+silently happen again. Verified the guard fires correctly and that `--longweekly` clears it.
+
+**Lesson, stated plainly**: a scope bug produced a result that "looked exciting" (matched what
+two independent critiques predicted) and confirmation bias almost let it through with only an
+IS/OOS check. What actually caught it was building a SECOND, independently-written verification
+script rather than trusting the first pretty number -- worth remembering next time a result
+looks too good relative to years of prior negative findings on the same question.
+
 ### 🔬🔬🔬 TESTED 2026-07-11: fourth critique round (4 proposals) -- 2 already closed, 2 tested and rejected
 A fourth AI-generated critique proposed four specific technical changes. Fact-checked and/or
 backtested each rather than accepting on description alone:
@@ -1576,6 +1619,58 @@ resolves to `ET Sun 20:00` (weekday 6, market closed). Still only a day-of-week 
 intraday-hours check (the broker itself enforces 9:30-16:00 ET at order time) -- unchanged scope
 from before, just the correct clock. Deployed: restarted both `DashboardApp` and
 `DashboardAppLive`.
+
+### 🔬 TESTED 2026-07-11: seventh/eighth critique round -- signal-quality/exit ideas, all rejected on corrected data
+Two more critiques (one proposing trailing-stop/time-decay/momentum-filter/universe-health exits,
+one proposing risk-dial and RR/sleeve tweaks) arrived while the scope-bug correction above was
+underway -- tested against the CORRECTED (30y weekly) data throughout.
+
+**Critique A's 4 ideas:**
+1. **Trailing-stop replacing fixed 3R TP** -- REJECTED. Tested the EXACT proposed mechanism
+   (arm at 1.5R, trail 2xATR-equivalent / 1.5R) plus the simpler `breakeven@+1R` variant. All
+   underperform fixed on the corrected data (see the correction table above) -- worse IS, worse
+   OOS expR, worse full-history ratio, worse in 5/6 walk-forward windows for breakeven, and the
+   critique's own proposed arm1.5R/dist2R variant is worse on 3 of 4 corrected metrics too.
+2. **Time-decay exit** -- REJECTED, but the closest of the four to a real signal. A single IS/OOS
+   split looked promising (full-history ratio 0.53→0.60); walk-forward across 6 windows shows it's
+   a coin flip (wins 2, loses 2, ties 2, aggregate ratio ~unchanged 0.985 vs 0.986) and it's WORSE
+   than fixed at the actual live 1% risk setting (0.826 vs 0.854). Same "one lucky split" lesson
+   as breakeven, just less dramatically wrong.
+3. **Cross-sectional momentum filter** (`--mom-filter`) -- REJECTED. Worse at every risk level
+   (1% risk Calmar 0.475 vs baseline 0.540) and worse OOS (1.117 vs 2.022). The theory (filter
+   out weak "follow the herd" breakouts) didn't pan out -- maxDD got WORSE despite fewer trades,
+   the opposite of the predicted effect.
+4. **Universe-health-based dynamic PORTFOLIO_CAP** (cut exposure when <20% of the book shows
+   strength>=5) -- NOT implemented/tested this round (lowest priority in the critique's own
+   ranking, and mechanistically the same family as the already-tested-and-inert `DD_SCALE`/
+   already-rejected `CIRCUIT_DD` regime-conditioning ideas -- a breadth-based trigger instead of
+   a drawdown-based one, same "reduce exposure based on a lagging/coincident signal" pattern that
+   has failed every time it's been tried in this project, including the VIX-regime ladder).
+   Flagged as low-priority and likely low-probability rather than built.
+
+**Critique B, fact-checked:**
+- **"當前系統 Calmar 約0.63~1.0" citing "1%風險(核心): 7.14%/-11.3%/0.63"** -- this is the EXACT
+  same stale, already-debunked figure from an earlier critique round (see the 2026-07-11 entry
+  above: "Critique 2's entire baseline was wrong... matches neither the current hybrid config...
+  nor any pre-hybrid figure"). It predates `PORTFOLIO_CAP` entirely. The real current-config
+  Calmar (correct 30y weekly data, cash-yield on) is **0.854 at 1% risk / 2.335 OOS**, not 0.63.
+- **"Leveraged Forex 仍缺，這是當前卡關點"** -- FACTUALLY OUTDATED. This was confirmed approved
+  and `keep_cash_usd()` confirmed working with a REAL fill (`USD 100.00` balance, HKD
+  10,040→9,240.27) on 2026-07-10, a full day before this critique. Not a current blocker.
+- **RR_DEFAULT 3.0→3.6 alone (ratio 0.533→0.602)** and **sleeve 5% (Calmar 1.251) vs 10%
+  (1.239)** -- both ACCURATE, correctly sourced from already-verified, correctly-scoped tests
+  (`param_sensitivity.py`/`sleeve_blend.py`, neither affected by the daily-bar bug since they
+  fetch weekly bars directly). No new action -- already documented, and the RR=3.6 finding was
+  already shown NOT to survive combination with the other "individually favourable" tweaks (see
+  the sixth critique round's COMBINED test: 0.468, worse than baseline).
+- **Risk 1%→0.5% "doubles Calmar"** -- the DIRECTION is real (lower risk = lower leverage = less
+  drag from `MARGIN_DEBIT_RATE`) but the MAGNITUDE is overstated, built on the same stale 0.63
+  baseline. Real numbers: 1% risk Calmar 0.854, 0.5% risk Calmar 0.774 -- LOWER, not higher, on
+  the corrected data (0.25% risk is highest at 0.849, but that's inert due to the cap barely
+  binding, not a real edge). This directly contradicts the critique's claimed direction.
+
+**Net result: no config or code change from either critique.** The live config
+(`RISK_PER_TRADE=0.01, ETF_POS_CAP=0.25, PORTFOLIO_CAP=1.0, DD_HALT_PCT=-13.0`) stands.
 
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
