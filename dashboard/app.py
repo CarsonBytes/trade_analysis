@@ -568,23 +568,6 @@ def paper_panel() -> None:
             .classes("w-full").props("dense")
 
 
-def _deposit_adjusted(hist: list, flows: list | None) -> list[float]:
-    """hist: [[ts, value, ccy], ...] ascending. flows: [[ts, amount, ccy], ...] (see
-    service.py's equity_history cash-flow logging). Returns hist's values with the
-    cumulative net cash flow up to each point subtracted, so the series reads as pure
-    trading P&L -- deposits/withdrawals become invisible instead of looking like gains."""
-    if not flows:
-        return [h[1] for h in hist]
-    flows_sorted = sorted(flows, key=lambda f: f[0])
-    out = []
-    fi, cum = 0, 0.0
-    for ts, val, _ccy in hist:
-        while fi < len(flows_sorted) and flows_sorted[fi][0] <= ts:
-            cum += flows_sorted[fi][1]
-            fi += 1
-        out.append(val - cum)
-    return out
-
 
 def _monthly_attribution() -> list[dict]:
     """Monthly $ breakdown: trend-strategy / sleeve / other. Trend and sleeve are computed
@@ -626,7 +609,7 @@ def _monthly_attribution() -> list[dict]:
         return []
     ccy = hist[0][2] if len(hist[0]) > 2 else "USD"
     usd_per_ccy = ib_client._PEG_USD_PER.get(ccy, 1.0)
-    adj = _deposit_adjusted(hist, flows)
+    adj = paper.deposit_adjusted_series(hist, flows)
     month_end_usd: dict[str, float] = {}
     for (ts, _v, _c), av in zip(hist, adj):
         m = dt.datetime.fromtimestamp(ts).strftime("%Y-%m")
@@ -862,7 +845,7 @@ def portfolio_panel() -> None:
 
     _lookback_days = CHART_PERIODS.get(SETTINGS["chart_period"])
     _cutoff = (hist[-1][0] - _lookback_days * 86400) if (_lookback_days and hist) else None
-    _adj_full = _deposit_adjusted(hist, flows)   # pure trading P&L, deposits/withdrawals netted out
+    _adj_full = paper.deposit_adjusted_series(hist, flows)  # pure trading P&L, deposits/withdrawals netted out
 
     # equity line chart (account value over time, base ccy)
     def _set_chart_scale(e) -> None:

@@ -33,6 +33,7 @@ import datetime as dt
 import pandas as pd
 
 from dashboard.core import paper
+from dashboard.core import store
 from dashboard.data import ib_client
 from dashboard.data import contracts
 from dashboard.instruments import FUT_BY_KEY
@@ -44,6 +45,15 @@ SLEEVE_MAX_SPREAD_PCT = 0.005  # 0.5% of mid -- skip a sleeve entry if the live 
                                # normal liquid ETF's ~0.01-0.05%; 0.5% is a generous cap, not a
                                # tight one). No historical intraday spread data exists to derive
                                # a rolling per-ticker baseline, so this is a fixed absolute cap.
+DD_HALT_PCT = -13.0            # 2026-07-11: the ADOPTED PLAN's own text ("halt new entries if
+                               # DD>-13%") was never actually wired up -- confirmed missing via
+                               # a direct code search while fact-checking a critique. Existing
+                               # positions are untouched; only NEW entries pause. Does not change
+                               # backtest numbers (it's a live-only safety net for a black-swan
+                               # scenario the backtest's fixed-parameter history can't rehearse),
+                               # so there's nothing to sweep/optimize here -- it's a discipline
+                               # gate, not an alpha lever. 0 disables (matches ETF_POS_CAP/
+                               # PORTFOLIO_CAP's own convention).
 
 
 # ---- pure sizing logic (no I/O -- unit-testable in isolation) ---------------
@@ -140,6 +150,16 @@ def mirror_new() -> list[str]:
     ib = _guard()
     if ib is None:
         return []
+    dd_halt = float(os.environ.get("DD_HALT_PCT", str(DD_HALT_PCT)))
+    if dd_halt < 0:
+        hist, _ts = store.cache_get("equity_history")
+        flows, _fts = store.cache_get("cash_flows")
+        cur_dd = paper.current_drawdown_pct(hist or [], flows)
+        if cur_dd <= dd_halt:
+            msg = (f"DD-halt: current drawdown {cur_dd:.1f}% <= {dd_halt:.1f}% threshold -- "
+                   "pausing ALL new entries this cycle (existing positions untouched)")
+            log.warning("ib_exec: %s", msg)
+            return [msg]
     done = _mirrored_ids()
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)

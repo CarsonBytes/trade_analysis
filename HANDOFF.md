@@ -1132,6 +1132,79 @@ keep USD cash >$10,000 for an IBKR "tiered interest" benefit is unverifiable fro
 actual rate schedule. A "monthly review only" behavioral suggestion is reasonable but is a
 personal discipline choice, not a code/backtest matter.
 
+### ⭐ IMPLEMENTED 2026-07-11: DD-halt gate (the ONE surviving idea from a 2-critique review)
+User submitted two more AI-generated critiques proposing further Calmar improvements. Fact-
+checked every claim against the codebase and prior research rather than accepting at face value.
+
+**Critique 2's entire baseline was wrong** -- it quoted "pure core: CAGR +7.14% / MDD -11.3% /
+Calmar 0.63", which matches neither the current hybrid config (verified: +5.83%/-6.83%/0.853)
+nor any pre-hybrid figure I can find. Every "improvement over baseline" claim built on top of
+that number is unreliable by construction.
+
+**Sleeve activation (both critiques, suspiciously IDENTICAL unverified figures)** -- both cite
+"+10.78% CAGR / -10.8% MDD / Calmar 1.00 @ sleeve 10%" for combining the panic-MR sleeve with
+the current book. This number doesn't match ANY documented HANDOFF entry (closest: an OLDER
+17/18-ETF-book figure, ~+8.7%/-10 to -11%, a different config entirely). `backtest.py`'s only
+sleeve proxy (`--meanrev-blend`, a generic ADX<20 z-score MR sleeve) is a DIFFERENT strategy
+from the actual production sleeve (`core/sleeve.py` -- VIX-panic-triggered, staged rollout, 11
+tickers, 5MA-touch exits), so it can't be used as a quick stand-in without misrepresenting the
+real thing. Flagged as unverified; a faithful test needs a dedicated script that actually wires
+in `core/sleeve.py`'s real logic, not a quick reproduction -- not done here.
+
+**PORTFOLIO_CAP 100%->80% (critique 1) -- tested, NOT the clean win claimed:**
+| config | Full Sharpe | Full maxDD | OOS Sharpe | OOS maxDD | OOS ratio |
+|---|---|---|---|---|---|
+| portfolio<=100% (current) | 1.190 | -6.83% | 1.607 | -4.96% | 2.305 |
+| portfolio<=80% | 1.221 | -6.01% | 1.651 | -4.96% | 2.089 |
+Full-history ratio improves modestly (not critique's claimed +19.6%), but OOS ratio actually
+WORSENS (2.305->2.089, -9.4%) -- a mixed result, not adopted. OOS is the more forward-relevant
+number and it gets worse here.
+
+**SGOV/cash-sweep spread (critique 1) -- overstated ~3.5x.** Claimed "IBKR 3.12% vs SGOV 4.80%
+= 1.68% spread, +1.01% CAGR benefit". Checked against OUR OWN live rate model: latest ^IRX
+3.70% -> `ib_rate`=3.15%, `sgov_rate`=3.63% -> real spread **0.48%**, not 1.68%. The real
+benefit at ~60% assumed idle cash is closer to **+0.29% CAGR**, not +1.01%. Real effect, wrong
+magnitude -- `sweep_cash()`'s `CASH_SWEEP_MIN_NAV_USD=75,000` threshold blocking the live
+account is a legitimate observation, but the payoff case for lowering it is smaller than
+claimed.
+
+**Portfolio heat scaling (critique 2 idea 3)** -- functionally IS `PORTFOLIO_CAP`, already
+built and deployed this session (measured in notional terms rather than a risk-sum, same
+purpose). Critique 2 wasn't aware this already exists.
+
+**Core "has no time exit" (critique 2 idea 4) -- FACTUALLY WRONG.** The core already
+force-resolves every trade at `HORIZON_CAL=35` days regardless of price action (`paper.py`'s
+`_outcome_for()`: `horizon_passed` forces resolution even on an "EXPIRED"/no-clean-touch
+outcome) -- critique 2's proposed threshold (35 days) is literally identical to what already
+exists. Idea is moot.
+
+**Already-rejected categories re-proposed:** trailing stop (critique 2 idea 6) duplicates the
+already-tested-and-rejected dynamic-exit family (chandelier/trail stops all worse than fixed
+3R, ratio 0.52-0.79 vs 0.81 -- see the 2026-07-11 critique-evaluation entry above). VIX-
+conditional max-deployment cap (critique 2 idea 5) is the same broad category as multiple
+already-rejected VIX/regime overlays throughout this project's history.
+
+**Per-instrument vol-targeting (critique 2 idea 2)** -- a genuinely different mechanism from
+what's been tested (existing `--voltarget` scales by the STRATEGY's own realized R-multiple
+vol; this proposes scaling by EACH INSTRUMENT'S OWN price vol). Not tested directly, but likely
+low marginal value: the existing ATR-based stop-sizing (`qty = risk_$ / (SL_ATR_MULT * ATR)`)
+is already an implicit form of per-instrument inverse-vol sizing. Flagged for a dedicated test
+if pursued further, not dismissed outright.
+
+**The one thing that survived: `DD_HALT_PCT` -- genuinely missing, now implemented.** The
+ADOPTED PLAN's own text ("halt new entries if DD>-13%") was never actually wired into code --
+confirmed via direct search, zero matches anywhere. This doesn't change backtest numbers (a
+live-only safety net, not an alpha lever), so nothing to sweep -- just build it.
+
+Extracted `deposit_adjusted_series()` and `current_drawdown_pct()` from `app.py`'s inline
+"Drawdown from peak" UI logic into `core/paper.py` (both pure, unit-tested --
+`test_paper.py`, 10 checks) so the dashboard stat and the new gate share the exact same math
+instead of two independent implementations drifting apart. Wired into `mirror_new()`: if
+current (deposit-adjusted) drawdown <= `DD_HALT_PCT` (default -13.0, env-overridable, `0`
+disables matching `ETF_POS_CAP`/`PORTFOLIO_CAP`'s convention), ALL new entries pause for that
+cycle -- existing positions are never touched. Full 6-file test suite passes; deployed to both
+dashboards, confirmed no errors and no false trigger (account is nowhere near -13% currently).
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener

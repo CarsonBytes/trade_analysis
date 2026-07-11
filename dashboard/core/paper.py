@@ -289,6 +289,44 @@ def stats(rs: list[float]) -> dict:
     }
 
 
+def deposit_adjusted_series(hist: list, flows: list | None) -> list[float]:
+    """hist: [[ts, value, ccy], ...] ascending. flows: [[ts, amount, ccy], ...] (see
+    service.py's equity_history cash-flow logging). Returns hist's values with the
+    cumulative net cash flow up to each point subtracted, so the series reads as pure
+    trading P&L -- deposits/withdrawals become invisible instead of looking like gains.
+    Shared by app.py's equity chart AND current_drawdown_pct() below -- a deposit must
+    never look like a new all-time high that resets the peak and hides a real drawdown."""
+    if not flows:
+        return [h[1] for h in hist]
+    flows_sorted = sorted(flows, key=lambda f: f[0])
+    out = []
+    fi, cum = 0, 0.0
+    for ts, val, _ccy in hist:
+        while fi < len(flows_sorted) and flows_sorted[fi][0] <= ts:
+            cum += flows_sorted[fi][1]
+            fi += 1
+        out.append(val - cum)
+    return out
+
+
+def current_drawdown_pct(hist: list, flows: list | None) -> float:
+    """Current % drawdown from the all-time (deposit-adjusted) peak -- e.g. -13.5 means
+    13.5% below the peak. 0.0 if there isn't enough history yet to judge (<2 points).
+    Uses the FULL series unconditionally (never a windowed/recent view) -- the true peak,
+    not a peak within some display period, matches the "Drawdown from peak" stat already
+    shown on the dashboard (same underlying math, extracted here so ib_exec's DD-halt gate
+    can share it instead of re-deriving it)."""
+    if len(hist) < 2:
+        return 0.0
+    adj = deposit_adjusted_series(hist, flows)
+    peak = adj[0]
+    cur_dd = 0.0
+    for v in adj:
+        peak = max(peak, v)
+        cur_dd = (v - peak) / peak * 100.0 if peak else 0.0
+    return cur_dd
+
+
 # ---- forward (live) paper trades: persistence ------------------------------
 
 @dataclass
