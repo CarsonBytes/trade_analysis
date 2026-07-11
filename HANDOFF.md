@@ -57,16 +57,21 @@ permissions-list endpoint) — run `preflight_check.py` against the live gateway
 fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
 
 ### ⭐ ADOPTED PLAN + 2-PHASE AUTO-SWITCH (2026-07-01) — the live config
-**⭐⭐⭐ UPDATED 2026-07-11 — a THIRD parameter is now part of this config, and the expected
-figures below are superseded.** `PORTFOLIO_CAP=1.0` (aggregate gross-exposure cap, live in
-`ib_exec.py`) now runs alongside `RISK_PER_TRADE`/`ETF_POS_CAP` -- do NOT read this section
-without also reading "PORTFOLIO_CAP -- aggregate gross-exposure cap" further down. Current
-honest expectation (33.4y, current cash-yield/margin-debit model, all 3 params): **Full ~5.8%
-CAGR / −6.8% maxDD, Sharpe ~1.19; OOS (recent decade) ~11.4% CAGR / −5.0% maxDD, Sharpe ~1.61**
--- meaningfully better risk-adjusted (Sharpe +24% full / +31% OOS) than the pos-cap-only config
-below, which is now the OUTGOING baseline, not the target. Both `2x risk` and `portfolio_cap
-105%` were tested as follow-ups and REJECTED (worse on every risk-adjusted metric) -- see that
-entry for the numbers. Original (2026-07-01) text preserved below for the reasoning trail.
+**⭐⭐⭐ UPDATED 2026-07-11 — the live config now has FOUR parameters, not two, and the expected
+figures below are superseded.** `RISK_PER_TRADE` + `ETF_POS_CAP` (original two) + `PORTFOLIO_CAP
+=1.0` (aggregate gross-exposure cap) + `DD_HALT_PCT=-13.0` (pauses new entries only, below this
+drawdown) all run together in `ib_exec.py` -- do NOT read this section without also reading
+"PORTFOLIO_CAP -- aggregate gross-exposure cap" and "DD-halt gate" further down. **Only the
+first three affect the backtest numbers** (`DD_HALT_PCT` is a live-only execution safety net --
+the backtest has no live drawdown state to halt on, so it changes zero backtest figures; don't
+look for its effect in any performance table). Current honest performance expectation (33.4y,
+current cash-yield/margin-debit model, `RISK_PER_TRADE`+`ETF_POS_CAP`+`PORTFOLIO_CAP` only):
+**Full ~5.8% CAGR / −6.8% maxDD, Sharpe ~1.19; OOS (recent decade) ~11.4% CAGR / −5.0% maxDD,
+Sharpe ~1.61** -- meaningfully better risk-adjusted (Sharpe +24% full / +31% OOS) than the
+pos-cap-only config below, which is now the OUTGOING baseline, not the target. `2x risk`,
+`portfolio_cap 105%`, AND `portfolio_cap 80%` were all tested as follow-ups and REJECTED (worse
+on OOS risk-adjusted metrics in every case) -- see those entries for the numbers. Original
+(2026-07-01) text preserved below for the reasoning trail.
 
 **Settings: `RISK_PER_TRADE=0.01` (1%) + `ETF_POS_CAP=0.25`** (both live defaults; risk% also
 persisted in ui_settings). 1% risk "fills" the 25% cap on high-vol names; the CAP is the real
