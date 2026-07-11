@@ -315,15 +315,29 @@ def current_drawdown_pct(hist: list, flows: list | None) -> float:
     Uses the FULL series unconditionally (never a windowed/recent view) -- the true peak,
     not a peak within some display period, matches the "Drawdown from peak" stat already
     shown on the dashboard (same underlying math, extracted here so ib_exec's DD-halt gate
-    can share it instead of re-deriving it)."""
+    can share it instead of re-deriving it).
+
+    MATERIALITY FLOOR (2026-07-11, found live reporting a bogus -90% "drawdown" on a
+    brand-new account): `adj[0]` is whatever raw cash happened to be sitting in the account
+    BEFORE the first tracked deposit -- for a fresh account that's a near-zero leftover
+    balance (here, ~40 HKD / ~$5), not real trading capital. Once deposits land, `adj`
+    correctly nets them out and reads as pure trading P&L, which starts near zero and takes
+    time to accumulate -- so `peak` ends up being that tiny pre-funding artifact, and ANY
+    trivial dip below it (a few dollars, e.g. commissions) computes as a huge % drawdown.
+    Require the peak to be at least 1% of the account's CURRENT raw equity (a real, sized
+    reference) before trusting a percentage; below that there isn't enough realized trading
+    P&L yet to judge -- same "not enough history" spirit as the len(hist)<2 guard above.
+    Without this, DD_HALT_PCT could get permanently stuck halting a brand-new account over
+    a few-dollar wobble."""
     if len(hist) < 2:
         return 0.0
     adj = deposit_adjusted_series(hist, flows)
+    floor = abs(hist[-1][1]) * 0.01
     peak = adj[0]
     cur_dd = 0.0
     for v in adj:
         peak = max(peak, v)
-        cur_dd = (v - peak) / peak * 100.0 if peak else 0.0
+        cur_dd = (v - peak) / peak * 100.0 if peak > floor else 0.0
     return cur_dd
 
 

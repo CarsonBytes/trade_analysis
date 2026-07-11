@@ -59,6 +59,26 @@ def test_current_drawdown_pct():
     # exactly at the -13% halt threshold a real caller would check
     at_threshold = [[100, 100.0, "HKD"], [200, 87.0, "HKD"]]
     approx("exactly -13% from peak", current_drawdown_pct(at_threshold, None), -13.0)
+    # MATERIALITY FLOOR (2026-07-11 bug): a tiny pre-funding leftover balance (40 HKD) must
+    # NOT be treated as an eternal "peak" once real deposits land -- a few-dollar wobble on
+    # a near-zero deposit-adjusted P&L shouldn't compute as a huge %. Reproduces the exact
+    # live-account shape: near-zero start, a deposit, then a tiny dip below the pre-funding
+    # residual.
+    fresh_acct = [[100, 40.0, "HKD"], [200, 40.0, "HKD"], [300, 100040.0, "HKD"],
+                 [400, 100003.81, "HKD"]]     # deposit lands at t=250, then a tiny real dip
+    fresh_flows = [[250, 100000.0, "HKD"]]
+    # deposit-adjusted: [40, 40, 40, 3.81] -- naive peak=40 vs now=3.81 would be -90%+,
+    # but 40 is far below 1% of current equity (~1000) -> not material, report 0.0
+    approx("tiny pre-funding residual doesn't register as a real drawdown",
+          current_drawdown_pct(fresh_acct, fresh_flows), 0.0)
+    # once real trading P&L clears the materiality floor, a genuine drawdown DOES register
+    grown_acct = [[100, 40.0, "HKD"], [200, 100040.0, "HKD"], [300, 102000.0, "HKD"],
+                 [400, 101000.0, "HKD"]]      # deposit at t=150, then +2000 P&L, then -1000
+    grown_flows = [[150, 100000.0, "HKD"]]
+    # deposit-adjusted: [40, 40, 2000, 1000] -- peak 2000, now 1000 -> -50%, and 2000 is
+    # well above 1% of current equity (~1010) -> material, must still be caught
+    approx("a real drawdown above the materiality floor still registers",
+          current_drawdown_pct(grown_acct, grown_flows), -50.0)
 
 
 if __name__ == "__main__":

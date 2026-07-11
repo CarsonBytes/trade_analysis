@@ -1494,6 +1494,61 @@ is already that ceiling. Raising it to 6 doesn't tighten the filter, it disables
 confirmed by running it, `n=0` signals, zero trades. The critique's premise (that 6/7/8 are
 untested threshold values worth sweeping) doesn't hold -- there's no headroom above 5 to sweep.
 
+### 🐞🐞🐞 FOUND & FIXED 2026-07-11: `current_drawdown_pct()` could have permanently bricked live trading via a bogus -90% "drawdown"
+User asked why the live account still had no open trade. Investigation (not the first assumption
+taken at face value) found TWO separate, compounding reasons, one benign and one a real bug that
+needed fixing before it caused damage:
+
+**1. Benign: it's Saturday.** `app.py`'s `_do_llm()` skips the LLM board scan (and therefore
+`paper.place_from_state()` and `ib_exec.mirror_new()`, the whole chain that creates and places new
+trades) whenever `SETTINGS["auto_pause"]` is on (default) and `_market_open()` is False --
+Mon-Fri only. Confirmed via the log: last board scan was 00:00:14 today, zero since (11+ hours),
+while the lighter "cheap refresh" cycle kept running every ~1min as expected. Working as designed,
+resumes automatically Monday.
+
+**2. Also benign, now resolved on its own: 7 stale "already open" blocks finally expired.** The
+7 tickers from the earlier-this-session ghost-order cleanup (`CPER,EEM,DBC,VNQ,CWB,AMLP,ASHR` --
+orders rejected by the since-fixed Error 435/10349 bug, but the local paper-side signal tracker
+kept marking them OPEN) had been blocking new entries on those names via "skip (already open)"
+in the funnel log for days. They hit their time horizon and organically resolved as EXPIRED
+around 11:23-11:29 today -- confirmed via the log and a direct DB check, `0 OPEN paper trades`
+now on live. Everything else being skipped in the funnel log (overextended RSI on SPY/QQQ/IWM,
+trend strength 4<5 on HYG/EFA/HYD, R:R too low) is ordinary `MIN_STRENGTH=5` selectivity, not a
+bug -- this system does ~1.5 trades/week across 22 instruments, not every name fires every day.
+
+**3. NOT benign -- a real bug that would have blocked live trading indefinitely once triggered.**
+While checking whether `DD_HALT_PCT` (implemented earlier today) was itself responsible, queried
+`paper.current_drawdown_pct()` directly on the live account and got **-90.5%** -- wildly
+implausible for a small account with no reported crisis. Root cause: `current_drawdown_pct()`
+initializes `peak = adj[0]`, the deposit-adjusted value at the FIRST history point. For a
+brand-new account, that first point is whatever tiny leftover cash sat there BEFORE the first
+real deposit landed (here, 40 HKD -- confirmed via the raw `equity_history`/`cash_flows` cache:
+`hist[0] = [ts, 40.0, 'HKD']`, then two deposits totalling ~99,984.61 HKD). Once deposits are
+netted out, the account's real trading P&L has barely moved off zero yet (it's brand new) -- so
+`peak` stays pinned at that ~$5 pre-funding artifact, and ANY trivial dip below it (a few dollars
+of commissions) computes as a huge PERCENTAGE drawdown purely because the denominator is
+economically meaningless. Grepped the full log (43k lines back to 2026-07-07): **zero
+`DD-halt:` messages ever**, despite `mirror_new()` (which checks this every ~15min whenever the
+LLM scan runs) having fired 100+ times on Friday alone -- meaning either the DD_HALT code hadn't
+reached the running live process yet, or it had and was one restart away from permanently halting
+all new live entries over a few-dollar rounding artifact, defeating the whole point of a small,
+young, contribution-fed account being allowed to actually deploy capital.
+
+**Fix:** added a materiality floor to `current_drawdown_pct()` in `core/paper.py` -- require
+`peak` to be at least 1% of the account's CURRENT raw equity before trusting a percentage;
+below that, return 0.0 (not enough real trading P&L yet to judge, same spirit as the existing
+`len(hist)<2` guard). Verified directly against the live account's real cache data: -90.5% ->
+0.0% after the fix. Extended `test_paper.py` with two new cases (the exact bug shape, and a
+control case confirming a genuine drawdown ABOVE the floor still registers correctly) -- both
+pass, plus all 4 pre-existing `current_drawdown_pct` cases still pass unaffected (their reference
+peaks are all far above their respective 1%-of-final floors). Deployed: restarted both
+`DashboardApp` and `DashboardAppLive` (killed an orphaned process still holding port 8081 first),
+confirmed live reconnected to `U12991898`, confirmed `current_drawdown_pct()` now reads 0.0% on
+the real live cache post-restart. This bug affected BOTH the "Drawdown from peak" UI stat (would
+have shown a false, alarming -90% to the user) and the `DD_HALT_PCT` live-trading gate (would
+have silently and permanently blocked all new live entries) -- caught before the second one ever
+had a chance to fire for real.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
