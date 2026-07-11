@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from dashboard.core import net  # noqa: F401  -- TLS bootstrap first
 
+import asyncio
 import datetime as dt
 import os
-from nicegui import ui, run
+from nicegui import app, ui, run
 
 # Mode MUST be resolved before importing anything that touches the DB (service -> paper/store
 # compute their DB path at IMPORT time from DASH_DB_NAME). `store` itself is lightweight/self-
@@ -1295,21 +1296,66 @@ async def _do_llm(force: bool = False) -> None:
     _refresh_all_panels()
 
 
+_TICK_TIMEOUT_SEC = 120   # Defensive ceiling (2026-07-12): if ANY await inside _tick() ever
+                          # hangs (a blocking IB/network call with no timeout of its own --
+                          # account_summary()'s internal 10s timeout doesn't cover a hang
+                          # elsewhere in the ib_insync event loop), the coroutine would never
+                          # resume, so `finally: _busy["flag"]=False` would never run,
+                          # permanently blocking every future tick with zero log output. Kept
+                          # as defense-in-depth even though the ACTUAL dormancy found the same
+                          # day (see app.on_startup below) turned out to have a different,
+                          # more fundamental cause.
+
+
 async def _tick() -> None:
     if _busy["flag"]:
         return
     _busy["flag"] = True
     try:
-        now = dt.datetime.now()
-        last_cheap = service.STATE["last_cheap"]
-        if last_cheap is None or (now - last_cheap).total_seconds() >= SETTINGS["cheap_min"] * 60:
-            await run.io_bound(service.refresh_news)
-            await _do_cheap()
-        last_llm = service.STATE["last_llm"]
-        if last_llm is None or (now - last_llm).total_seconds() >= SETTINGS["llm_min"] * 60:
-            await _do_llm()
+        async def _do_tick_work():
+            now = dt.datetime.now()
+            last_cheap = service.STATE["last_cheap"]
+            if last_cheap is None or (now - last_cheap).total_seconds() >= SETTINGS["cheap_min"] * 60:
+                await run.io_bound(service.refresh_news)
+                await _do_cheap()
+            last_llm = service.STATE["last_llm"]
+            if last_llm is None or (now - last_llm).total_seconds() >= SETTINGS["llm_min"] * 60:
+                await _do_llm()
+        await asyncio.wait_for(_do_tick_work(), timeout=_TICK_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        from dashboard.core.log import log
+        log.error("_tick(): hung for >%ds, aborting this cycle so the next one isn't "
+                 "permanently blocked (this does NOT cancel whatever thread-pool call was "
+                 "actually stuck -- it may still be running in the background)",
+                 _TICK_TIMEOUT_SEC)
     finally:
         _busy["flag"] = False
+
+
+async def _tick_loop() -> None:
+    """FOUND 2026-07-12: _tick() was previously scheduled ONLY via `ui.timer(30.0, _tick)`
+    called inside the per-client `@ui.page('/')` render function -- meaning the ENTIRE
+    automated trading/monitoring loop (signal generation, order placement, DD_HALT checks,
+    broker reconciliation, sleeve entries) ran ONLY while at least one browser client was
+    connected to the page, and stopped COMPLETELY and SILENTLY the moment the last client
+    disconnected -- with the web server still responding HTTP 200 to page loads throughout,
+    giving zero indication anything was wrong. Confirmed directly: after a restart, both
+    dashboards sat completely dormant for 20+ minutes across two separate restart cycles
+    (zero log output at all -- not even a failed-attempt message); the INSTANT a browser tab
+    was opened, a cheap refresh fired and the sleeve's staged-rollout clock -- stuck at None
+    the whole time -- started immediately. For a system meant to run unattended with real
+    money, "silently stops trading and monitoring whenever nobody has a tab open" is a
+    serious reliability gap, not a cosmetic one.
+
+    This runs `_tick()` from an `app.on_startup` background task instead -- entirely
+    independent of whether any browser client is ever connected."""
+    await asyncio.sleep(1.0)      # let the rest of app startup finish first
+    while True:
+        await _tick()
+        await asyncio.sleep(30.0)
+
+
+app.on_startup(lambda: asyncio.create_task(_tick_loop()))
 
 
 async def _manual_refresh() -> None:
@@ -1714,15 +1760,18 @@ def main_page() -> None:
             with ui.tab_panel(t_retro):
                 retrospective_panel()
 
-    # initial load + periodic master tick (30s); the tick decides what actually runs
-    # live UI tick (1s): clocks + the "x ago" / tick-age labels stay current
-    # without touching data (cheap: just re-renders labels from cached state).
+    # live UI tick (1s): clocks + the "x ago" / tick-age labels stay current without touching
+    # data (cheap: just re-renders labels from cached state). Fine being per-client -- it's
+    # pure display, not real work. The actual data/trading tick runs from a GLOBAL
+    # app.on_startup background task (_tick_loop, defined near _tick() above) -- NOT from a
+    # per-client timer here anymore (2026-07-12: that was the bug -- see _tick_loop's
+    # docstring for why).
     def _ui_tick() -> None:
         clock_row.refresh()
         header_status.refresh()
     ui.timer(1.0, _ui_tick)
-    ui.timer(0.1, _tick, once=True)      # kick off immediately on first load
-    ui.timer(30.0, _tick)                # master heartbeat
+    _refresh_all_panels()   # this client's first paint reflects current STATE immediately,
+                            # without waiting for the next 30s background tick
 
 
 # MT5 link monitor: tracks access-point ping, re-rolls to the fastest on

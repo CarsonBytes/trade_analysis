@@ -1937,6 +1937,121 @@ recent-decade window, but per this project's own stated discipline, treat full-h
 conservative anchor and OOS as the bull-flattered recent-regime case, not the number to plan
 around.
 
+### 🚨🚨🚨 FOUND & FIXED 2026-07-12: the ENTIRE automated trading/monitoring loop was silently
+dependent on a browser tab being open -- the most significant bug found this session
+
+**How it was found**: after setting `PHASE2_NAV_USD=0` to let the sleeve trigger on live, its
+`sleeve_first_active_ts` stayed `None` for over an hour across multiple restarts, with zero
+"cheap refresh" log lines appearing for 20+ minutes at a stretch despite both dashboards
+returning healthy HTTP 200 to page loads the entire time. Initially suspected (and partially
+fixed as defense-in-depth) a hung `await` inside `_tick()` permanently blocking the `_busy`
+flag. That fix (a 120s `asyncio.wait_for` ceiling) was deployed but did NOT resolve the
+dormancy -- and critically, it never even logged its own "hung for >120s" message, which it
+would have if a hang were the real cause. That absence was the tell.
+
+**Root cause**: `app.py` scheduled the master data/trading tick via
+`ui.timer(30.0, _tick)` called INSIDE the per-client `@ui.page('/')` render function -- a
+NiceGUI pattern that ties the timer's lifetime to that specific browser client's connection.
+With zero browser clients connected to either dashboard (the normal state for a
+scheduled-task-run background service that nobody is actively viewing), **`_tick()` never
+fired at all** -- no signal generation, no order placement, no `DD_HALT_PCT` checks, no
+broker reconciliation, no sleeve entries, nothing. The web server itself (a separate async
+concern in NiceGUI) kept responding HTTP 200 to any page load throughout, so every health
+check this session that only checked "does it respond" (curl, `Get-NetTCPConnection`) reported
+green while the actual trading system was completely inert.
+
+**Verified directly, not just reasoned about**: opened a real browser tab to the live
+dashboard while it had been dormant for 20+ minutes -- the INSTANT the client connected, a
+cheap refresh fired and the sleeve's staged-rollout clock (stuck at `None` the whole time)
+recorded its first activation immediately. Confirmed the reverse too: after deploying the fix
+and navigating the only open browser tab AWAY from the dashboard (zero clients connected),
+"cheap refresh" log lines continued appearing every ~30-60s on their own.
+
+**Fix**: moved tick scheduling to `app.on_startup(lambda: asyncio.create_task(_tick_loop()))`
+-- a persistent background asyncio task, entirely independent of any browser client, that
+calls `_tick()` in a `while True: ...; await asyncio.sleep(30)` loop. Removed the per-client
+`ui.timer(30.0, _tick)`/`ui.timer(0.1, _tick, once=True)` calls from the page function
+entirely (replaced the "kick off immediately on load" behavior with a direct
+`_refresh_all_panels()` call so a newly-connecting client's first paint reflects current state
+without waiting up to 30s). Kept the per-client `ui.timer(1.0, _ui_tick)` for clock/age-label
+display -- that one is fine being client-scoped since it's pure re-rendering from cached
+state, not real work. Also kept the `_TICK_TIMEOUT_SEC=120` defensive ceiling from the initial
+(wrong-root-cause) investigation -- still worth having even though it wasn't the actual fix.
+
+**Implication for everything documented before today**: this bug has presumably existed since
+this dashboard architecture was built, meaning the live/paper trading systems have likely gone
+dormant during any past stretch where nobody had a browser tab open on them -- with zero
+record of when or for how long, since nothing logs an absence of activity. There is no way to
+retroactively know how much of this project's "live since 2026-06-24" history was actually
+being monitored/traded vs silently idle. Going forward this is fixed, but it's worth being
+aware the historical live/paper track record has this unquantifiable gap in it.
+
+**Also noted, separate and still unexplained**: port 8081 (live) was left orphaned by
+`Stop-ScheduledTask -TaskName 'DashboardAppLive'` on 5 separate occasions during this session's
+restarts, requiring an explicit process kill beyond the stop command every time. Initially
+suspected this might be connected to the tick-loop bug (a stuck process not responding cleanly
+to a stop signal) -- ruled out, since the tick-loop issue was never actually a hang, just a
+scheduling gap. This orphaning pattern remains a real, reproducible, but still root-cause-
+unidentified quirk of this specific deployment -- worth investigating separately if it keeps
+recurring; the workaround (check `Get-NetTCPConnection -LocalPort 8081`, kill the specific PID
+via `Invoke-CimMethod -MethodName Terminate` if still listening after `Stop-ScheduledTask`) is
+now a routine, expected step of the restart procedure, not a one-off.
+
+### 🔬 TESTED 2026-07-12: staged 3-to-11 sleeve ramp, ticker-breaker end-to-end test
+Two more items from the same self-directed review round.
+
+**1. Backtested the actual staged ramp for the first time** (not just the static 3-ticker or
+11-ticker endpoints already tested). `core/sleeve.py`'s real rollout schedule -- `SLEEVE_STAGE_2A`
+(SPY/QQQ/XLK) for 3 months, +`SLEEVE_STAGE_2B_ADD` (DIA/IWM) for months 3-6, full 11 onward --
+is what the account will genuinely experience now that `PHASE2_NAV_USD=0` lets the clock run.
+Built `research/sleeve_staged_ramp.py`: tested 117 historical 6-month windows (quarterly start
+dates across the full sleeve history), comparing the staged ramp's combined R contribution
+against jumping straight to the full 11-ticker book over the same window.
+
+| | mean | median | std |
+|---|---|---|---|
+| staged (2A->5, real ramp) | +9.51% | +4.20% | 18.49pp |
+| full-11 (counterfactual) | +17.39% | +8.14% | 39.74pp |
+| difference (staged - full) | -7.87pp | -1.82pp | -- |
+
+Staged beat full-11 in only 15% of windows -- **expected and mechanical**, not a red flag:
+fewer active tickers for the first 3-6 months necessarily captures a smaller slice of the
+sleeve's total edge, since fewer names can fire. This quantifies "how much smaller," not a
+problem with the ramp design itself -- the ramp exists deliberately as a risk-management
+precaution, independent of the equity gate removed earlier today.
+
+**2. Built an end-to-end integration test for the sleeve's per-ticker circuit breaker**
+(`_ticker_breaker_tripped`) -- same class of gap as the `DD_HALT_PCT` test added earlier this
+session: the pure function had never been tested, and a bug in an analogous pure function (the
+drawdown-calc materiality-floor bug) already came close to causing real harm once this session.
+New `dashboard/tests/test_sleeve.py` (isolated temp-db pattern, matches `test_reconcile.py`):
+seeds a ticker with 5 bad closed sleeve trades (1/5 win, tripped), one with too few trades to
+judge (not tripped), one with good performance (not tripped), and one with bad CORE trades
+under a different method (confirms sleeve/core breakers are correctly isolated per-method).
+Then calls the REAL `place_sleeve_signals()` (not a reimplementation) with `entry_signal`
+mocked, confirming the tripped ticker never reaches `entry_signal` while a clean ticker does,
+and only the clean ticker's trade actually gets placed. All 7 checks pass.
+
+### 📋 First-live-sleeve-fill verification checklist
+The equity gate is open, the staged clock has started (2a=SPY/QQQ/XLK now, 2b at 3mo, 2c at
+6mo), and the tick loop now runs unattended -- the sleeve's first REAL live fill could happen
+any day. When it does, verify (mirroring the rigor already applied to the core book's first
+post-Error-435-fix fills):
+1. Confirm the broker order actually filled (`ib_mirror` row has a nonzero `perm_id`, not the
+   "never acknowledged" `perm_id=0` signature already seen once this session on the ghost
+   positions).
+2. Confirm `reconcile.py`'s broker/local check shows a match (no ghost, no untracked position)
+   on the next cycle after the fill.
+3. Confirm the position sizing matches the risk-based formula for the actual VIX level at
+   entry (`RISK_BASE=0.005` normally, `RISK_HIGH=0.01` if VIX>30) -- sanity-check against the
+   account's real equity at that moment, not a stale figure.
+4. Once it closes, confirm the realized R lands in a plausible range for a dip-buy exit
+   (+3% TP, -5% SL, 5MA-touch, or 10-day time-cap) -- and that it's excluded from `paper.stats()`
+   comparisons against the CORE book (different method, tracked separately).
+5. Run `research/live_vs_backtest.py` once n>=5-10 real sleeve trades exist (lower bar than the
+   core book's n>=30, since the sleeve trades far less often) to get an early read, fully aware
+   it won't be "trustworthy" by this project's own n>=30 standard yet.
+
 ### 🔧 SELF-AUDIT 2026-07-11, part 4: sleeve clustering, core/sleeve correlation, exit/param DSR, commissions
 
 **1. Sleeve cross-ticker clustering during panics -- real, substantial, but already reflected

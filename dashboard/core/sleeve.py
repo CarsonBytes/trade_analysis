@@ -258,8 +258,11 @@ def place_sleeve_signals(equity_usd: float | None) -> list[str]:
     places the real bracket on its next cycle, exactly like a core signal."""
     logs: list[str] = []
     if not sleeve_enabled():
+        log.debug("sleeve: gate check -- SLEEVE_ENABLED not set, skipping this cycle")
         return logs
     if not paper.sleeve_active(equity_usd):
+        log.debug("sleeve: gate check -- not active (equity_usd=%r, phase=%s), skipping "
+                  "this cycle", equity_usd, paper.account_phase(equity_usd))
         return logs
     _record_first_active_if_needed()
     if _throttled("entries"):
