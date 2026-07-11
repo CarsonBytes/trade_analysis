@@ -1884,6 +1884,44 @@ reasoning ("commission-sensitive fills") remains genuinely unquantified -- no IB
 data was checked. **No config change made** -- flagged for a decision, not acted on
 unilaterally given it's a real-money parameter.
 
+### ⭐ DECIDED 2026-07-12: `PHASE2_NAV_USD` set to 0 on BOTH instances -- sleeve equity gate removed
+User-confirmed decision (after the verification above, plus a same-day round confirming
+sleeve clustering is already priced into the backtest, core/sleeve correlation is genuinely
+~0, and IBKR commission drag is smaller than assumed): rather than pick a specific lower
+dollar threshold (a $27,000/~210K HKD candidate was derived and verified clean first, per the
+same-day request), the user chose to remove the equity gate entirely, effective immediately,
+rather than wait ~3.6 months for the account to grow into even that lower number.
+
+**Set `$env:PHASE2_NAV_USD = "0"` in both `run_dashboard_live.ps1` (in-repo) and
+`C:\Scripts\dashboard.ps1` (paper, outside the repo)** -- verified directly (not just deployed
+blind): `PHASE2_NAV_USD=0` correctly makes `sleeve_active(equity)` return `True` for any real
+positive equity reading (`account_phase(12819)` -> 2, `sleeve_active(None)` still correctly
+stays `False` -- an unknown-equity reading doesn't accidentally activate anything). This does
+NOT force a trade -- `sleeve_active()` is only ONE of two independent gates
+(`SLEEVE_ENABLED` + this one); the sleeve's actual VIX-panic entry condition still has to fire
+for real before any order is placed. Zero real sleeve fills exist on either account as of this
+change (confirmed earlier this session) -- this just means the NEXT real trigger, whenever it
+comes, will be allowed through instead of blocked.
+
+**Deployment hit a real, unrelated snag worth recording**: after restarting both dashboards,
+`DashboardApp` (paper) came up on a stuck/silent process (port 8080 never bound, ~5s CPU burned
+over several minutes, IBC gateway login itself completed cleanly per its own log -- the stall
+was in the Python process, not the broker connection). Root cause not conclusively identified
+(possibly a stale `Global\DashboardAppMutex` from an earlier session, though Windows normally
+releases mutexes on process exit) -- resolved by explicitly killing the specific stuck PIDs
+(not just `Stop-ScheduledTask`, which had already been tried once and didn't clear it) and
+doing one more clean `Start-ScheduledTask`. Both dashboards confirmed healthy afterward: paper
+reconnected to DUK968178 (clientId=7, port 4002), live to U12991898 (clientId=21, port 4001).
+**Also flagged and resolved a false alarm during this same investigation**: a "DD-halt: current
+drawdown -20.0%" warning in the shared log around this time was NOT a real live-trading halt --
+it was `test_ib_exec.py`'s own `test_mirror_new_dd_halt_end_to_end` (run earlier the same turn
+as part of the pre-deploy test suite) writing its synthetic -20% test fixture's `log.warning()`
+call to the same shared `logs/dashboard.log` file the real dashboards use. Verified directly
+against the live DB: real current drawdown was 0.0% throughout, nothing was ever actually
+blocked. Worth remembering: this shared log file mixes real dashboard output with any test
+run's genuine (not mocked) logging calls -- a timestamp match isn't enough to assume real impact
+without checking the DB directly, which is exactly what settled it here.
+
 **Added `--oos` to `sleeve_blend.py`** (previously full-history-only) to get the OOS-window
 figure for the core+sleeve@10% combination directly, rather than estimating it:
 

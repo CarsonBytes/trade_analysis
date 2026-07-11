@@ -39,15 +39,23 @@ $env:LIVE_URL        = "https://quant-live.carsonng.com"
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
 $env:CASH_USD        = "1"
 $env:CASH_SWEEP      = "1"
-# Panic-MR dip sleeve (2026-07-09, user-confirmed): enabling this is INERT today --
-# paper.sleeve_active(equity) is a SEPARATE, independent gate requiring equity >=
-# PHASE2_NAV_USD (~$64k/500K HKD, currently ~50x this account's real balance), so nothing can
-# actually trade until the account grows that far. Setting it now just means the sleeve
-# auto-activates the moment that threshold is crossed, matching the existing "no manual step"
-# Phase 1->2 design -- same policy as everything else. Re-check the sleeve's actual PAPER trade
-# history (once it has real trades on the 11-ticker scope) before that threshold is reached;
-# the backtest is not yet live-confirmed on any of the 8 tickers added 2026-07-09
-# (DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR), or even the original 3.
+# Panic-MR dip sleeve. PHASE2_NAV_USD (default 64000 = ~500K HKD) previously gated this OFF
+# at the account's real size. 2026-07-12: user-confirmed decision to remove the gate now
+# rather than wait for the account to grow into the original threshold. Verified before
+# changing it (not just asserted): the original $64k number's own justification used a
+# sleeve-edge estimate (+1.5pp CAGR) that this session's corrected re-verification found to
+# be understated 2.4x (real edge +3.62pp); IBKR commission drag at current equity (~0.03-
+# 0.06% round-trip) is smaller than the 10bp already modeled; and mechanical position sizing
+# (fractional shares, ~1.7-3.5 share entries on SPY/QQQ at current equity) isn't degenerate.
+# Setting PHASE2_NAV_USD=0 removes the equity gate entirely (sleeve_active() only depends on
+# SLEEVE_ENABLED from here on) rather than pinning to today's specific dollar figure, which
+# would drift out of date and could re-gate the sleeve OFF on an ordinary dip. This does NOT
+# force a trade -- it only means the sleeve's actual VIX-panic entry condition, whenever it
+# next fires for real, will be allowed to place an order instead of being blocked. Re-check
+# the sleeve's real trade history once it has fills on the 11-ticker scope (8 of 11 added
+# 2026-07-09 -- DIA/IWM/HYG/EFA/EEM/VNQ/PFF/ASHR -- have zero live-confirmed history, same as
+# the original 3).
+$env:PHASE2_NAV_USD  = "0"
 $env:SLEEVE_ENABLED  = "1"
 
 # Background monitor: (re)launch the LIVE IB Gateway via IBC whenever port 4001 is down --
