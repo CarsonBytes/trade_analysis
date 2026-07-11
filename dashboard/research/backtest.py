@@ -708,6 +708,33 @@ def main():
         MR_RISK_MULT = args.meanrev_budget
         args.meanrev_blend = True
         print(f"[MEANREV BUDGET: MR sleeve sized at {MR_RISK_MULT:.0%} of base risk]")
+    # GUARD (2026-07-11): every flag below assumes WEEKLY bars -- paper.HORIZON_DAYS and
+    # every rolling-window lookback (ATR14/RSI14/MA20/MA40/MR_WIN=20/PULLBACK_WAIT=2 etc.)
+    # are counted in BARS, not days. main() defaults to 5-YEAR DAILY bars unless --weekly
+    # or --longweekly is passed. Missing this silently tests a completely different, much
+    # shorter-horizon system than the live weekly one -- caught after a scope bug this
+    # exact way produced a misleading "breakeven-stop massively improves Calmar" result
+    # (see HANDOFF.md 2026-07-11). Checked HERE, before any data is fetched, so a mistake
+    # fails immediately instead of after minutes of wasted yfinance calls.
+    # most are bool flags (truthy check is correct); adx/voltarget are float flags where
+    # a legitimate value could be 0 -- those two need an "is not None" check instead.
+    _HORIZON_SENSITIVE_FLAGS = ["voltarget_cap", "dd_scale", "vol_horizon", "vix_entry",
+                               "meanrev", "meanrev_blend", "pullback", "circuit", "regime",
+                               "vix_regime", "class_weight", "conviction_size",
+                               "horizon_curve", "direction_test", "mom_filter", "exit_test"]
+    if not (args.weekly or args.longweekly):
+        _active = [f for f in _HORIZON_SENSITIVE_FLAGS if getattr(args, f, None)]
+        if args.adx is not None:
+            _active.append("adx")
+        if args.voltarget is not None:
+            _active.append("voltarget")
+        if _active:
+            _names = ", ".join("--" + f.replace("_", "-") for f in _active)
+            raise SystemExit(
+                f"{_names}: requires --weekly or --longweekly. This flag's logic is counted "
+                f"in BARS (paper.HORIZON_DAYS and every rolling-window lookback), so running "
+                f"it on the default 5-year DAILY bars silently tests a completely different, "
+                f"much-shorter-horizon system than the live weekly one.")
     if args.pullback:
         PULLBACK = True
         print(f"[PULLBACK ENTRY: retrace to <={PULLBACK_BAND:.0%} of 20wk MA within "

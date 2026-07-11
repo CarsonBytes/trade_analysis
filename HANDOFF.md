@@ -1314,6 +1314,26 @@ current 22-ETF weekly book too, after nearly being overturned by a scope bug.
 fetched data's median bar spacing looks daily (<4 days) instead of weekly, so this can't
 silently happen again. Verified the guard fires correctly and that `--longweekly` clears it.
 
+**WIDENED same day, later**: the two spot-fixes above only covered the two flags actively in
+use when the bug was found -- but `paper.HORIZON_DAYS` and every rolling-window lookback
+(`MR_WIN=20`, `PULLBACK_WAIT=2`, `REGIME`'s 40wk MA, etc.) are counted in BARS everywhere, so
+the SAME vulnerability existed for every other horizon/regime-sensitive flag: `--adx`,
+`--voltarget`/`--voltarget-cap`, `--dd-scale`, `--vol-horizon`, `--vix-entry`, `--meanrev`/
+`--meanrev-blend`, `--pullback`, `--circuit`, `--regime`, `--vix-regime`, `--class-weight`,
+`--conviction-size`, `--horizon-curve`, `--direction-test` -- 14 more flags, unguarded, found by
+a direct grep audit rather than assumed safe. Rather than patch each one individually with the
+same post-hoc "inspect the fetched data" pattern (several of these generate signals INSIDE the
+data-fetch loop, so a post-hoc check would fire too late, after wasted API calls and possibly
+already-wrong signals), moved to a single upfront check right after `args = ap.parse_args()`,
+before ANY data is fetched: if a horizon-sensitive flag is set and neither `--weekly` nor
+`--longweekly` was passed, `SystemExit` fires immediately naming the exact flag(s) responsible.
+`--adx`/`--voltarget` get an `is not None` check (not truthy) since a legitimate value could be
+`0`; every other flag is a plain bool. Verified directly: `--regime`, `--pullback`, and `--adx
+20` all now fail instantly (before any yfinance call); `--pos-cap --portfolio-cap --cash-yield`
+(no horizon-sensitive flag) still runs normally; `--weekly --regime` correctly proceeds past the
+guard. Universe-selection flags (`--etf*`, `--classes`) and cost-model flags (`--cash-yield`,
+`--cash-rate`) are NOT in the guarded list -- they don't depend on bar frequency.
+
 **Lesson, stated plainly**: a scope bug produced a result that "looked exciting" (matched what
 two independent critiques predicted) and confirmation bias almost let it through with only an
 IS/OOS check. What actually caught it was building a SECOND, independently-written verification
