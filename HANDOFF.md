@@ -1692,6 +1692,57 @@ underway -- tested against the CORRECTED (30y weekly) data throughout.
 **Net result: no config or code change from either critique.** The live config
 (`RISK_PER_TRADE=0.01, ETF_POS_CAP=0.25, PORTFOLIO_CAP=1.0, DD_HALT_PCT=-13.0`) stands.
 
+### 🔧 SELF-AUDIT 2026-07-11: closed 4 open questions from a "what's still missing" review
+Asked directly (not prompted by an external critique this time) what testing/coverage gaps
+remained after the scope-bug correction above. Four were concrete enough to act on:
+
+**1. Audited pre-2026-07-11 HANDOFF results for the SAME daily/weekly scope bug.** Grepped
+every documented `backtest.py` invocation. All explicitly cite `--longweekly` (EMB/PFF
+isolation, ETF batch-3 through -10 screens, the futures class battery) OR carry strong internal
+evidence of correct weekly scope (the futures `LOCKED STRATEGY SPEC`'s "26.4y" span and "avg
+hold 3.3wk" figures are only possible on weekly bars -- 5yr daily data can't produce a 26-year
+backtest at all). **Pre-today research appears unaffected** -- the scope bug was specific to
+today's rapid-fire critique-testing, not a standing practice gap. Not 100% provable without
+re-running 3 weeks of history, but the internal-consistency evidence is strong.
+
+**2. Real-fill cost reconciliation -- BLOCKED, not yet possible.** Wanted to compare the
+backtest's assumed ~10bp cost against actual broker fill slippage. Checked: **zero CLOSED
+trades exist anywhere** (paper: 7 positions, all still OPEN; live: 0 open, the ghost-order
+batch was archived not closed with real fill data). There's nothing to reconcile against yet --
+revisit once the paper book has real closed round-trips (the scheduled 2026-07-18 sleeve check
+is a natural point to also look at this for the core book).
+
+**3. `DD_HALT_PCT` had never been tested end-to-end, only its pure function in isolation** --
+and a bug in that pure function alone (the -90% "drawdown" bug found earlier today) came close
+to permanently halting live trading. Added a real integration test
+(`test_ib_exec.py::test_mirror_new_dd_halt_end_to_end`) that mocks out the IB connection
+(`_guard()`) and the cache (`store.cache_get`) and calls the ACTUAL `mirror_new()` function --
+not a re-implementation of its logic. Confirmed: a genuine -20% synthetic drawdown makes
+`mirror_new()` emit the real `log.warning` and return exactly the one halt message (verified
+the message contains the correct computed % and the literal text "DD-halt"); a shallow -5%
+drawdown does NOT take that path (confirmed by mocking `_equity_usd` to raise a sentinel
+exception if execution reaches that far, rather than letting a fake `ib` object attempt a real
+network connection, which the first draft of this test accidentally did -- cleaned up before
+committing). All 14 tests (10 existing + 4 new) pass.
+
+**4. Inception-date bias in the 30-year backtest -- confirmed real, quantified, not fixable
+(nothing to "fix," it's a fact about market history), now documented precisely.** Pulled actual
+yfinance inception dates for all 22 live-universe tickers: `SPY 1993, DIA 1998, QQQ 1999, IWM
+2000, EFA 2001, IEF/TLT/SHY 2002, EEM/TIP 2003, VNQ/GLD 2004, DBC 2006, SLV 2006, PFF/HYG 2007,
+HYD/CWB 2009, AMLP/VNQI 2010, CPER 2011, ASHR 2013`. Mapped against this session's 6-window
+walk-forward: **window 1 (1996-2001) ran on a 2-3 ticker universe (SPY/DIA/QQQ only); window 2
+(2001-2006) grew to ~13; window 3 (2006-2011) reached ~20; only windows 4-6 (2011-2026) ran on
+the full current 22-name book** (ASHR, the last addition, joined Nov 2013). Windows 1 and 2 are
+exactly the two weakest windows in every walk-forward test this session (ratio 0.534 and 0.060)
+-- previously attributed only to "different market regime" (2026-07-09 `walk_forward.py`
+entry); now clear that under-diversification is an independent, compounding factor, not just
+regime. **Practical implication: the "full 30-year Calmar" figures used throughout this doc as
+the conservative anchor UNDERSTATE what the current fully-diversified 22-ETF system should be
+expected to do** -- roughly the first half of the measurement window wasn't testing this
+strategy's current form at all. Doesn't change any config (there's no way to "fix" history not
+existing), but reweights how much trust to put in full-history vs. recent-window figures when
+they diverge -- lean toward 2011-2026 for what to actually expect, not 1996-2026 blended.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
