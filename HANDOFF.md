@@ -1814,6 +1814,63 @@ appears to be doing its job specifically where it matters most, not just unteste
 All three new scripts follow the established "fetch data once, reusable tool" convention. No
 config changes from any of these four -- they're verification/tooling, not new signals.
 
+### 🔧 SELF-AUDIT 2026-07-11, part 3: dividend withholding tax, data quality, liquidity, cap freshness
+
+**1. Dividend withholding tax on the core book -- flagged before, now quantified, and it's a
+real number.** HANDOFF previously dismissed this via reasoning only, specific to the SLEEVE's
+short ~3wk holds ("weak for a 3wk-hold book, matters on bond sleeves only") -- never quantified
+for the CORE book's repeated, cumulative exposure to 7 meaningfully-yielding tickers (TLT, IEF,
+SHY, HYG, TIP, PFF, HYD, plus VNQ/VNQI/AMLP/DBC/EFA at 4-9%+ trailing yield). `yfinance`'s
+`auto_adjust=True` (used in every backtest here) folds every dividend back into price as if
+reinvested 100% tax-free; a real HK NRA account has 30% withheld on US-source dividends before
+they land. Built `research/dividend_tax_drag.py`: trade-count-weighted blended portfolio yield
+2.93%, so 0.30 x 2.93% = **-0.88pp/yr CAGR drag**. On the strategy-only (no cash-yield) current
+config: **Calmar 0.588 -> 0.488 after tax** -- crosses below the "0.5" line several critiques
+this session used informally as a rough pass/fail threshold. maxDD is essentially unchanged (a
+steady yield drag lowers the compounding rate, it doesn't deepen the worst single drawdown). On
+the cash-yield-ON headline figures quoted elsewhere in this doc (CAGR 5.83%/maxDD -6.83%,
+Calmar 0.854) the same -0.88pp arithmetic gives **~4.95% CAGR / Calmar ~0.725** -- back-of-
+envelope, not a fresh full run, but maxDD-invariance makes this a reasonable extension. **This
+is an ESTIMATE** (trade-count-weighted average yield x 30% applied as a constant annual drag),
+not a bar-by-bar after-tax price reconstruction -- real drag varies by which specific tickers
+are held when. **Caught and fixed a real bug while building this**: the first version computed
+`years` from `cands[0]`/`cands[-1]` on an UNSORTED candidate list, picking up whichever
+instrument happened to iterate first/last rather than the true chronological span -- inflated
+CAGR to a nonsensical 8.57% before the fix (same class of self-caught methodology bug as the
+daily/weekly scope bug earlier this session; every other script built today explicitly sorted
+first). **No config change** -- this doesn't change what the strategy does, it changes how much
+of its return an HK NRA account actually keeps after tax; worth remembering when comparing any
+point-estimate Calmar in this doc against a personal target.
+
+**2. Data-quality audit -- clean.** Built `research/data_quality_audit.py` (checks zero-volume
+weeks, mid-history gaps >21d, single-week jumps >25% unexplained by a nearby split) across all
+22 tickers. 5 flagged (SLV -26.5% 2011-05-02, EEM +28.3% 2008-10-27, PFF +37.5% 2009-03-09,
+AMLP -30.4% 2020-03-09, CPER zero-volume weeks from 2012-10-01) -- **every single one traces to
+a well-known real historical event**, not corrupt data: the May-2011 silver crash (CME margin
+hikes), Oct-2008 GFC EM whipsaw, the exact March-2009 GFC bottom (preferred-stock ETFs were
+hammered into it then violently rebounded), the March-2020 COVID+oil-price-war double-hit on
+MLP energy infrastructure, and CPER's genuinely thin early-history liquidity shortly after its
+2011 launch. No garbage-in-garbage-out risk found.
+
+**3. Liquidity/capacity check -- clean at current scale, first constraint appears ~$1M equity.**
+Built `research/liquidity_check.py`: pulled real 30-day average $ volume for all 22 tickers and
+compared against a 25%-of-equity (`ETF_POS_CAP`) position at 3 account sizes. At $130k (current
+paper-equivalent) and $500k, **no ticker's max position exceeds 1% of its own daily $ volume**
+-- the flat ~10bp cost assumption holds. At $1M, two names edge past the 1% heuristic (VNQI
+1.6%, CPER 1.3%) -- worth revisiting the cost model specifically for those two if/when the
+account approaches that size, everything else stays comfortably liquid even there.
+
+**4. `PORTFOLIO_CAP` equity freshness -- clean, no staleness risk.** Checked `ib_exec._equity_usd()`
+directly: it calls `ib_client.account_summary()` -> `ib.accountSummaryAsync()`, a genuinely
+live IBKR request with NO caching anywhere in the chain. A new contribution landing mid-cycle
+is picked up on the very next `mirror_new()` call, not stale by a refresh-interval's worth of
+lag. No fix needed.
+
+All three new scripts (`dividend_tax_drag.py`, `data_quality_audit.py`, `liquidity_check.py`)
+follow the established "fetch once, reusable tool" convention. No config changes -- items 2-4
+are clean, item 1 is a real number worth carrying forward when interpreting future Calmar
+figures, not a bug to fix.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
