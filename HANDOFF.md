@@ -1743,6 +1743,77 @@ strategy's current form at all. Doesn't change any config (there's no way to "fi
 existing), but reweights how much trust to put in full-history vs. recent-window figures when
 they diverge -- lean toward 2011-2026 for what to actually expect, not 1996-2026 blended.
 
+### 🔧 SELF-AUDIT 2026-07-11, part 2: 4 more gaps -- universe-selection bias, live-vs-backtest
+tool, bootstrap CI, targeted crisis stress test
+
+**1. Universe-selection bias, honestly quantified -- concern was real, verdict is reassuring.**
+The 22-ETF book wasn't hand-picked; it was assembled by screening candidates in ~10 rounds
+(the original --etf-screen round plus batches 2-10) and keeping the ones with positive
+isolation-tested edge. Counted precisely from `instruments.py`: **49 total candidate ETFs
+screened** beyond the structurally-mapped base-10 (12 adopted into `ETF_CANDIDATES`, 37
+rejected/deferred across `ETF_SCREEN_BATCH` through `_10`). That's real multiple-comparisons
+exposure that `deflated_sharpe_ratio()` has only ever been called with `n_trials=1` against.
+Recomputed on the real per-trade R series (n=1285, full weekly history, current config):
+
+| n_trials | DSR |
+|---|---|
+| 1 (as currently reported everywhere) | 100.0% |
+| 12 (adopted-candidate count only) | 100.0% |
+| 49 (full honest search breadth) | 100.0% |
+
+**DSR is unmoved even at the full 49-trial correction.** With n=1285 trades, the expected-
+max-Sharpe-under-the-null bar only grows logarithmically with `n_trials`, and the strategy's
+observed edge clears it comfortably regardless. The concern was legitimate to check and hadn't
+been checked before -- but the answer is good news, not a hidden problem.
+
+**2. Built `research/live_vs_backtest.py`** -- compares REAL closed trades (core strategy only,
+sleeve excluded) against the backtest's expected win-rate/expectancy via a binomial test +
+one-sample t-test, gated by `paper.stats()`'s own `trustworthy` (n>=30) flag so a small sample
+can't masquerade as a settled verdict. Tested against synthetic data (binomial/t-test logic
+confirmed correct); run for real against both DBs -- **0 closed trades exist anywhere**, so it
+currently (correctly) reports "nothing to compare yet" rather than fabricating a comparison.
+Ready to fire the moment real closed trades exist -- no fresh investigation needed later.
+
+**3. Built `research/bootstrap_ci.py`** -- a moving-BLOCK bootstrap by calendar YEAR (not a
+naive i.i.d. per-trade resample, which would shred the real autocorrelation trend-following
+trades have within a regime) that re-runs the ACTUAL `_portfolio()`/`_metrics()` pipeline
+(position sizing, one-per-instrument de-correlation, `POS_CAP`/`PORTFOLIO_CAP` all apply
+exactly as in the real backtest) on 500 resampled 30-year timelines. Result (current config,
+strategy-only, no cash-yield):
+
+| metric | point estimate | bootstrap median | 90% CI |
+|---|---|---|---|
+| CAGR | +5.15% | +6.10% | [+4.05%, +8.35%] |
+| maxDD | -8.75% | -8.74% | [-13.46%, -6.67%] |
+| Calmar | 0.588 | 0.680 | [0.342, 1.161] |
+
+**P(Calmar < 0) = 0%** (the edge itself is robust across regime-resequencing draws) but
+**P(Calmar < 0.5) = 20.6%** -- a real ~1-in-5 chance of landing below the level several
+critiques this session used as a rough "is this even working" threshold, purely from WHICH
+years happen to occur and in what order (not from anything wrong with the strategy). Read
+every point-estimate Calmar in this document as sitting inside a real, fairly wide band, not
+as a precise number.
+
+**4. Built `research/stress_test.py`** -- isolates what the CURRENT exact config did during
+specific historical crises (peak-to-trough using ONLY that window's own running peak, not
+blended into a multi-year walk-forward average that can hide the worst days):
+
+| event | window | return | worst intra-window DD |
+|---|---|---|---|
+| 2008 GFC | 2007-09 to 2009-03 | **+9.69%** | -3.11% |
+| 2020 COVID crash | 2020-02 to 2020-05 | -0.81% | -3.20% |
+| 2022 rate-hike drawdown | 2022-01 to 2022-12 | +3.61% | -5.11% |
+
+**Genuinely reassuring**: positive return through 2 of the 3 crises (including a +9.7% GFC,
+consistent with trend-following's classic "does well in sustained directional stress" profile),
+and the worst intra-crisis drawdown across all three is only -5.11% (2022) -- far inside the
+-13% `DD_HALT_PCT` threshold and inside the already-documented full-history maxDD. The
+diversification/de-correlation design (breadth across asset classes, one-per-instrument cap)
+appears to be doing its job specifically where it matters most, not just untested.
+
+All three new scripts follow the established "fetch data once, reusable tool" convention. No
+config changes from any of these four -- they're verification/tooling, not new signals.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
