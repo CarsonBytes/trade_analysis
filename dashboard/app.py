@@ -1348,11 +1348,22 @@ async def _tick_loop() -> None:
     serious reliability gap, not a cosmetic one.
 
     This runs `_tick()` from an `app.on_startup` background task instead -- entirely
-    independent of whether any browser client is ever connected."""
+    independent of whether any browser client is ever connected. The "never die from one
+    call's failure" property (LATENT RECURRENCE GUARD: _tick() only catches
+    asyncio.TimeoutError internally, so any OTHER unhandled exception from _do_cheap()/
+    _do_llm() would otherwise silently kill this whole background task forever, recreating
+    the exact same class of invisible dormancy via a different trigger) is implemented in
+    `core/resilient_loop.run_forever()`, a small pure function with its own regression test
+    (test_resilient_loop.py) -- this file can't be imported in a test itself (`ui.run()` at
+    module level blocks), so the safety-critical logic lives there instead."""
     await asyncio.sleep(1.0)      # let the rest of app startup finish first
-    while True:
-        await _tick()
-        await asyncio.sleep(30.0)
+    from dashboard.core.resilient_loop import run_forever
+    from dashboard.core.log import log
+
+    def _on_error(e: BaseException) -> None:
+        log.exception("_tick_loop(): unhandled exception in a tick -- logging and "
+                      "continuing (this loop must never die): %s", e)
+    await run_forever(_tick, 30.0, on_error=_on_error)
 
 
 app.on_startup(lambda: asyncio.create_task(_tick_loop()))

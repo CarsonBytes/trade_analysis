@@ -2100,6 +2100,62 @@ imply. Still not changed unilaterally -- a real-money parameter, flagged for a d
 All new scripts from today (`sleeve_clustering_check.py`, `core_sleeve_correlation.py`) follow
 the established convention. No config changes.
 
+### 🔧 5-ROUND SELF-AUDIT 2026-07-12 (post-tick-loop-fix): exception safety, task resilience,
+data-fetch load, regression testing, currency risk
+
+**Round 1 -- audited for the same bug class, found a latent recurrence path.** Searched for
+any other `ui.timer`/`@ui.page` pattern that could recreate the tick-loop dormancy bug --
+clean, only the one (now client-scoped, cosmetic-only) UI-label timer remains. But found
+`_tick_loop()` only caught `asyncio.TimeoutError` internally -- ANY other unhandled exception
+from `_do_cheap()`/`_do_llm()` would silently kill the whole background task forever, recreating
+the exact same invisible dormancy via a different trigger. Wrapped the loop body in a catch-all
+so no single tick's failure can ever take down all future ticks.
+
+**Round 2 -- scheduled-task resilience gap found (needs admin access to fix); live/backtest
+bar-frequency consistency confirmed clean.** Both `DashboardApp` and `DashboardAppLive` have
+`RestartCount=0` (no auto-restart on crash) and `ExecutionTimeLimit=PT72H` (force-killed after
+3 days) with a `LogonTrigger` (only fires once per login) -- meaning a crash or the 3-day limit
+leaves the dashboard down until the next login, potentially for a long time. **Could not apply
+the fix directly (PermissionDenied -- requires elevated PowerShell)**; the commands to run:
+```
+$task = Get-ScheduledTask -TaskName 'DashboardAppLive'   # and 'DashboardApp'
+$task.Settings.ExecutionTimeLimit = 'PT0S'
+$task.Settings.RestartCount = 3
+$task.Settings.RestartInterval = 'PT1M'
+Set-ScheduledTask -TaskName 'DashboardAppLive' -Settings $task.Settings
+```
+Separately, verified live's actual signal-scoring data source (given how large the analogous
+daily/weekly bug was in this session's own research scripts): `providers.get_history()`
+explicitly fetches `interval="1wk"` for `BROKER=ib`, with an existing comment confirming this
+was always a deliberate, aware design choice -- no bar-frequency mismatch in production.
+
+**Round 3 -- yfinance load under continuous dual-instance polling, checked directly.** With
+both dashboards now ticking unconditionally every ~30-60s (previously effectively gated by
+whether a browser happened to be open), grepped the full log for any rate-limit fallout
+("data source = none", rate-limit errors) -- zero instances found. Real theoretical exposure
+(no retry/backoff exists in `providers.py` if this ever changes), but no evidence of actual
+impact -- not worth a speculative fix.
+
+**Round 4 -- gave the tick-loop fix an actual regression test.** The "never dies from one
+call's failure" property had only been verified by manually watching logs. `app.py` can't be
+imported in a test (`ui.run()` at module level blocks), so extracted the safety wrapper into
+`core/resilient_loop.run_forever()` (a small, pure, generically-reusable function) with its own
+test, `test_resilient_loop.py` (8 checks: survives every call failing, recovers after
+intermittent failure, safe with no error handler given). `app.py`'s `_tick_loop()` now just
+calls this instead of reimplementing the try/except inline.
+
+**Round 5 -- HKD/USD peg risk, flagged early this session, never actually verified.** This
+account converts HKD to USD to trade US ETFs; the peg's assumed stability had never been
+checked against real data. Pulled 25 years of USD/HKD monthly closes (2001-2026): only 24/294
+months touched slightly outside the official 7.75-7.85 band (monthly return std dev 0.246%,
+worst breach 7.6431 -- a few basis points past the strong-side limit, consistent with normal
+HKMA intervention during high-capital-flow periods, not a de-peg event). **Currency risk for
+this account is confirmed genuinely negligible from real data, not just assumed.**
+
+**Net result: one real, unfixed gap (scheduled-task settings, needs the user's admin access),
+one code fix + its own regression test (tick-loop exception safety), and three clean
+verifications (bar-frequency, yfinance load, currency peg).**
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
