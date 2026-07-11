@@ -1871,6 +1871,34 @@ follow the established "fetch once, reusable tool" convention. No config changes
 are clean, item 1 is a real number worth carrying forward when interpreting future Calmar
 figures, not a bug to fix.
 
+**Also verified: the sleeve's `PHASE2_NAV_USD=$64,000` gate was justified using an outdated
+edge estimate.** The original reasoning (+1.5pp CAGR ≈ 1,500 HKD/yr "negligible vs
+contributions") predates this session's corrected re-verification, which found the REAL 10%-
+weight sleeve edge is +3.62pp CAGR (6.44%->10.06% core-only vs blended, live 1% risk +
+cash-yield, correct 22-ETF scope) -- **2.4x larger** than assumed. Applying the same "wait
+until the dollar edge stops being negligible" logic to the corrected figure implies an
+equivalent crossover around ~210K HKD, not 500K HKD. Mechanically, sleeve position sizing is
+NOT degenerate even at current live equity (~$12.8k): SPY/QQQ entries size to ~1.7 shares,
+handled fine by the already-enabled fractional-share trading. One part of the original
+reasoning ("commission-sensitive fills") remains genuinely unquantified -- no IBKR fee-schedule
+data was checked. **No config change made** -- flagged for a decision, not acted on
+unilaterally given it's a real-money parameter.
+
+**Added `--oos` to `sleeve_blend.py`** (previously full-history-only) to get the OOS-window
+figure for the core+sleeve@10% combination directly, rather than estimating it:
+
+| scope | CAGR | maxDD | Sharpe | Calmar |
+|---|---|---|---|---|
+| Full-history, core only | 6.44% | -6.83% | 1.032 | 0.943 |
+| Full-history, core+sleeve@10% | 10.08% | -7.73% | 1.302 | 1.305 |
+| OOS, core only | 9.63% | -6.65% | 1.339 | 1.449 |
+| **OOS, core+sleeve@10%** | **13.08%** | **-7.73%** | **1.806** | **1.693** |
+
+Consistent with every other OOS-vs-full comparison in this project: meaningfully better in the
+recent-decade window, but per this project's own stated discipline, treat full-history as the
+conservative anchor and OOS as the bull-flattered recent-regime case, not the number to plan
+around.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener

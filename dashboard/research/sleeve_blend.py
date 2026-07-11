@@ -176,6 +176,10 @@ def main():
                          "strategy-only comparison)")
     ap.add_argument("--risk", type=float, default=0.01,
                     help="core RISK_PER_TRADE (default 0.01 = the actual live setting)")
+    ap.add_argument("--oos", action="store_true",
+                    help="also report OOS-only (last 40% of the date range, same 60/40 "
+                         "cut convention used everywhere else in this project) metrics "
+                         "alongside the full-history ones")
     args = ap.parse_args()
     weights = [float(w) for w in args.weight.split(",")]
     caps = [float(c) for c in args.portfolio_cap.split(",")]
@@ -188,22 +192,38 @@ def main():
         print(f"  {tk:<6} n={len(trs):<4} meanR {rs.mean()*100 if len(rs) else 0:+.2f}% "
               f"win {(rs > 0).mean()*100 if len(rs) else 0:.0f}%")
 
-    print(f"\n{'cap':>6}{'weight':>8}{'CAGR':>9}{'maxDD':>9}{'Sharpe':>9}{'Calmar':>9}")
+    def _print_row(label_cap, label_w, ret, yrs):
+        cagr, dd, sh = _metrics(ret, yrs)
+        calmar = cagr / abs(dd) if dd else 0
+        print(f"{label_cap:>6}{label_w:>8}{cagr*100:>9.2f}{dd*100:>9.2f}{sh:>9.3f}{calmar:>9.3f}")
+
+    header = f"\n{'cap':>6}{'weight':>8}{'CAGR':>9}{'maxDD':>9}{'Sharpe':>9}{'Calmar':>9}"
+    print(header + "   (FULL history)")
     n_core = 0
     years = 0.0
+    oos_blocks = []
     for cap in caps:
         core_ret, years, n_core = _core_weekly_returns(args.pos_cap, cap, args.cash_yield, args.risk)
         didx = core_ret.index
         sleeve_unit = sum((_sleeve_unit_series(trs, didx) for trs in sleeve_trades.values()),
                           pd.Series(0.0, index=didx))
-        c_cagr, c_dd, c_sh = _metrics(core_ret, years)
-        print(f"{cap:>6.0%}{'core only':>8}{c_cagr*100:>9.2f}{c_dd*100:>9.2f}{c_sh:>9.3f}"
-              f"{(c_cagr/abs(c_dd) if c_dd else 0):>9.3f}")
+        _print_row(f"{cap:.0%}", "core only", core_ret, years)
         for w in weights:
-            b_cagr, b_dd, b_sh = _metrics(core_ret + w * sleeve_unit, years)
-            calmar = b_cagr / abs(b_dd) if b_dd else 0
-            print(f"{cap:>6.0%}{w:>8.0%}{b_cagr*100:>9.2f}{b_dd*100:>9.2f}{b_sh:>9.3f}{calmar:>9.3f}")
-    print(f"\n({n_core} core signals, {years:.1f}y span, "
+            _print_row(f"{cap:.0%}", f"{w:.0%}", core_ret + w * sleeve_unit, years)
+        if args.oos:
+            cut = didx[0] + (didx[-1] - didx[0]) * 0.6
+            oos_yrs = (didx[-1] - cut).days / 365.25
+            oos_blocks.append((cap, core_ret[core_ret.index >= cut],
+                              sleeve_unit[sleeve_unit.index >= cut], oos_yrs))
+
+    if args.oos:
+        print(header + "   (OOS = last 40% of the date range)")
+        for cap, core_oos, sleeve_oos, oos_yrs in oos_blocks:
+            _print_row(f"{cap:.0%}", "core only", core_oos, oos_yrs)
+            for w in weights:
+                _print_row(f"{cap:.0%}", f"{w:.0%}", core_oos + w * sleeve_oos, oos_yrs)
+
+    print(f"\n({n_core} core signals, {years:.1f}y full span, "
           f"pos-cap {args.pos_cap:.0%}, cost {COST:.2%}/trade, no look-ahead)")
 
 
