@@ -104,9 +104,25 @@ _load_settings()                                       # apply persisted setting
 # ---- helpers ---------------------------------------------------------------
 
 def _market_open() -> bool:
-    """Rough FX market-hours guard for the optional auto-pause.
-    FX trades ~24h Mon-Fri. We treat Sat/Sun as closed."""
-    now = dt.datetime.now()
+    """Rough market-hours guard for the optional auto-pause. Treats Sat/Sun as closed
+    (Mon-Fri open); does NOT check intraday hours, so it can still fire outside the
+    9:30-16:00 window on a trading day (the broker itself enforces that at order time).
+
+    FIXED 2026-07-11: this box's system clock is Asia/Hong_Kong (UTC+8), 12h ahead of
+    US Eastern (the market this account actually trades, BROKER=ib/UNIVERSE=etf --
+    NYSE-listed ETFs). Using the LOCAL weekday meant HK Sat 00:00-04:00 (still Fri
+    12:00-16:00 ET, regular trading hours) was wrongly treated as closed, and HK Mon
+    00:00-21:30 (still Sun noon - Mon pre-market ET) was wrongly treated as open --
+    roughly half a day of misalignment at each week boundary. Confirmed live: the
+    auto-pause kicked in at HK Sat 00:00:14, which was Fri 12:00pm ET -- cutting off
+    the rest of Friday's real trading session. For the MT5/FX legacy path (~24h
+    market, no single relevant exchange timezone) local weekday is kept as-is."""
+    from dashboard.instruments import _ib_broker
+    if _ib_broker():
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo("America/New_York"))
+    else:
+        now = dt.datetime.now()
     return now.weekday() < 5  # Mon-Fri
 
 

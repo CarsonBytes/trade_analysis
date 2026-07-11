@@ -1549,6 +1549,34 @@ have shown a false, alarming -90% to the user) and the `DD_HALT_PCT` live-tradin
 have silently and permanently blocked all new live entries) -- caught before the second one ever
 had a chance to fire for real.
 
+### 🐞 FOUND & FIXED 2026-07-11: `_market_open()` used the box's LOCAL (HK) clock, not US market time
+User asked to verify: `_market_open()` (the weekend auto-pause gate in `app.py`) should check US
+Eastern time, since the live/paper config (`BROKER=ib UNIVERSE=etf`) trades NYSE-listed ETFs, not
+local-timezone or 24h FX. Verified directly with `zoneinfo` rather than assumed: this box's system
+clock is `Asia/Hong_Kong` (UTC+8), 12h ahead of US Eastern (EDT in July, UTC-4) -- confirmed via
+`Get-TimeZone` and a direct conversion (`HK Sat 02:00 -> ET Fri 14:00`, weekday Friday not
+Saturday). Using the LOCAL weekday meant roughly half a day of misalignment at EACH week boundary:
+
+- **HK Sat 00:00-04:00** = ET **Fri 12:00pm-4:00pm** (still regular NYSE hours) -- wrongly
+  treated as closed, pausing the LLM scan (and therefore all new-trade placement) during real
+  trading hours.
+- **HK Mon 00:00-21:30** = ET **Sun noon through Mon pre-market** -- wrongly treated as open.
+
+This wasn't theoretical: the SAME investigation that found the drawdown bug above showed the
+live account's last board scan fired at exactly `00:00:14` HK time -- which was `12:00pm Friday
+ET`, cutting off the rest of Friday's real trading session at the moment HK crossed into
+Saturday, hours before the actual US market closed.
+
+**Fix:** `_market_open()` now checks `_ib_broker()` -- if true (the current live/paper config),
+uses `datetime.now(ZoneInfo("America/New_York"))` instead of naive local time; the legacy MT5/FX
+path (~24h market, no single relevant exchange timezone) is left on local time, unchanged.
+Verified against both broken boundaries directly (not just reasoned about): `HK Sat 02:00`
+now correctly resolves to `ET Fri` (weekday 4, market open); `HK Mon 08:00` now correctly
+resolves to `ET Sun 20:00` (weekday 6, market closed). Still only a day-of-week guard, not an
+intraday-hours check (the broker itself enforces 9:30-16:00 ET at order time) -- unchanged scope
+from before, just the correct clock. Deployed: restarted both `DashboardApp` and
+`DashboardAppLive`.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
