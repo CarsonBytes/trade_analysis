@@ -105,11 +105,18 @@ def _adx(df, n=14):
 
 
 def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
-             resolver=None, sl_method: str = "ATR") -> list[dict]:
+             resolver=None, sl_method: str = "ATR",
+             vix_series: pd.Series | None = None) -> list[dict]:
     """All gate-passing setups for one instrument (no look-ahead).
     Returns dicts: entry_i, entry_date, exit_date, direction, r.
     `horizon` (bars) overrides paper.HORIZON_DAYS. `resolver` overrides the fixed
-    SL/TP exit (exit-method test). `sl_method` ('ATR'|'STRUCT') sets SL/TP placement."""
+    SL/TP exit (exit-method test). `sl_method` ('ATR'|'STRUCT') sets SL/TP placement.
+    `vix_series` (2026-07-11, tested per-critique-request): if given (must already be
+    reindexed/ffilled onto df's own index -- no lookahead), scales the horizon PER-SIGNAL
+    by 20/VIX-at-entry, clipped to [0.6x, 1.4x] of the base horizon (matches a critique's
+    `max(21,min(49,35*(20/vix)))` daily-day proposal, translated to weekly bars: [3,7] wk
+    at H=5). None (default) = unchanged fixed-horizon behavior -- fully opt-in, no existing
+    caller/test is affected."""
     H = horizon if horizon is not None else paper.HORIZON_DAYS
     resolve = resolver or _resolve_daily
     directions = _DIRECTIONS
@@ -162,7 +169,13 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
         entry, sl, tp, rr_act = res
         if rr_act < paper.MIN_RR:
             i = entry_i + 1; continue
-        bars = df.iloc[entry_i + 1: entry_i + 1 + H]
+        H_i = H
+        if vix_series is not None:
+            vix_now = vix_series.iloc[entry_i]
+            if vix_now == vix_now and vix_now > 0:              # not NaN
+                H_i = int(round(max(0.6 * H, min(1.4 * H, H * (20.0 / vix_now)))))
+                H_i = max(1, H_i)
+        bars = df.iloc[entry_i + 1: entry_i + 1 + H_i]
         outcome = resolve(direction, entry, sl, tp, bars)
         if outcome is None:
             break
@@ -575,6 +588,10 @@ def main():
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
+    ap.add_argument("--vol-horizon", action="store_true",
+                    help="scale each trend signal's exit horizon by 20/VIX-at-entry (clipped "
+                         "0.6x-1.4x), instead of the fixed paper.HORIZON_DAYS for every trade "
+                         "(2026-07-11 critique test)")
     ap.add_argument("--vix-entry", action="store_true",
                     help="VIX sentiment test: long index ETFs the week after ^VIX>=28 (buy fear)")
     ap.add_argument("--meanrev", action="store_true",
@@ -831,7 +848,12 @@ def main():
         elif args.meanrev:                            # MR-only: standalone edge test
             cands += _mr_signals(df, inst.key)
         else:
-            cands += _signals(df, inst.key)           # trend (+ MR sleeve if --meanrev-blend)
+            vs = None
+            if args.vol_horizon:
+                # reindex onto df's own index via as-of (ffill) so each bar only ever
+                # sees VIX prints up to and including its own date -- no look-ahead.
+                vs = _vix_weekly().reindex(df.index, method="ffill")
+            cands += _signals(df, inst.key, vix_series=vs)  # trend (+ MR sleeve if --meanrev-blend)
             if args.meanrev_blend:
                 cands += _mr_signals(df, inst.key)
     if args.regime and "SPY" in data:                 # SPY 40wk-MA bull/bear overlay
@@ -1079,17 +1101,61 @@ def _resolve_partial(direction, entry, sl, tp, bars, take_r=1.5, take_frac=0.5):
     return "EXPIRED", entry + sgn * b * risk, len(bars)
 
 
+def _resolve_exhaustion(direction, entry, sl, tp, bars, arm_r=0.5, rsi_drop=15.0):
+    """MOMENTUM EXHAUSTION exit (2026-07-11 critique test): once price is `arm_r`R
+    in our favour, track the peak RSI(14) reached since entry; if RSI decelerates
+    `rsi_drop` points off that peak (classic 'momentum rolling over' signal) while
+    still in profit, exit at that bar's close instead of waiting for fixed SL/TP/
+    horizon. SL/TP still cap the extremes; horizon still time-stops. Needs a
+    per-bar 'rsi' column (same pattern as _resolve_voltrail's 'atr' column)."""
+    risk = abs(entry - sl)
+    if risk <= 0 or len(bars) == 0:
+        return None
+    sgn = 1 if direction == "long" else -1
+    armed, peak_rsi = False, None
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo, close = row["high"], row["low"], row["close"]
+        rsi = row.get("rsi", float("nan"))
+        if direction == "long":
+            if lo <= sl:
+                return ("WIN" if sl > entry else "LOSS"), sl, n
+            if hi >= tp:
+                return "WIN", tp, n
+        else:
+            if hi >= sl:
+                return ("WIN" if sl < entry else "LOSS"), sl, n
+            if lo <= tp:
+                return "WIN", tp, n
+        favor = sgn * (close - entry)
+        if not armed and favor >= arm_r * risk:
+            armed = True
+        if armed and rsi == rsi:                          # not NaN
+            better = (peak_rsi is None or
+                      (direction == "long" and rsi > peak_rsi) or
+                      (direction == "short" and rsi < peak_rsi))
+            if better:
+                peak_rsi = rsi
+            elif favor > 0:
+                decel = (peak_rsi - rsi) if direction == "long" else (rsi - peak_rsi)
+                if decel >= rsi_drop:
+                    return "WIN", close, n
+    return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
+
+
 def _exit_test(data, span, years) -> None:
     """Pre-specified EXIT-METHOD comparison on the CURRENT locked config (the prior
     breakeven test was on the old spot/daily universe -- doesn't transfer). One run,
     OOS @0.5%, then lock. Fixed SL/TP is the baseline trend-following exit; the rest
     'lock profit early', which theory says should HURT a trend system -- we verify."""
     from functools import partial
-    from dashboard.research.ab_meanrev import _atr
-    # per-bar ATR for the volatility-adaptive trail (chandelier needs CURRENT ATR)
+    from dashboard.research.ab_meanrev import _atr, _rsi
+    # per-bar ATR for the volatility-adaptive trail (chandelier needs CURRENT ATR);
+    # per-bar RSI for the momentum-exhaustion exit (needs CURRENT RSI each bar)
     for df in data.values():
         if "atr" not in df.columns:
             df["atr"] = _atr(df, 14)
+        if "rsi" not in df.columns:
+            df["rsi"] = _rsi(df["close"], 14)
     # (label -> (sl_method, resolver)). sl_method sets SL/TP PLACEMENT (ATR vs
     # STRUCT); resolver sets EXIT MANAGEMENT (None=fixed, breakeven, trailing).
     methods = {
@@ -1104,6 +1170,9 @@ def _exit_test(data, span, years) -> None:
         "partial 50%@1.5R+BE": ("ATR",   partial(_resolve_partial, take_r=1.5, take_frac=0.5)),
         "partial 50%@2R+BE":  ("ATR",    partial(_resolve_partial, take_r=2.0, take_frac=0.5)),
         "partial 33%@1R+BE":  ("ATR",    partial(_resolve_partial, take_r=1.0, take_frac=0.33)),
+        "exhaustion RSI-10pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=10.0)),
+        "exhaustion RSI-15pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=15.0)),
+        "exhaustion RSI-20pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=20.0)),
     }
     cut = min(min(df.index) for df in data.values()) + (span * 0.6)
     print("\nEXIT-METHOD TEST (current config: {metal,index,rate}, 5wk, RR3, "

@@ -1256,6 +1256,91 @@ disables matching `ETF_POS_CAP`/`PORTFOLIO_CAP`'s convention), ALL new entries p
 cycle -- existing positions are never touched. Full 6-file test suite passes; deployed to both
 dashboards, confirmed no errors and no false trigger (account is nowhere near -13% currently).
 
+### 🔬🔬 TESTED 2026-07-11: full 11-ticker sleeve blend (closes the scope gap flagged above)
+The 3-ticker (SPY/QQQ/XLK) faithful sleeve reproduction above explicitly flagged a scope gap:
+the LIVE sleeve is staged out to all 11 `SLEEVE_UNIVERSE` tickers, not just the original 3.
+Re-ran the same faithful `dipbuy_refine3.py`-exact entry/exit spec across all 11
+(SPY,QQQ,XLK,DIA,IWM,HYG,EFA,EEM,VNQ,PFF,ASHR) blended against the current hybrid-cap core book:
+
+| config | CAGR | maxDD | Sharpe | Calmar |
+|---|---|---|---|---|
+| core only (hybrid cap) | +6.44% | -6.83% | 1.032 | 0.943 |
+| core + sleeve(11tk) @5% | +8.27% | -6.60% | 1.255 | 1.252 |
+| **core + sleeve(11tk) @10%** | **+10.08%** | **-7.73%** | **1.301** | **1.304** |
+| core + sleeve(11tk) @15% | +11.87% | -9.57% | 1.251 | 1.240 |
+| core + sleeve(11tk) @20% | +13.65% | -12.63% | 1.176 | 1.081 |
+
+Same qualitative shape as the 3-ticker test, now confirmed at full scope: Calmar peaks at 10%
+(1.304, even more decisively than the 3-ticker version's 1.244) and declines at 15%/20% as the
+extra tickers add more raw CAGR than they add DD-adjusted quality. **10% remains the Calmar-
+optimal weight if/when the sleeve is activated; still NOT deployed** (zero real sleeve fills
+exist in the paper journal as of this date, confirmed via a direct DB check) -- this is the
+numbers-only answer, not a decision to go live.
+
+### 🔬🔬🔬 TESTED 2026-07-11: fourth critique round (4 proposals) -- 2 already closed, 2 tested and rejected
+A fourth AI-generated critique proposed four specific technical changes. Fact-checked and/or
+backtested each rather than accepting on description alone:
+
+**1. Limit-order entries (vs current market orders).** Genuine, not fabricated -- matches the
+already-documented `cost_sensitivity` finding (`ADOPTED PLAN`: "cost already modeled; limit-
+orders ~+0.1-0.2% max"). Real but marginal upside, and every order-placement call site in
+`ib_exec.py` currently uses `orderType="MKT"` by design (guarantees a fill, avoids the FX-style
+silent-cancel failure mode already found and fixed once this session, Error 10349). Not
+implemented -- the ~0.1-0.2%/yr upside doesn't clear the bar against a new fill-uncertainty
+failure mode on a system that just spent a whole session eliminating silent order failures.
+
+**2. "Bridge the sleeve gap" (make the backtest match the real `core/sleeve.py` logic).**
+Already closed before this round started -- direct code comparison confirmed `core/sleeve.py`'s
+`entry_signal()`/`should_exit_dynamic()` is byte-for-byte identical to the faithful
+`dipbuy_refine3.py`-based reproduction already used for the sleeve tests above (both the
+3-ticker and the 11-ticker version just above). No further action needed; the critique's
+premise (that the backtest was using a different, unfaithful methodology) doesn't hold --
+that was already fixed two critique-rounds ago.
+
+**3. Momentum Exhaustion Exit -- tested, NOT adopted (noise, not a real edge).** Added
+`_resolve_exhaustion()` to `research/backtest.py`: once a trade is +0.5R in favour, track the
+peak RSI(14) since entry; if RSI decelerates N points off that peak while still in profit, exit
+at that bar's close instead of riding to the fixed SL/TP/horizon (same resolver-plugin pattern
+as the existing breakeven/trailing/partial-profit tests). Ran through the existing `--exit-test`
+battery on the ETF book (`--etf --pos-cap 0.25 --portfolio-cap 1.0 --exit-test`, OOS @0.5%):
+
+| exit method | OOS expR | OOS CAGR% | OOS DD% | CAGR/DD | win% |
+|---|---|---|---|---|---|
+| fixed (baseline) | +0.156 | 5.1 | -4.8 | 1.07 | 43% |
+| exhaustion RSI-10pt | +0.150 | 4.8 | -4.8 | 1.01 | 43% |
+| exhaustion RSI-15pt | +0.160 | 5.2 | -4.8 | 1.09 | 43% |
+| exhaustion RSI-20pt | +0.156 | 5.1 | -4.8 | 1.07 | 43% |
+
+RSI-15pt technically satisfies the battery's own adoption rule (beats fixed on both OOS expR
+and CAGR/DD) -- but by a margin (+0.004 expR, +0.02 CAGR/DD, ~2% relative) that is noise on
+this sample: the `--etf` flag here only pulls `ETF_UNIVERSE` (10 instruments), not the full
+22-ETF live book, so OOS trade count is small. More telling: in the SAME run, `breakeven @+1R`
+and `partial 33%@1R+BE` show much LARGER apparent "improvements" (CAGR/DD 1.95 and 1.50 vs
+baseline 1.07) -- yet this project's much more rigorously tested futures-universe exit battery
+(26.4y, `--exit-test` on `{metal,index,rate}`, see "LOCKED STRATEGY SPEC" below) already
+concluded definitively that **no dynamic exit beats fixed** on this style of system, exactly the
+theory-predicted "cutting winners early loses" result. A small-universe OOS slice showing the
+opposite direction for THREE different dynamic-exit families simultaneously is a sample-size
+artifact, not a real reversal of that locked finding. **Not adopted** -- consistent with the
+already-closed exit-method research, no code path changed in `ib_exec.py`/`core/sleeve.py`.
+
+**4. Volatility-scaled exit horizon -- tested, REJECTED (worse on every metric, every risk
+level).** Added `--vol-horizon` to `research/backtest.py`: scales each trade's exit horizon by
+`20/VIX-at-entry` (clipped to [0.6x, 1.4x] of the base horizon), VIX reindexed onto each
+instrument's own bar index via as-of ffill (no look-ahead). Ran the current hybrid config
+(`--etf --pos-cap 0.25 --portfolio-cap 1.0 --cash-yield`) with and without the flag:
+
+| risk | fixed CAGR/DD/Calmar | vol-horizon CAGR/DD/Calmar |
+|---|---|---|
+| 0.25% | 6.1% / -2.2% / 2.77 | 5.9% / -2.2% / 2.68 |
+| 0.50% | 6.3% / -3.9% / 1.62 | 6.1% / -4.5% / 1.36 |
+| 1.00% (live) | 6.0% / -6.6% / 0.91 | 5.7% / -7.4% / 0.77 |
+| OOS @0.5% | +9.2% / -3.9% / 2.36 | +9.2% / -4.5% / 2.04 |
+
+Calmar is worse at every single risk level, most sharply at the live 1% risk setting (0.91 ->
+0.77, -15%). CAGR is flat-to-down while maxDD gets consistently worse -- the opposite of the
+critique's claimed "Calmar 0.85 -> ~0.95-1.05" improvement. **Rejected, no config change.**
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
