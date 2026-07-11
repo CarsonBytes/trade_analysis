@@ -44,6 +44,15 @@ _DIRECTIONS: tuple = ("long",) if paper.LONG_ONLY else ("long", "short")
 CONCENTRATED: bool = False    # --concentrated: drop one-per-instrument + de-correlation caps
 CIRCUIT_DD: tuple | None = None  # --circuit: (stop, resume) e.g. (0.15,0.10): pause new
                                  # entries when portfolio DD >= stop, resume when DD <= resume
+DD_SCALE: tuple | None = None    # --dd-scale: GRADUATED new-entry risk scaling by the CURRENT
+                                 # drawdown-from-peak (2026-07-11 critique test) -- distinct from
+                                 # DD_HALT_PCT (binary halt, live-only, no backtest effect) and
+                                 # CIRCUIT_DD (binary hysteresis, already tested+rejected: "kills
+                                 # CAGR, no DD help"). e.g. ((0.05,0.8),(0.08,0.5),(0.11,0.0)):
+                                 # dd>=5% -> new entries at 0.8x risk, dd>=8% -> 0.5x, dd>=11% ->
+                                 # skip (0.0x). Thresholds are checked in order, LAST match wins
+                                 # (list must be sorted ascending) -- existing OPEN positions are
+                                 # never touched, only NEW entries are sized down.
 REGIME: object = None            # --regime: SPY 40wk-MA bull/bear Series; scale size in bears
 REGIME_BEAR_SIZE = 0.40          # position size in a SPY-bear regime (vs 1.0 in bull)
 POS_CAP: float | None = None     # --pos-cap: max per-position NOTIONAL as a fraction of equity.
@@ -406,9 +415,9 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
                 eq_points.append((c["entry_date"], equity))
             last_t[0] = c["entry_date"]
         _close_due(c["entry_date"])
+        peak_eq = max(peak_eq, equity)
+        dd = (peak_eq - equity) / peak_eq if peak_eq > 0 else 0.0
         if CIRCUIT_DD:                                  # tail-risk circuit breaker
-            peak_eq = max(peak_eq, equity)
-            dd = (peak_eq - equity) / peak_eq if peak_eq > 0 else 0.0
             stop, resume = CIRCUIT_DD
             if not paused and dd >= stop:
                 paused = True
@@ -416,6 +425,13 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
                 paused = False
             if paused:
                 continue                                # no new entries while halted
+        dd_mult = 1.0
+        if DD_SCALE:                                     # graduated risk scaling by current DD
+            for thresh, mult in DD_SCALE:
+                if dd >= thresh:
+                    dd_mult = mult
+            if dd_mult <= 0:
+                continue                                # fully skip this entry
         if CLUSTER:                                     # de-correlate by ASSET CLASS
             sign = 1 if c["direction"] == "long" else -1
             buckets = [(active_by_key(c["key"]).asset_class, sign)]
@@ -429,7 +445,7 @@ def _portfolio(cands: list[dict], risk: float, target_vol: float | None = None,
         nid += 1
         cls = active_by_key(c["key"]).asset_class
         risk_money = (equity * risk * _vol_factor() * _class_factor(cls, c["entry_date"])
-                      * _regime_factor(c["entry_date"]) * c.get("risk_mult", 1.0))
+                      * _regime_factor(c["entry_date"]) * c.get("risk_mult", 1.0) * dd_mult)
         desired = risk_money * c.get("nmult", 0.0)                 # full-risk notional
         if POS_CAP is None:                                        # legacy: dep capped at equity
             notional = min(desired, equity)
@@ -588,6 +604,10 @@ def main():
     ap.add_argument("--mom-filter", type=int, default=None, metavar="N",
                     help="relative-strength filter: only take trend signals for ETFs in the "
                          "top-N by trailing 13wk return at entry (cross-sectional momentum overlay)")
+    ap.add_argument("--dd-scale", type=str, default=None, metavar="T1:M1,T2:M2,...",
+                    help="graduated new-entry risk scaling by current drawdown-from-peak, e.g. "
+                         "'5:0.8,8:0.5,11:0' = dd>=5%% -> 0.8x risk, dd>=8%% -> 0.5x, dd>=11%% -> "
+                         "skip new entries. Existing positions untouched.")
     ap.add_argument("--vol-horizon", action="store_true",
                     help="scale each trend signal's exit horizon by 20/VIX-at-entry (clipped "
                          "0.6x-1.4x), instead of the fixed paper.HORIZON_DAYS for every trade "
@@ -711,6 +731,14 @@ def main():
     if args.circuit:
         CIRCUIT_DD = (0.15, 0.10)
         print("[CIRCUIT BREAKER: pause new entries when DD>=15%, resume when DD<=10%]")
+    if args.dd_scale:
+        global DD_SCALE
+        pairs = []
+        for part in args.dd_scale.split(","):
+            t, m = part.split(":")
+            pairs.append((float(t) / 100.0, float(m)))
+        DD_SCALE = tuple(sorted(pairs))
+        print(f"[DD-SCALE: graduated risk scaling by current drawdown -- {DD_SCALE}]")
     if args.pos_cap is not None:
         global POS_CAP
         POS_CAP = args.pos_cap

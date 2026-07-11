@@ -1302,44 +1302,129 @@ that was already fixed two critique-rounds ago.
 peak RSI(14) since entry; if RSI decelerates N points off that peak while still in profit, exit
 at that bar's close instead of riding to the fixed SL/TP/horizon (same resolver-plugin pattern
 as the existing breakeven/trailing/partial-profit tests). Ran through the existing `--exit-test`
-battery on the ETF book (`--etf --pos-cap 0.25 --portfolio-cap 1.0 --exit-test`, OOS @0.5%):
+battery, OOS @0.5%:
 
 | exit method | OOS expR | OOS CAGR% | OOS DD% | CAGR/DD | win% |
 |---|---|---|---|---|---|
-| fixed (baseline) | +0.156 | 5.1 | -4.8 | 1.07 | 43% |
-| exhaustion RSI-10pt | +0.150 | 4.8 | -4.8 | 1.01 | 43% |
-| exhaustion RSI-15pt | +0.160 | 5.2 | -4.8 | 1.09 | 43% |
-| exhaustion RSI-20pt | +0.156 | 5.1 | -4.8 | 1.07 | 43% |
+| fixed (baseline) | +0.164 | 6.9 | -4.8 | 1.43 | 43% |
+| exhaustion RSI-10pt | +0.158 | 6.5 | -4.8 | 1.36 | 43% |
+| exhaustion RSI-15pt | +0.167 | 7.0 | -4.8 | 1.45 | 43% |
+| exhaustion RSI-20pt | +0.164 | 6.9 | -4.8 | 1.43 | 43% |
 
-RSI-15pt technically satisfies the battery's own adoption rule (beats fixed on both OOS expR
-and CAGR/DD) -- but by a margin (+0.004 expR, +0.02 CAGR/DD, ~2% relative) that is noise on
-this sample: the `--etf` flag here only pulls `ETF_UNIVERSE` (10 instruments), not the full
-22-ETF live book, so OOS trade count is small. More telling: in the SAME run, `breakeven @+1R`
-and `partial 33%@1R+BE` show much LARGER apparent "improvements" (CAGR/DD 1.95 and 1.50 vs
-baseline 1.07) -- yet this project's much more rigorously tested futures-universe exit battery
-(26.4y, `--exit-test` on `{metal,index,rate}`, see "LOCKED STRATEGY SPEC" below) already
-concluded definitively that **no dynamic exit beats fixed** on this style of system, exactly the
-theory-predicted "cutting winners early loses" result. A small-universe OOS slice showing the
-opposite direction for THREE different dynamic-exit families simultaneously is a sample-size
-artifact, not a real reversal of that locked finding. **Not adopted** -- consistent with the
-already-closed exit-method research, no code path changed in `ib_exec.py`/`core/sleeve.py`.
+**⚠️ CORRECTION 2026-07-11 (same day): the FIRST version of this table was run on the wrong
+universe.** `--etf` alone only pulls raw `ETF_UNIVERSE` (10 instruments, no `ETF_CANDIDATES`,
+no `WEEKLY_TREND_CLASSES` filter) -- NOT the actual live 22-ETF book. The real live universe is
+what `active_universe()` returns under `BROKER=ib UNIVERSE=etf` (confirmed by direct check: 22
+instruments). Re-ran with `BROKER=ib UNIVERSE=etf uv run python -u -m dashboard.research.backtest
+--pos-cap 0.25 --portfolio-cap 1.0 --exit-test` (no `--etf` flag -> falls through to
+`active_universe()`) -- table above is the corrected, real-universe version. The magnitudes
+shifted (baseline CAGR/DD went from 1.07 to a real 1.43) but the QUALITATIVE verdict is
+unchanged: RSI-15pt still only marginally "beats" baseline (+0.003 expR, +0.02 CAGR/DD, ~1-2%
+relative) while `breakeven @+1R` (2.32) and `partial 33%@1R+BE` (2.06) again show far LARGER
+apparent gains in the SAME run -- yet the much more rigorously tested 26.4y futures-universe exit
+battery already concluded **no dynamic exit beats fixed** on this system (see "LOCKED STRATEGY
+SPEC" below). Three different dynamic-exit families all showing outsized gains simultaneously,
+on a shorter OOS window, is a sample-size artifact, not a real reversal. **Not adopted** -- no
+code path changed in `ib_exec.py`/`core/sleeve.py`.
 
-**4. Volatility-scaled exit horizon -- tested, REJECTED (worse on every metric, every risk
-level).** Added `--vol-horizon` to `research/backtest.py`: scales each trade's exit horizon by
-`20/VIX-at-entry` (clipped to [0.6x, 1.4x] of the base horizon), VIX reindexed onto each
-instrument's own bar index via as-of ffill (no look-ahead). Ran the current hybrid config
-(`--etf --pos-cap 0.25 --portfolio-cap 1.0 --cash-yield`) with and without the flag:
+**4. Volatility-scaled exit horizon -- tested, MIXED result (not the clean rejection first
+reported).** Added `--vol-horizon` to `research/backtest.py`: scales each trade's exit horizon
+by `20/VIX-at-entry` (clipped to [0.6x, 1.4x] of the base horizon), VIX reindexed onto each
+instrument's own bar index via as-of ffill (no look-ahead).
+
+**⚠️ CORRECTION 2026-07-11 (same day): the first version of this test used the same wrong
+10-instrument universe as point 3 above** (`--etf` instead of the real `active_universe()`) and
+concluded "rejected, worse on every metric" -- that conclusion doesn't survive on the correct
+universe. Re-ran with `BROKER=ib UNIVERSE=etf` (22 instruments), with and without the flag:
 
 | risk | fixed CAGR/DD/Calmar | vol-horizon CAGR/DD/Calmar |
 |---|---|---|
-| 0.25% | 6.1% / -2.2% / 2.77 | 5.9% / -2.2% / 2.68 |
-| 0.50% | 6.3% / -3.9% / 1.62 | 6.1% / -4.5% / 1.36 |
-| 1.00% (live) | 6.0% / -6.6% / 0.91 | 5.7% / -7.4% / 0.77 |
-| OOS @0.5% | +9.2% / -3.9% / 2.36 | +9.2% / -4.5% / 2.04 |
+| 0.25% | 7.1% / -3.9% / 1.82 | 7.3% / -3.8% / 1.92 |
+| 0.50% | 7.7% / -4.7% / 1.64 | 7.8% / -4.7% / 1.66 |
+| 1.00% (live) | 8.0% / -6.2% / 1.29 | 7.6% / -6.2% / 1.23 |
+| OOS @0.5% | +11.4% / -4.7% / 2.43 | +13.0% / -4.4% / 2.96 |
 
-Calmar is worse at every single risk level, most sharply at the live 1% risk setting (0.91 ->
-0.77, -15%). CAGR is flat-to-down while maxDD gets consistently worse -- the opposite of the
-critique's claimed "Calmar 0.85 -> ~0.95-1.05" improvement. **Rejected, no config change.**
+On the real universe, vol-horizon actually IMPROVES Calmar at 0.25%/0.5% risk and OOS (up to
++22% at OOS), and is only modestly worse (-5%) at the live 1% risk setting -- the opposite shape
+from the wrong-universe result. Genuinely mixed, not a clean win or a clean loss: it helps at
+lower risk/longer OOS windows but slightly hurts at the specific risk level actually deployed
+live. **Not adopted at the live 1% setting** (the level that matters), but this is a real,
+un-noisy effect (consistent direction across 3 of 4 rows) worth revisiting if `RISK_PER_TRADE`
+is ever lowered from 1% -- unlike the exhaustion-exit result above, this one isn't dismissible as
+noise. No config change made this round; flagging as a genuine open question, not closing it.
+
+**Housekeeping note:** this correction is a reminder to always pass `BROKER=ib UNIVERSE=etf`
+(or use `active_universe()`, not the bare `--etf` flag) when a test is meant to represent the
+actual live book -- `--etf` alone silently substitutes a different, smaller universe with no
+error or warning. Worth fixing at the CLI level (make `--etf` warn or fail if it disagrees with
+`active_universe()`) if this trips anyone up again; not done here, flagging as a known trap.
+
+### 🔬 TESTED 2026-07-11: fifth critique round -- graduated DD risk-scaling and CAP=80%+sleeve combo
+A fifth critique (in Chinese) proposed two genuinely new, testable ideas on top of one factual
+error and one already-settled question:
+
+**Factual error, corrected:** the critique's centerpiece claim was that the full 11-ticker sleeve
+backtest is "still blank / the biggest source of uncertainty" (未知/最大不確定性). This is simply
+wrong -- it was tested and documented THIS SAME DAY, earlier in this document (see "full
+11-ticker sleeve blend" above): Calmar peaks at 10% weight (1.304), same shape as the 3-ticker
+version. The critique appears to have been generated from a stale/earlier snapshot of this doc.
+
+**Already-settled, no new test needed:** the critique's "sleeve weight 5% vs 10%" question is the
+same question the already-published table above already answers (10% is Calmar-optimal, both the
+3-ticker and 11-ticker versions).
+
+**Idea: graduated DD-based risk scaling for new entries -- tested, REJECTED (dominates in the
+wrong direction).** Added `DD_SCALE` to `research/backtest.py` (`--dd-scale T1:M1,T2:M2,...`):
+unlike the binary `DD_HALT_PCT` (live-only, no backtest effect) or the already-rejected binary
+`CIRCUIT_DD` ("kills CAGR, no DD help"), this scales NEW entries' risk continuously by the
+CURRENT drawdown-from-peak at each entry decision, existing positions untouched. Tested the
+critique's exact proposed ladder (5%dd->0.8x risk, 8%dd->0.5x, 11%dd->skip) and a more aggressive
+variant, on the real 22-ETF book, no cash-yield (isolates the mechanism):
+
+| config | n trades | CAGR | maxDD | Calmar |
+|---|---|---|---|---|
+| off (baseline) | 1285 | 5.14% | -8.75% | 0.588 |
+| mild (5:0.8, 8:0.5, 11:skip) | 1285 | 5.05% | -8.84% | 0.572 |
+| aggressive (3:0.7, 6:0.4, 9:skip) | 71 | 0.02% | -9.10% | 0.003 |
+
+The mild version makes BOTH CAGR and maxDD simultaneously WORSE (not even a trade-off) --
+reducing size right after a drawdown starts delays the recovery trades that would otherwise
+close it out, so a SUBSEQUENT drawdown compounds on a still-lower base and ends up deeper. The
+aggressive version is catastrophic: tightening the thresholds starves the system of 94% of its
+entries (1285->71) because a trend book spends extended stretches below a recent peak, and
+without new entries a trend system has no mechanism to earn its way back -- CAGR collapses to
+~0%. This directly extends the already-documented finding that a binary tail-risk circuit
+breaker "kills CAGR, no DD help" to the graduated case: softer doesn't fix the underlying
+mechanism, it's the same failure mode at a smaller dose. **Rejected, no config change** (verified
+via a synthetic unit test first that `DD_SCALE` actually changes `_portfolio()`'s output before
+trusting the real-universe run -- confirmed working, not a silent no-op).
+
+**Idea: PORTFOLIO_CAP=80% + sleeve@10% combo -- tested, REFUTES the critique's own predicted
+number.** Built a permanent reusable tool for this recurring test, `research/sleeve_blend.py`
+(this exact "core + sleeve at some weight/cap" test had already been rebuilt from scratch as
+throwaway code twice this session -- worth keeping). Uses `active_universe()` directly (can't
+silently drift from the live book) + the exact `core/sleeve.py` entry/exit spec on all 11
+`SLEEVE_UNIVERSE` tickers:
+
+| PORTFOLIO_CAP | sleeve weight | CAGR | maxDD | Sharpe | Calmar |
+|---|---|---|---|---|---|
+| 100% (current) | core only | 4.36% | -8.18% | 0.835 | 0.533 |
+| 100% (current) | 5% | 6.15% | -6.36% | 1.090 | 0.967 |
+| **100% (current)** | **10%** | **7.93%** | **-7.43%** | **1.139** | **1.068** |
+| 100% (current) | 15% | 9.70% | -9.57% | 1.094 | 1.013 |
+| 80% | core only | 3.80% | -7.85% | 0.823 | 0.485 |
+| 80% | 5% | 5.59% | -6.38% | 1.095 | 0.876 |
+| 80% | 10% | 7.35% | -7.24% | 1.124 | 1.015 |
+| 80% | 15% | 9.11% | -9.57% | 1.067 | 0.951 |
+
+The critique predicted this combo would reach **Calmar ~1.44**. The real number is **1.015** --
+WORSE than the current CAP=100%+sleeve@10% config's 1.068, not better. `PORTFOLIO_CAP=80%`
+combined with the sleeve is dominated by `PORTFOLIO_CAP=100%` at every sleeve weight tested here,
+consistent with the already-documented standalone `CAP=80%` finding (worse OOS ratio). **Rejected,
+kept `PORTFOLIO_CAP=1.0`.** (Note: this script's absolute CAGR figures run lower than the
+cash-yield-modeled figures quoted elsewhere in this doc -- `sleeve_blend.py` doesn't model
+cash-yield/margin-debit, same "compare relative shape, not absolute level across different
+scripts" caveat as the earlier faithful-sleeve-reproduction entries.)
 
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
