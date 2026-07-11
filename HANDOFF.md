@@ -1424,7 +1424,75 @@ consistent with the already-documented standalone `CAP=80%` finding (worse OOS r
 kept `PORTFOLIO_CAP=1.0`.** (Note: this script's absolute CAGR figures run lower than the
 cash-yield-modeled figures quoted elsewhere in this doc -- `sleeve_blend.py` doesn't model
 cash-yield/margin-debit, same "compare relative shape, not absolute level across different
-scripts" caveat as the earlier faithful-sleeve-reproduction entries.)
+scripts" caveat as the earlier faithful-sleeve-reproduction entries. **Also ran at 0.5% risk, not
+the live 1% -- see the correction directly below, which redoes this at the correct risk level.**)
+
+### 🔬 TESTED 2026-07-11: sixth critique round -- sleeve x PORTFOLIO_CAP (properly scoped) and a parameter-interaction lesson
+A sixth critique (well-reasoned, correctly flagged two real gaps rather than inventing numbers)
+asked: (1) has the sleeve ever been blended against the core book at the EXACT current 4-parameter
+config (cash-yield + `PORTFOLIO_CAP=1.0` together)? and (2) has `SL_ATR_MULT`/`RR_DEFAULT`/
+`OVEREXT_HI` ever been swept under `PORTFOLIO_CAP` (the existing `param_sensitivity.py` sweep
+predates it, 2026-07-09)? It also proposed `MIN_STRENGTH>5`, which turned out to be a
+misunderstanding of the scoring scale, not a real lever.
+
+**1. Sleeve x PORTFOLIO_CAP, done properly this time (added `--cash-yield`/`--risk` to
+`sleeve_blend.py`).** The FIRST attempt at this (table just above) ran at 0.5% risk, not the
+live 1%, and without cash-yield -- caught and corrected before reporting it. Re-ran at the
+actual live settings (`--pos-cap 0.25 --portfolio-cap 1.0 --cash-yield --risk 0.01`):
+
+| weight | CAGR | maxDD | Sharpe | Calmar |
+|---|---|---|---|---|
+| core only | 6.44% | -6.83% | 1.032 | 0.943 |
+| 5% | 8.26% | -6.60% | 1.253 | **1.251** |
+| 10% | 10.06% | -8.12% | 1.299 | 1.239 |
+| 15% | 11.85% | -9.80% | 1.248 | 1.209 |
+
+The core-only row (6.44%/-6.83%/0.943) matches the previously-documented "core only (hybrid
+cap)" figure exactly, cross-validating the new tool against the old one-off script despite
+using a different (correct, `active_universe()`-based) instrument list. **Both 5% and 10%
+weight clear the critique's own "1.2-1.4 = final form" bar** -- but Calmar is a near-flat
+PLATEAU across 5-10% (1.251 vs 1.239, ~1% apart), not the sharp peak-at-10% the earlier
+(differently-scoped) tests suggested. Read this as "5-10% are statistically indistinguishable
+here," not "5% is now definitively better." Still zero real sleeve fills exist in the paper
+journal -- this settles the numbers question, not the deploy question.
+
+**2. ATR-SL-mult / RR-mult / OVEREXT sweep under the CURRENT config -- individually promising,
+but a clean lesson in why one-at-a-time sweeps mislead.** Re-ran `param_sensitivity.py` with
+`PORTFOLIO_CAP=1.0` added (the 2026-07-09 version never had it) and a `MIN_STRENGTH` probe added:
+
+| parameter | -20% | baseline | +20% |
+|---|---|---|---|
+| SL_ATR_MULT | **0.566** | 0.533 | 0.443 |
+| RR_DEFAULT | 0.480 | 0.533 | **0.602** |
+| HORIZON_DAYS | 0.526 | 0.533 | 0.546 |
+| OVEREXT band | **0.561** | 0.533 | 0.485 |
+(ratio = CAGR/|maxDD|; bold = the favourable direction)
+
+Unlike the 2026-07-09 sweep (baseline was locally optimal on all 4), THIS time three parameters
+each show a one-directional improvement in isolation: tighter stop (SL_ATR_MULT -20%), wider
+target (RR_DEFAULT +20%), and a tighter overextension filter (OVEREXT 65/35) each individually
+beat baseline. **Tested whether stacking all three together compounds or cancels, rather than
+assuming additivity:**
+
+| config | n | CAGR | maxDD | ratio |
+|---|---|---|---|---|
+| baseline | 1285 | +4.36% | -8.18% | 0.533 |
+| **COMBINED (all 3 favourable directions)** | 1104 | +3.80% | -8.11% | **0.468** |
+
+**The combination is WORSE than baseline (0.468 vs 0.533), not better** -- the three individually
+"favourable" nudges interact and cancel rather than compound. This is exactly the overfitting
+trap one-at-a-time parameter sweeps are prone to, and is why this project's convention has always
+been to verify a combination directly rather than assume individual deltas add up (same lesson
+as the earlier `2x risk` / `portfolio_cap 105%` tests, which also looked individually plausible
+and failed when actually run). **No config change** -- the current baseline
+(`SL_ATR_MULT=1.5, RR_DEFAULT=3.0, HORIZON_DAYS=5, OVEREXT=70/30`) remains the best JOINTLY-
+tested configuration, even though it's no longer the best on every individual axis in isolation.
+
+**3. `MIN_STRENGTH>5` -- not a real parameter, confirmed empirically.** `scoring.py` clamps
+`strength = max(1, min(5, ...))` -- a hard 1-5 scale -- and the live config's `MIN_STRENGTH=5`
+is already that ceiling. Raising it to 6 doesn't tighten the filter, it disables the strategy:
+confirmed by running it, `n=0` signals, zero trades. The critique's premise (that 6/7/8 are
+untested threshold values worth sweeping) doesn't hold -- there's no headroom above 5 to sweep.
 
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`

@@ -36,11 +36,32 @@ TARGET_FRAC = 0.03
 TIME_CAP_DAYS = 10
 
 
-def _core_weekly_returns(pos_cap: float | None, portfolio_cap: float | None) -> tuple[pd.Series, float, float]:
+_IRX_CACHE = None
+
+
+def _cash_yield_series():
+    """Real ^IRX 13wk T-bill rate, same fetch as backtest.py's --cash-yield flag (idle-cash
+    interest / margin-debit cost -- without this, comparing against the documented
+    cash-yield-modeled baselines elsewhere in HANDOFF is apples-to-oranges)."""
+    global _IRX_CACHE
+    if _IRX_CACHE is None:
+        irx = yf.download("^IRX", period="max", interval="1wk", progress=False, auto_adjust=True)
+        if hasattr(irx.columns, "nlevels") and irx.columns.nlevels > 1:
+            irx.columns = irx.columns.get_level_values(0)
+        s = (irx["Close"].dropna() / 100.0)
+        if s.index.tz is None:
+            s.index = s.index.tz_localize("UTC")
+        _IRX_CACHE = s
+    return _IRX_CACHE
+
+
+def _core_weekly_returns(pos_cap: float | None, portfolio_cap: float | None,
+                         cash_yield: bool = False, risk: float = 0.01) -> tuple[pd.Series, float, float]:
     """The current live core book's DAILY-resampled return series (ffilled from its own
     weekly equity curve, so it lines up with the sleeve's daily bars for blending)."""
     bt.POS_CAP = pos_cap
     bt.PORTFOLIO_CAP = portfolio_cap
+    bt.CASH_YIELD = _cash_yield_series() if cash_yield else None
     cands = []
     for inst in active_universe():
         df = yf.download(inst.yf, period="max", interval="1wk", progress=False, auto_adjust=True)
@@ -56,7 +77,7 @@ def _core_weekly_returns(pos_cap: float | None, portfolio_cap: float | None) -> 
         if len(df) < 220:
             continue
         cands += bt._signals(df, inst.key)
-    eq, _ = bt._portfolio(cands, 0.005)
+    eq, _ = bt._portfolio(cands, risk)
     eq = eq[~eq.index.duplicated(keep="last")].sort_index()
     s, e = eq.index[0], eq.index[-1]
     didx = pd.date_range(s, e, freq="B", tz="UTC")
@@ -149,6 +170,12 @@ def main():
                     help="comma-separated sleeve weight(s), e.g. 0.05,0.10,0.15")
     ap.add_argument("--tickers", choices=["3", "11"], default="11",
                     help="3 = SLEEVE_STAGE_2A (SPY/QQQ/XLK); 11 = full SLEEVE_UNIVERSE")
+    ap.add_argument("--cash-yield", action="store_true",
+                    help="credit idle cash at real ^IRX rate (matches the documented "
+                         "cash-yield-modeled baselines elsewhere in HANDOFF -- omit for a "
+                         "strategy-only comparison)")
+    ap.add_argument("--risk", type=float, default=0.01,
+                    help="core RISK_PER_TRADE (default 0.01 = the actual live setting)")
     args = ap.parse_args()
     weights = [float(w) for w in args.weight.split(",")]
     caps = [float(c) for c in args.portfolio_cap.split(",")]
@@ -165,7 +192,7 @@ def main():
     n_core = 0
     years = 0.0
     for cap in caps:
-        core_ret, years, n_core = _core_weekly_returns(args.pos_cap, cap)
+        core_ret, years, n_core = _core_weekly_returns(args.pos_cap, cap, args.cash_yield, args.risk)
         didx = core_ret.index
         sleeve_unit = sum((_sleeve_unit_series(trs, didx) for trs in sleeve_trades.values()),
                           pd.Series(0.0, index=didx))
