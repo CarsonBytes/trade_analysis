@@ -67,9 +67,13 @@ TIME_CAP_DAYS = 10
 
 
 def sleeve_enabled() -> bool:
-    """Explicit opt-in, independent of account-size phase. Only dashboard.ps1 (paper) sets
-    this -- run_dashboard_live.ps1 deliberately does NOT, so the sleeve never runs on the
-    live account without a separate, deliberate decision later."""
+    """Explicit opt-in, independent of account-size phase. Originally BOTH launch scripts
+    set this only for paper (dashboard.ps1), deliberately NOT live -- but the user explicitly
+    approved enabling it on live too (2026-07-09, confirmed via an explicit yes/no prompt), so
+    run_dashboard_live.ps1 now sets SLEEVE_ENABLED=1 as well (comment corrected 2026-07-11,
+    was stale). The real gate keeping the sleeve inert on the live account right now is
+    paper.sleeve_active()'s equity-phase check (PHASE2_NAV_USD ~$64k) -- live is currently
+    far below that, not blocked by this flag."""
     return os.environ.get("SLEEVE_ENABLED", "").lower() in ("1", "true", "yes")
 
 
