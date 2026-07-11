@@ -1899,6 +1899,54 @@ recent-decade window, but per this project's own stated discipline, treat full-h
 conservative anchor and OOS as the bull-flattered recent-regime case, not the number to plan
 around.
 
+### 🔧 SELF-AUDIT 2026-07-11, part 4: sleeve clustering, core/sleeve correlation, exit/param DSR, commissions
+
+**1. Sleeve cross-ticker clustering during panics -- real, substantial, but already reflected
+in the reported numbers.** Direct code check: `place_sleeve_signals()` only checks
+`_has_open(ticker)`/`_recent_close(ticker)` PER TICKER -- no cross-ticker cap at all. Built
+`research/sleeve_clustering_check.py`: across 732 historical sleeve exits, clustering is real
+and frequent -- up to **all 11 of 11 tickers resolving the same week** (2025-04-07), and
+repeated 8-10-ticker clusters during 2008 GFC, 2011 debt-ceiling, 2015 China devaluation, 2020
+COVID, and 2022. **Worst single week: -51.0% combined R, the week markets reopened after 9/11**
+(at 10% sleeve weight, a -5.10pp single-week portfolio hit). This IS already captured in every
+documented blended Calmar/maxDD figure -- `sleeve_blend.py`'s methodology sums real historical
+per-ticker R-attribution on its actual resolution day, so the worst clustering event isn't
+hidden. The real gap is different: this methodology gives each firing ticker its full
+independent weight regardless of concurrency, while PRODUCTION's `PORTFOLIO_CAP` would throttle
+new entries once the aggregate cap binds -- meaning REAL sleeve behavior during a heavy
+clustering week would likely be MORE MUTED (smaller both up and down) than the backtest
+assumes. Not a config change -- a scope note on how to read clustering-week figures.
+
+**2. Core-vs-sleeve correlation -- measured directly for the first time, genuinely reassuring.**
+Built `research/core_sleeve_correlation.py`. Correlation on days either series moved: **-0.026**.
+On sleeve-exit days specifically (the more relevant comparison): **+0.011**. Both effectively
+zero. On the (rare, n=17) days both moved, only 47% moved the same direction -- a coin flip.
+**The "different risk driver" diversification story is empirically confirmed, not just assumed.**
+
+**3. DSR correction for the exit-method and parameter searches -- also unmoved.** Applied the
+same multiple-comparisons rigor already used for universe selection (49 trials, 100% DSR) to
+the OTHER two search processes this session: the exit-method battery (18 configs tested:
+fixed/STRUCT/breakeven/trailing variants/vol-trail x4/partial x3/exhaustion x3/time-decay x2)
+and the parameter sweep (15 configs: SL_ATR_MULT/RR_DEFAULT/HORIZON_DAYS/OVEREXT/MIN_STRENGTH
++ the combined-interaction test). DSR stays at **100%** at n_trials=18, 15, the 33 combined,
+and even 82 (adding the universe-selection 49 on top of both). The strategy's edge survives an
+extremely comprehensive correction across every search process run this session.
+
+**4. IBKR commission drag -- computed for the first time, smaller than assumed, likely
+another overstatement in the original $64k reasoning.** Using IBKR Pro's well-established
+tiered structure (~$0.0035/share, $0.35 minimum -- general knowledge, not independently
+re-verified against IBKR's current live published schedule since fee schedules can change):
+a sleeve SPY entry at current live equity (~$12.8k, 1.7 shares, ~$1,284 notional) costs ~0.055%
+round-trip in commission -- HALF of the 10bp spread cost already modeled in every backtest. At
+the $64k gate (8.5 shares), it drops to ~0.011% round-trip. **The "commission-sensitive fills"
+part of the original phase-2 gating reasoning appears to be ANOTHER overstatement** -- joining
+the already-found 2.4x-understated edge estimate. Both point the same direction: the original
+$64k threshold was set more conservatively than its own stated reasoning, corrected, would
+imply. Still not changed unilaterally -- a real-money parameter, flagged for a decision.
+
+All new scripts from today (`sleeve_clustering_check.py`, `core_sleeve_correlation.py`) follow
+the established convention. No config changes.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
