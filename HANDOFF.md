@@ -57,6 +57,17 @@ permissions-list endpoint) — run `preflight_check.py` against the live gateway
 fractional-bracket paper order first (the one silent-failure risk: stops on fractional lots).
 
 ### ⭐ ADOPTED PLAN + 2-PHASE AUTO-SWITCH (2026-07-01) — the live config
+**⭐⭐⭐ UPDATED 2026-07-11 — a THIRD parameter is now part of this config, and the expected
+figures below are superseded.** `PORTFOLIO_CAP=1.0` (aggregate gross-exposure cap, live in
+`ib_exec.py`) now runs alongside `RISK_PER_TRADE`/`ETF_POS_CAP` -- do NOT read this section
+without also reading "PORTFOLIO_CAP -- aggregate gross-exposure cap" further down. Current
+honest expectation (33.4y, current cash-yield/margin-debit model, all 3 params): **Full ~5.8%
+CAGR / −6.8% maxDD, Sharpe ~1.19; OOS (recent decade) ~11.4% CAGR / −5.0% maxDD, Sharpe ~1.61**
+-- meaningfully better risk-adjusted (Sharpe +24% full / +31% OOS) than the pos-cap-only config
+below, which is now the OUTGOING baseline, not the target. Both `2x risk` and `portfolio_cap
+105%` were tested as follow-ups and REJECTED (worse on every risk-adjusted metric) -- see that
+entry for the numbers. Original (2026-07-01) text preserved below for the reasoning trail.
+
 **Settings: `RISK_PER_TRADE=0.01` (1%) + `ETF_POS_CAP=0.25`** (both live defaults; risk% also
 persisted in ui_settings). 1% risk "fills" the 25% cap on high-vol names; the CAP is the real
 return/DD dial (risk% is inert once the cap binds; strategy-only Sharpe flat ~0.88 at any cap).
@@ -1049,8 +1060,77 @@ and `compare_positions()` + `mirrored_open_symbols()` (the latter against an iso
 sqlite db via `DASH_DB_NAME` override — never touches the real paper/live journal). All 4
 test files (incl. the pre-existing `test_contracts.py`) run clean, exit 0.
 
-**Still pending:** the 7 stale live trades need manual resolution once the user has checked
-IBKR's statement (do NOT fabricate exit prices in the meantime).
+**RESOLVED 2026-07-11:** user checked the IBKR Activity Statement's Trades section for the
+full window (2026-06-20 to 2026-07-11) and found **zero executions for any of the 7 tickers**
+-- not "opened then closed", never filled at all. Confirmed decisively via `ib_mirror`:
+**all 7 rows have `perm_id=0`** (a genuinely accepted order gets a real, non-zero permId
+almost immediately; 7/7 stuck at the fallback default is a 100% consistent signal, not noise).
+Combined with the zero-trades statement and the known Error 435 bug being live for the ENTIRE
+window these orders were placed (2026-06-24 to 07-09, well before the 2026-07-10 fix), the
+conclusion is definitive: **these 7 "positions" never existed at the broker.** They were
+bracket orders submitted and immediately rejected (missing `.account` on a 2-managed-account
+login), but `_place_etf_bracket()`/`_place_sleeve_bracket()` only ever checked "did
+`placeOrder()` raise", never "did the order actually get acknowledged" -- the same
+fire-and-forget blind spot as the `keep_cash_usd()` bug, just never audited on the core
+entry-order path until now. No real money was ever at risk; there's no real exit price to
+reconstruct because no trade ever happened.
+
+**Cleanup performed:** rather than invent a new "VOID" status that every stats/report/
+confidence-model consumer would need to explicitly exclude (`paper.stats()` uses raw `r>0`/
+`r<=0` comparisons that silently corrupt on a placeholder value), reused the existing
+`archive_trades()` mechanism -- marked all 7 with `status='VOID'` and a full explanatory
+`exit_reason` via `_update_resolution()`, THEN archived them out of the live `paper_trades`
+journal entirely (preserved in `paper_trades_archive`, reversible via `unarchive()` if ever
+needed). Also updated the corresponding `ib_mirror` rows to `status='VOID'`. Verified: `paper.
+open_trades()` on live now returns 0; confirmed via a fresh post-restart reconciliation check
+that `only_local(ghost)` is now `[]` (was the 7 tickers before).
+
+**Found and fixed a second, related bug while verifying the reconcile output:** the same
+fresh check showed a NEW false positive, `only_broker(untracked)=['USD']`. Checked directly --
+this is just the account's **USD cash balance** ($12,693, from `keep_cash_usd`) showing up via
+`reqPositionsAsync()`, which IBKR also uses to report foreign-currency cash holdings
+(`secType='CASH'`) alongside real security positions. Without filtering, this would have
+falsely tripped the reconcile mismatch badge FOREVER, since this account always carries some
+USD cash by design -- defeating the whole point of the reconciliation feature. Fixed in
+`ib_client.broker_positions()`: excludes `secType=='CASH'` entries. Verified: reconcile now
+shows `"broker/local positions match (0 open)"` -- completely clean, badge cleared from the UI.
+
+**System is now ready for genuinely new live trades.** All the blockers this session found and
+fixed (Error 435, Error 10349, the account-mixup bugs, and now this fire-and-forget mirroring
+gap) applied to every order placed before their respective fixes -- there is no longer any
+known reason a fresh signal's bracket order would fail to actually reach the broker. The next
+real signal (on either account) is the first opportunity to confirm this end-to-end, and to see
+`PORTFOLIO_CAP` engage on a genuine concurrent-position scenario for the first time.
+
+### 🔬 TESTED 2026-07-11: 2x risk at the hybrid cap -- REJECTED; portfolio_cap 100%->105% -- REJECTED
+Two follow-up questions on the newly-adopted hybrid (`pos=0.25, portfolio<=100%`), both tested
+directly rather than reasoned about abstractly.
+
+**"Can I risk 2x more?"** No -- same failure mode as the earlier pure-0.10-cap test:
+`PORTFOLIO_CAP` is still the dominant binding constraint in most scenarios, so doubling
+`RISK_PER_TRADE` (1%->2%) barely moves CAGR (full +0.03pp, OOS actually *down* -0.12pp) while
+making risk-adjusted quality worse across the board -- OOS maxDD -4.96%->-6.41%, OOS Sharpe
+1.607->1.537, OOS ratio 2.30->1.77. Rejected.
+
+**Critique proposed loosening `PORTFOLIO_CAP` 100%->105%** for a claimed "free execution
+buffer" (reasoning: orders scaled down near the cap are small/oddlot and suffer worse slippage,
+~0.1-0.2%/yr unmodeled cost). Tested directly: 105% makes EVERY risk-adjusted metric worse for
+a negligible CAGR gain (full Sharpe 1.190->1.179, full maxDD -6.83%->-7.01%, OOS ratio
+2.30->2.27, CAGR only +0.05pp full / +0.06pp OOS) -- the same unfavorable leverage trade-off
+already established throughout this whole line of research, just a smaller dose. The underlying
+premise is also questionable on market-microstructure grounds: smaller orders generally face
+LESS slippage risk in liquid markets, not more (market impact scales with size relative to
+volume) -- and US-listed ETF odd-lots trade normally with no special penalty (unlike the actual
+$25k IDEALPRO forex minimum hit earlier this session, a different market). The claimed
+"0.1-0.2%/yr" figure has the same fabricated-precision flavor as other unverified critic numbers
+caught this session. Rejected -- kept `PORTFOLIO_CAP=1.0`.
+
+**Also fact-checked (not backtestable, account-policy claims):** a critique's suggestion to
+keep USD cash >$10,000 for an IBKR "tiered interest" benefit is unverifiable from this codebase
+(our own `ib_rate` model is flat benchmark-minus-spread, no tiering) and the claimed benefit
+($10-20/yr) is trivial regardless -- deprioritized pending independent confirmation of IBKR's
+actual rate schedule. A "monthly review only" behavioral suggestion is reasonable but is a
+personal discipline choice, not a code/backtest matter.
 
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`

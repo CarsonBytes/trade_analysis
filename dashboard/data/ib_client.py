@@ -193,9 +193,15 @@ def broker_positions() -> dict | None:
         positions = _run(_req(), timeout=10)
     except Exception:                                  # noqa: BLE001
         return None
+    # CASH holdings show up in reqPositionsAsync() too (a foreign-currency balance is
+    # technically an FX position from IBKR's accounting) -- confirmed live 2026-07-11: a
+    # $12,693 USD cash balance (from the keep-cash-usd feature) appeared as an "untracked
+    # position" (secType=CASH, symbol='USD') and would falsely trip the reconcile mismatch
+    # badge FOREVER, since this account always carries some USD cash by design. Only real
+    # tradeable securities belong in the comparison -- exclude CASH.
     out: dict = {}
     for p in positions:
-        if p.position:
+        if p.position and getattr(p.contract, "secType", None) != "CASH":
             sym = getattr(p.contract, "symbol", None)
             if sym:
                 out[sym] = out.get(sym, 0.0) + float(p.position)
