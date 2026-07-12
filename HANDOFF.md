@@ -1794,6 +1794,35 @@ years happen to occur and in what order (not from anything wrong with the strate
 every point-estimate Calmar in this document as sitting inside a real, fairly wide band, not
 as a precise number.
 
+**⭐ FIXED 2026-07-12: this band was strategy-only (no cash-yield) by construction, which meant
+it never actually applied to the current best-validated headline (Calmar 0.943, cash-yield ON --
+see the sleeve_blend.py `--cash-yield` table above), and mixing the two in later summaries
+produced nonsense deltas** (an external critique pasted into this session computed
+"0.943 -> 0.488 = -48%" as if those were the same quantity's before/after; they're two
+different scripts' outputs on two different configs -- the correct within-methodology
+comparison is 0.588->0.488, -17% relative, from `dividend_tax_drag.py`). Root cause: a real
+^IRX-rate series can't be looked up against a resampled/reindexed synthetic timeline's fake
+dates, so cash-yield was disabled entirely rather than fixed. **Fix: use a CONSTANT rate
+(`bt.CASH_YIELD = 0.043`, today's IB USD rate) instead of the real dated series** -- a constant
+is immune to the reindexing problem (`_rate()` in backtest.py returns it unconditionally). Also
+folded in the SAME trade-count-weighted dividend-withholding drag as `dividend_tax_drag.py`
+(-0.88pp/yr), applied per-draw, so this is now ONE self-consistent number: after-tax,
+cash-yield-inclusive, with real bootstrapped uncertainty. Re-ran (500 draws):
+
+| metric | point estimate | bootstrap median | 90% CI |
+|---|---|---|---|
+| CAGR (after-tax) | +6.06% | +6.75% | [+4.82%, +8.93%] |
+| maxDD | -6.83% | -6.83% | [-10.68%, -6.09%] |
+| Calmar | 0.887 | 0.921 | [0.536, 1.355] |
+
+**This reconciles all three previously-disparate core-only Calmar figures in this doc (0.588
+strategy-only, 0.854 an earlier cash-yield-on headline, 0.943 the current cross-validated
+headline) into one band centered right where the 0.943 headline sits** -- cash-yield's steady,
+low-volatility income cushions the downside tail substantially: **P(Calmar < 0.5) drops from
+20.6% to 3.4%** once it's properly included. Treat **[0.536, 1.355], median 0.921** as the
+current single source of truth for "how uncertain is the after-tax Calmar", superseding the
+[0.342, 1.161] figure above (kept in place, not deleted, so the reasoning trail stays intact).
+
 **4. Built `research/stress_test.py`** -- isolates what the CURRENT exact config did during
 specific historical crises (peak-to-trough using ONLY that window's own running peak, not
 blended into a multi-year walk-forward average that can hide the worst days):

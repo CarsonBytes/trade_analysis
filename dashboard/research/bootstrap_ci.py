@@ -12,6 +12,21 @@ hold. Runs the REAL _portfolio()/_metrics() pipeline on each resampled timeline 
 simplified R-multiple-only approximation -- so position sizing, one-per-instrument
 de-correlation, and POS_CAP/PORTFOLIO_CAP all apply exactly as they do in the real backtest.
 
+FIXED 2026-07-12: the original version hardcoded `bt.CASH_YIELD = None` ("strategy-only") with
+a real reason -- a resampled/reindexed synthetic timeline has no genuine calendar dates to look
+up the real ^IRX T-bill series against. But that meant this CI was never actually computed
+against the current best-validated, cash-yield-ON headline config (Calmar 0.943, cross-validated
+in sleeve_blend.py -- see HANDOFF) -- it's a DIFFERENT, more conservative baseline (point estimate
+0.588) that doesn't cross-apply to 0.943, a distinction a pasted external critique conflated by
+computing "0.943 -> 0.488 = -48%" as if those were the same quantity's before/after (they are two
+different scripts' outputs; the correct within-methodology tax-drag comparison is 0.588->0.488,
+-17% relative -- see dividend_tax_drag.py). Fixed here by using a CONSTANT rate instead of the
+real ^IRX series: `_rate()` in backtest.py returns a constant unconditionally regardless of
+`asof`, so it's immune to the resampling/reindexing problem entirely. Also folds in the SAME
+trade-count-weighted dividend withholding tax drag as dividend_tax_drag.py, applied per-draw --
+so this now answers "what's the uncertainty band on the actual after-tax, cash-yield-inclusive
+number a real HK NRA account would see", not an internally-inconsistent strategy-only proxy for it.
+
 Run:  uv run python -m dashboard.research.bootstrap_ci [n_draws]
 """
 from __future__ import annotations
@@ -29,14 +44,20 @@ import dashboard.research.backtest as bt
 from dashboard.instruments import active_universe
 
 N_DRAWS = int(sys.argv[1]) if len(sys.argv) > 1 else 500
+WITHHOLD_RATE = 0.30            # same 30% US NRA dividend withholding as dividend_tax_drag.py
 
 bt.POS_CAP = 0.25
 bt.PORTFOLIO_CAP = 1.0
-bt.CASH_YIELD = None            # a resampled/shuffled timeline has no real calendar dates to
-                                 # look up a real cash-yield series against -- strategy-only
+bt.CASH_YIELD = 0.043            # CONSTANT rate (today's IB USD cash yield, matches the
+                                  # --cash-rate convention elsewhere in backtest.py) instead of
+                                  # the real ^IRX series -- a constant is immune to the
+                                  # resampling/reindexing problem a real dated series has (see
+                                  # the FIXED note above), so this bootstrap now includes cash-
+                                  # yield's smoothing effect instead of excluding it entirely.
 
 print(f"Fetching full-history weekly data ({len(active_universe())} instruments)...")
 cands = []
+yields: dict[str, float] = {}
 for inst in active_universe():
     df = yf.download(inst.yf, period="max", interval="1wk", progress=False, auto_adjust=True)
     if df is None or len(df) == 0:
@@ -52,6 +73,18 @@ for inst in active_universe():
         continue
     cands += bt._signals(df, inst.key)
 
+    # SAME trailing-12mo yield lookup as dividend_tax_drag.py, so the tax-drag figure folded
+    # into this bootstrap is computed identically, not a second, possibly-diverging estimate.
+    t = yf.Ticker(inst.yf)
+    div = t.dividends
+    if div is not None and len(div):
+        cutoff = div.index[-1] - pd.Timedelta(days=365)
+        trailing_div = div[div.index >= cutoff].sum()
+        last_px = float(df["close"].iloc[-1])
+        yields[inst.key] = (trailing_div / last_px) if last_px else 0.0
+    else:
+        yields[inst.key] = 0.0
+
 cands = sorted(cands, key=lambda c: c["entry_date"])
 by_year: dict[int, list] = {}
 for c in cands:
@@ -61,13 +94,27 @@ n_years = len(years)
 print(f"{len(cands)} signals across {n_years} calendar years "
       f"({years[0]}-{years[-1]})\n")
 
+# same trade-count-weighted blended yield as dividend_tax_drag.py -- a single constant drag
+# (in CAGR percentage points), computed ONCE on the real (unresampled) trade distribution and
+# applied identically to every bootstrap draw below (drawing different YEARS doesn't change
+# which tickers exist or their trailing yield, only how often each one's trades recur).
+counts: dict[str, int] = {}
+for c in cands:
+    counts[c["key"]] = counts.get(c["key"], 0) + 1
+total_n = sum(counts.values())
+blended_yield = sum(counts.get(k, 0) / total_n * yields.get(k, 0.0) for k in yields)
+DRAG_PCT = WITHHOLD_RATE * blended_yield
+print(f"Trade-count-weighted blended portfolio yield: {blended_yield*100:.2f}%  "
+      f"-> dividend withholding drag: -{DRAG_PCT*100:.2f}pp/yr CAGR (applied to every draw)\n")
+
 # point estimate on the REAL (unshuffled) history, for reference
 eq0, real0 = bt._portfolio(cands, 0.01)
 yrs0 = (cands[-1]["entry_date"] - cands[0]["entry_date"]).days / 365.25
 m0 = bt._metrics(eq0, real0, yrs0)
-calmar0 = m0["cagr"] / abs(m0["maxdd"]) if m0["maxdd"] else 0
-print(f"POINT ESTIMATE (real, unshuffled history): CAGR {m0['cagr']*100:.2f}%  "
-      f"maxDD {m0['maxdd']*100:.2f}%  Calmar {calmar0:.3f}\n")
+cagr0_at = m0["cagr"] - DRAG_PCT
+calmar0 = cagr0_at / abs(m0["maxdd"]) if m0["maxdd"] else 0
+print(f"POINT ESTIMATE (real, unshuffled history, cash-yield {bt.CASH_YIELD:.1%} + after-tax): "
+      f"CAGR {cagr0_at*100:.2f}%  maxDD {m0['maxdd']*100:.2f}%  Calmar {calmar0:.3f}\n")
 
 
 def _resample_once() -> tuple[float, float, float]:
@@ -93,8 +140,9 @@ def _resample_once() -> tuple[float, float, float]:
         return None
     yrs = max((synth[-1]["entry_date"] - synth[0]["entry_date"]).days / 365.25, 0.1)
     m = bt._metrics(eq, real, yrs)
-    calmar = m["cagr"] / abs(m["maxdd"]) if m["maxdd"] else 0
-    return m["cagr"], m["maxdd"], calmar
+    cagr_at = m["cagr"] - DRAG_PCT             # after-tax CAGR (same constant drag every draw)
+    calmar = cagr_at / abs(m["maxdd"]) if m["maxdd"] else 0
+    return cagr_at, m["maxdd"], calmar
 
 
 print(f"Running {N_DRAWS} block-bootstrap draws (this re-runs the full portfolio "
@@ -117,7 +165,8 @@ def _pct(arr, p):
     return np.percentile(arr, p)
 
 
-print("BLOCK-BOOTSTRAP DISTRIBUTION (year-level resampling, 500 draws):")
+print(f"BLOCK-BOOTSTRAP DISTRIBUTION (year-level resampling, {N_DRAWS} draws, "
+      f"cash-yield {bt.CASH_YIELD:.1%} + after-tax):")
 print(f"  CAGR:    median {_pct(cagrs,50)*100:+.2f}%   "
       f"90% CI [{_pct(cagrs,5)*100:+.2f}%, {_pct(cagrs,95)*100:+.2f}%]")
 print(f"  maxDD:   median {_pct(dds,50)*100:.2f}%   "
