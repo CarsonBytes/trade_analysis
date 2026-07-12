@@ -1,9 +1,66 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-11.
+Last updated 2026-07-12.
 
 ---
+
+### 🎮 2026-07-12: scheduled-task hardening applied + game-experience CPU-priority investigation
+User ran the previously-blocked scheduled-task fix themselves from an elevated PowerShell
+(`ExecutionTimeLimit=PT0S`, `RestartCount=3`, `RestartInterval=PT1M` on both `DashboardApp` and
+`DashboardAppLive`) -- confirmed applied, both tasks show `Running`.
+
+**Then asked to ensure this doesn't interrupt gaming.** Investigated CPU priority end to end:
+
+1. **Confirmed both tasks already run at Priority=7 (BelowNormal) at the Task Scheduler level**,
+   and `ui.run(..., show=False)` already prevents any auto-launched browser window stealing
+   focus. `_tick()`'s internal `cheap_min`/`llm_min` throttling (see the 2026-07-12 tick-loop
+   audit above) means the 30s outer timer doesn't translate into continuous CPU load either.
+
+2. **Found a real gap: the IBC Gateway java.exe process runs at Normal priority, not
+   BelowNormal**, because it's launched via `wscript.exe` from inside a `Start-Job` worker
+   process (both `run_dashboard_live.ps1` and `dashboard.ps1`) -- neither hop explicitly
+   requests a priority class, and the task-level Priority=7 setting doesn't reach a process
+   this many hops downstream. Confirmed directly via `tasklist`/`Get-Process`.
+
+3. **Tried fixing it after the fact -- denied both ways.** `.NET`'s
+   `$proc.PriorityClass = 'BelowNormal'` → "Access is denied". WMI's
+   `Win32_Process.SetPriority()` → ReturnValue 5 (also denied), even from an elevated session.
+   This is the SAME class of restriction the codebase already worked around once before for
+   `PROCESS_TERMINATE` (`Kill-ProcessHard` uses WMI's `Terminate()` because `Stop-Process`
+   fails the same way) -- but that workaround does NOT extend to `SetPriority`.
+
+4. **Fixed via launch-time inheritance instead of after-the-fact modification.** Verified
+   directly (isolated `Start-Job` test): Win32 `CreateProcess` defaults a new child to
+   `NORMAL_PRIORITY_CLASS` only when the CREATING process is itself Normal-or-higher; if the
+   parent is already BelowNormal/Idle, the child inherits that SAME lower class by default,
+   with no special access rights needed. Added `(Get-Process -Id $PID).PriorityClass =
+   'BelowNormal'` at the top of the `$mon` Start-Job scriptblock in both scripts (before it
+   spawns `wscript.exe`), so every descendant it creates from then on should inherit
+   BelowNormal for free.
+
+5. **This confirmed to work for the dashboard.app python process itself, but NOT (yet)
+   confirmed all the way through to java.exe.** Testing after redeploy found `DashboardApp`
+   (paper)'s python process correctly inherited BelowNormal, but `DashboardAppLive`'s did not --
+   traced to a REAL, previously-undocumented asymmetry: **`DashboardApp` runs at RunLevel
+   `Highest` (elevated) while `DashboardAppLive` runs at RunLevel `Limited` (standard)** --
+   discovered as a byproduct of this investigation, not something either of us had verified
+   before. Not changed here (an elevation-level asymmetry between the paper and live tasks is a
+   real-money-adjacent setting worth a deliberate decision, not a silent fix) -- flagged for the
+   user to decide whether this is intentional. The java.exe gateway's priority through the
+   `wscript.exe -> cmd -> IBC's StartGateway.bat -> java` chain remains UNCONFIRMED for live;
+   modifying IBC's own `StartGateway.bat` to force it (the file's own header says "PLEASE DON'T
+   CHANGE ANYTHING BELOW THIS LINE") was deliberately NOT attempted -- the risk of breaking a
+   real-money gateway's startup outweighs a CPU-priority nicety.
+
+**Practical risk assessment, since full verification hit a genuine wall**: even where java.exe
+ends up at Normal priority, Windows' own foreground-boost scheduling gives temporary priority
+preference to whichever window has focus (the game) regardless of a background process's
+static priority CLASS -- and the gateway itself is a lightweight, mostly-idle account-polling
+process (bursty, not sustained CPU load), not a compute-bound worker. The combination of
+Priority=7 at the task level, `show=False` (no window-stealing), the already-throttled tick
+cadence, and now explicit BelowNormal on the job's own process tree covers the great majority
+of the real risk even where the java.exe leg couldn't be conclusively verified.
 
 ## ⭐⭐⭐ ADOPTED PLAN & FIGURES (single source of truth, 2026-06-25)
 

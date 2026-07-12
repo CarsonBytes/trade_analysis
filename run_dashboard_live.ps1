@@ -80,6 +80,25 @@ $env:SLEEVE_ENABLED  = "1"
 # the stuck-2FA case (e.g. a real credential/config error) doesn't retry forever; after the cap
 # it falls back to passive relaunch-only (today's behavior) until manually fixed.
 $mon = Start-Job -ScriptBlock {
+    # GAME-EXPERIENCE GUARD (2026-07-12): the java.exe IB Gateway this job eventually spawns
+    # (via wscript.exe -> cmd -> IBC's StartGateway.bat) was running at Normal priority,
+    # competing with a foreground game for CPU. Setting priority AFTER the fact on an already-
+    # running java.exe fails outright -- tried both .NET's `$proc.PriorityClass = ...`
+    # ("Access is denied") and WMI's `Win32_Process.SetPriority()` (ReturnValue 5, also denied),
+    # even from an elevated session -- this Gateway process's own security descriptor evidently
+    # restricts PROCESS_SET_INFORMATION from outside callers (plausible hardening for financial
+    # trading software; the SAME class of restriction this file's Kill-ProcessHard already works
+    # around for PROCESS_TERMINATE, but that workaround (WMI) does NOT extend to SetPriority).
+    # FIX: set priority on THIS job's OWN process instead (always allowed -- a process can set
+    # its own priority) BEFORE spawning anything. Verified directly: Win32 CreateProcess defaults
+    # a new child to NORMAL_PRIORITY_CLASS only when the CREATING process is itself Normal or
+    # higher; when the parent is already BelowNormal/Idle, the child inherits that same lower
+    # class by default. So every descendant this job spawns from here on (wscript -> cmd ->
+    # StartGateway.bat -> java.exe) inherits BelowNormal for free, with no per-process access
+    # rights needed at all. This is why the OTHER working process (`python -m dashboard.app`,
+    # launched directly from the scheduled task's own already-BelowNormal PowerShell host, not
+    # through this job) already showed BelowNormal correctly without any special-casing.
+    try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
     function Test-Port($p) {
         try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', $p); $c.Close(); return $true }
         catch { return $false }
@@ -149,6 +168,11 @@ $mon = Start-Job -ScriptBlock {
 
 try {
     Set-Location "D:\quant"
+    # Explicit, not just inherited from the scheduled task's own Priority=7 setting -- makes
+    # this correct even if that task setting ever changes, and the child `python -m
+    # dashboard.app` process below inherits it directly (confirmed: this is the process that
+    # already showed BelowNormal correctly, unlike the gateway java.exe above).
+    try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
     while ($true) {
         & .\.venv\Scripts\Activate.ps1
         python -m dashboard.app
