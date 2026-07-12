@@ -2156,6 +2156,62 @@ this account is confirmed genuinely negligible from real data, not just assumed.
 one code fix + its own regression test (tick-loop exception safety), and three clean
 verifications (bar-frequency, yfinance load, currency peg).**
 
+### 🔍 5-ROUND SELF-AUDIT 2026-07-12b (post-sleeve-gate-removal): exposure math, live sizing,
+tick-loop idempotency, delisting risk, per-instance staged-rollout isolation
+
+All 5 rounds this pass came back clean -- no code changes, no backtest changes, no CAGR/DD/
+Calmar figures move. Documented because "checked and confirmed clean" is still useful signal,
+not because anything was fixed.
+
+**Round 1 -- does `PORTFOLIO_CAP` actually cap core+sleeve TOGETHER, or could the two systems
+each independently deploy up to 100%, doubling real exposure?** Read `mirror_new()` directly:
+`deployed = [_gpv_usd(ib)]` is seeded ONCE per cycle from the broker's real, live
+`GrossPositionValue` (not a core-only or sleeve-only reconstruction) and threaded through BOTH
+`_place_etf_bracket()` and `_place_sleeve_bracket()` in the same loop -- each new order sees the
+TRUE aggregate room left, regardless of which system is asking. **Confirmed already correct,
+not a gap.**
+
+**Round 2 -- verified per-ticker share sizing across the full 22-ETF book at TODAY's real live
+equity (~$12.8k / HKD 99,988), not just the SPY/QQQ sleeve check done previously.** Pulled real
+ATR14 + price for all 22 tickers and ran the exact production formula (`size_shares` capped by
+`ETF_POS_CAP=0.25`): **zero tickers round to 0 shares** -- every one sizes to at least 4 shares
+(SPY/QQQ, the two priciest), and `ETF_POS_CAP` (not risk%) is the binding constraint on all 22,
+as documented elsewhere in this doc. No zero-share silent-skip risk exists at the account's
+current size.
+
+**Round 3 -- now that the tick loop runs unconditionally every ~30s (vs. previously only when a
+browser happened to be open), can it double-place orders or overload data sources?** Traced the
+guard chain: `_has_open(key, mlabel)` + a `COOLDOWN_MIN` recent-close check block a duplicate
+entry on the same ticker+method before a `Trade` row is even created; `mirror_new()`'s own
+`done = _mirrored_ids()` blocks re-mirroring an already-mirrored trade; `_tick()`'s `_busy["flag"]`
+additionally prevents overlapping runs. Separately, `_tick()` internally throttles the EXPENSIVE
+work (`_do_cheap`/`_do_llm`) to `SETTINGS["cheap_min"]`/`["llm_min"]` minutes regardless of how
+often the outer 30s timer fires -- so today's fix changed whether the loop runs at all, not how
+often the real scoring/scanning work happens. **No duplicate-order or load-increase risk found.**
+
+**Round 4 -- what happens if a ticker in the 22-ETF/11-sleeve universe is delisted or its data
+feed goes dark?** `providers.get_history()` fails CLOSED (`return None, "none"` on any fetch
+failure or a too-short series) -- no crash, just no new signal that cycle, consistent with the
+Round-3-of-the-prior-audit finding that no retry/backoff exists but no evidence of impact either.
+**Genuinely low-probability given the current universe** (SPY/GLD/TLT-class large, well-
+established funds, not speculative small-caps) but still an unquantified tail case worth naming
+honestly: if a HELD position's feed went permanently dark, there's no explicit alert for that
+specific scenario (as opposed to a transient fetch failure, which just self-heals next cycle).
+Not worth a speculative fix -- flagged, not actioned.
+
+**Round 5 -- does each instance's staged sleeve rollout (2A now / 2B +3mo / 2C +6mo) track its
+OWN activation time, or could live have silently inherited paper's already-progressed clock?**
+Checked `sleeve_first_active_ts` directly in both DBs -- correctly independent (`store.cache_get`
+routes through each instance's own `dashboard.db`/`dashboard_live.db`), confirming they were
+never at risk of cross-contamination. **Paper activated 2026-07-09 14:34 UTC** (2B unlocks
+~2026-10-09, 2C ~2027-01-09). **Live activated 2026-07-11 17:11 UTC / 2026-07-12 HKT** (2B
+unlocks ~2026-10-11, 2C ~2027-01-11) -- 2 days after paper, exactly as expected given the gate
+was removed on live a couple of days later. Both currently sit in stage 2A (SPY/QQQ/XLK only).
+
+**Net result: 5 clean verifications, 0 code changes, 0 backtest changes.** The system's
+exposure math, sizing, idempotency, and staged-rollout isolation all check out against real
+data/code as claimed elsewhere in this doc, rather than being merely asserted.
+
 ### 🐞🐞 FIXED 2026-07-10: EVERY live order in `ib_exec.py` was silently vulnerable to Error 435/10349
 User reported the account's Leveraged Forex permission had been approved but `keep-cash-usd`
 still wasn't converting HKD→USD. Verified directly against live with an error-event listener
