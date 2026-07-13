@@ -1067,8 +1067,8 @@ def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str,
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 
-def _trade_card(t: dict, pos: dict | None, room: float | None = None,
-                eq: float | None = None) -> None:
+def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
+                status: str | None = None) -> None:
     key = t["instrument"]
     live = service.STATE.get("live", {}).get(key)
     price = live["price"] if live else t["entry"]
@@ -1107,12 +1107,12 @@ def _trade_card(t: dict, pos: dict | None, room: float | None = None,
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
         else:
-            _reason, _status = _pending_reason(t, room, eq)
-            # colour cue matches the 3-way status: grey=healthy/normal, blue=temporary
-            # (will resolve on its own, no action needed), orange=genuinely stuck
+            # (reason, status) now computed ONCE per pending trade by active_panel() --
+            # see its 2026-07-13 grouping note -- and passed straight through here, not
+            # recomputed per card.
             _colour = {"placed": "text-grey-8", "retrying": "text-blue-8",
-                      "stuck": "text-orange-8"}[_status]
-            ui.label(_reason).classes(f"text-xs {_colour}")
+                      "stuck": "text-orange-8"}[status]
+            ui.label(reason).classes(f"text-xs {_colour}")
         src = f"{_bk.name()} fill" if pos else "paper (unconfirmed)"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
@@ -1189,8 +1189,8 @@ def active_panel() -> None:
             "setup across the whole universe -- NOT how often trades actually FILL. A small "
             "account can't size expensive/high-volatility instruments (e.g. SPY, QQQ) even "
             "when they qualify, so real fill frequency is lower until the account grows -- "
-            "see the reason shown on each pending card below (not always a funding gap -- "
-            "could also be waiting on the risk budget or a broker fill).")
+            "see the Pending sections below (not always a funding gap -- could also be "
+            "waiting on the risk budget or a broker fill).")
     if not open_t:
         ui.label("No open positions. Setups are logged automatically from "
                  "qualifying signals.").classes("text-sm text-grey")
@@ -1200,22 +1200,46 @@ def active_panel() -> None:
             for t in confirmed:
                 _trade_card(t, positions.get(t["id"]))
     if pending:
-        ui.label("Pending — not yet a real position").classes(
-            "text-sm font-bold text-grey-7 mt-2").tooltip(
-            "These are NOT real positions yet. The strategy found a qualifying setup and "
-            "logged it, but it hasn't turned into a real broker position for one of a few "
-            "different reasons, shown on each card below: a real order may already be "
-            "sitting with the broker waiting to fill; the risk budget may be fully committed "
-            "elsewhere right now (normal, self-resolving, no action needed); or the account "
-            "may genuinely be too small to size this one yet. Check each card's own message "
-            "rather than assuming they're all the same situation.")
-        # computed ONCE for the whole panel, not per-card (see _pending_reason()'s
-        # docstring -- per-card was 3 real broker round-trips EACH, confirmed live to
-        # make the whole dashboard unresponsive with several pending cards on screen)
+        # GROUPED BY REASON CATEGORY (2026-07-13, replacing one flat "Pending" list):
+        # user feedback was that lumping "a real order is genuinely waiting to fill" together
+        # with "correctly held back by the risk budget, will place itself automatically" under
+        # one undifferentiated heading required reading every card's own text to tell them
+        # apart -- three separate sub-sections make the distinction visible at a glance
+        # instead. `room`/`eq` computed ONCE for the whole panel (not per-card -- see
+        # _pending_reason()'s docstring: per-card was several real broker round-trips EACH,
+        # confirmed live to make the whole dashboard unresponsive with several pending cards
+        # on screen), and (reason, status) computed once per trade here, not inside
+        # _trade_card() -- passed straight through as plain values.
         room = _bk.portfolio_room_usd() if _bk.is_ib() else None
-        with ui.row().classes("w-full flex-wrap gap-3"):
-            for t in pending:
-                _trade_card(t, None, room=room, eq=eq)
+        groups: dict[str, list[tuple[dict, str]]] = {"placed": [], "retrying": [], "stuck": []}
+        for t in pending:
+            msg, status = _pending_reason(t, room, eq)
+            groups[status].append((t, msg))
+        _PENDING_SECTIONS = {
+            "placed": ("Waiting to fill", "text-grey-7",
+                       "Real orders already sitting with the broker — just haven't filled "
+                       "yet (e.g. placed outside market hours, or the fill is simply taking "
+                       "a moment). Check IBKR directly for the exact live order status."),
+            "retrying": ("On hold — will retry automatically", "text-blue-7",
+                        "Nothing to do here. These are held back on purpose right now (the "
+                        "risk budget is fully committed elsewhere, or this one just hasn't "
+                        "had its next check yet) and will place themselves the moment room "
+                        "frees up — no action needed."),
+            "stuck": ("Needs a bigger account", "text-orange-7",
+                     "These won't place on their own — the account isn't big enough yet to "
+                     "size even 1 share of this at the configured risk. Will sit here until "
+                     "the account grows."),
+        }
+        for _status in ("placed", "retrying", "stuck"):
+            items = groups[_status]
+            if not items:
+                continue
+            _label, _colour, _tip = _PENDING_SECTIONS[_status]
+            ui.label(f"{_label} ({len(items)})").classes(
+                f"text-sm font-bold {_colour} mt-2").tooltip(_tip)
+            with ui.row().classes("w-full flex-wrap gap-3"):
+                for t, msg in items:
+                    _trade_card(t, None, reason=msg, status=_status)
 
 
 @ui.refreshable

@@ -5,6 +5,29 @@ Last updated 2026-07-13.
 
 ---
 
+### ⭐ 2026-07-13: split the "Pending" list into 3 grouped sub-sections instead of one flat
+list with per-card text differences
+User pointed out that "genuinely waiting to fill at the broker" and "correctly held back by
+the risk budget, will place itself automatically" were both still rendered under one
+undifferentiated "Pending" heading -- the 3-way status/colour distinction added earlier today
+only showed up in each card's own text, requiring reading every card individually to tell the
+groups apart.
+
+**Restructured `active_panel()`** to compute `(reason, status)` once per pending trade (moved
+out of `_trade_card()`, which is now a pure display function taking the already-computed
+`reason`/`status` as plain parameters) and bucket trades into 3 groups, each rendered under
+its own sub-heading with its own one-line explanation:
+- **"Waiting to fill (N)"** -- real broker orders, just unfilled.
+- **"On hold — will retry automatically (N)"** -- cap-blocked or awaiting next mirror cycle;
+  explicitly says "nothing to do here."
+- **"Needs a bigger account (N)"** -- genuine funding gap; won't resolve without the account
+  growing.
+
+Only non-empty groups render, so e.g. an account with zero funding-gap trades never shows an
+empty "Needs a bigger account" section. Compiled clean, full suite (10 files, unrelated to
+this UI-only change) re-run as a sanity check, redeployed, verified both response time and
+the actual rendered grouping.
+
 ### 🐞 FIXED 2026-07-13: constraint scorecard showed garbled LLM-rationale fragments as if
 they were gate names -- a bug in THIS SESSION's own earlier LLM-veto-tracking fix, not raw
 LLM output leaking through by design
