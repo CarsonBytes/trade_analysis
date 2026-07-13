@@ -5,6 +5,54 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞 FIXED 2026-07-13: "position mismatch" badge false-alarmed on 6 real, correctly-placed
+GTC orders that simply hadn't filled yet -- LIVE'S CORE STRATEGY HAS STARTED TRADING FOR REAL
+User saw the "⚠ position mismatch" badge on live and asked to debug/fix if needed. This turned
+out to be two things at once: a genuinely major milestone (live placed its first real core
+trades) buried under a false alarm in the reconciliation logic.
+
+**First, confirmed directly against the broker (not inferred from logs or the shared log's
+mixed paper/live output)**: `ib_mirror` on live shows 6 real OPEN rows (CPER, EEM, DBC, VNQ,
+AMLP from the ~04:00:40-04:00:42 UTC cycle, ASHR from a later ~04:16:29 UTC cycle -- an
+earlier attempt at ASHR in the first cycle was correctly SKIPPED for sizing to <1 share at
+that cycle's price, then qualified later), confirmed via the log's own "ib_exec: LIVE trading
+ENABLED for U12991898 (IB_ALLOW_LIVE) -- REAL MONEY" line right before each placement --
+**this is genuinely live's core strategy's first real trades**, not a test artifact.
+
+**Investigated why the badge fired using a fresh, isolated, read-only IB connection (distinct
+clientId, never touches order placement)**: `broker_positions()` (reqPositionsAsync) returned
+`{}` across 6 retries over 20+ seconds -- ruling out the known "snapshot not synced yet"
+race this project already handles elsewhere. Checked `reqExecutionsAsync()`: **0 executions
+in the last 14h** -- these orders were never filled, not filled-then-stopped-out. Checked
+`reqAllOpenOrdersAsync()`: all 6 parent MKT orders show status **`Submitted`** (accepted by
+the broker, real non-zero `permId`s despite `ib_mirror` showing `perm_id=0` for them --
+that's just `ib_client.py`'s eager read capturing the permId before IBKR assigned it,
+cosmetic, not a functional problem), children correctly `PreSubmitted`/`whyHeld=child`. **Root
+cause: the orders were placed ~9.5h before the US market opens (13:30 UTC) -- a completely
+normal, expected state for a GTC day order placed outside market hours**, confirmed 2026-07-13
+is a Monday (real trading day), not a holiday/weekend fluke.
+
+**The actual bug, once the false-alarm explanation was confirmed**: `reconcile_with_broker()`
+only ever compared local "OPEN" trade records against `broker_positions()` (FILLED positions
+only) -- it never checked whether a real, correctly-placed, still-pending ORDER explained the
+gap. A local "OPEN" record means "an order was placed for this," not "the broker confirms a
+fill" -- conflating the two meant ANY order placed outside market hours (or even a same-day
+order still working through a fast market) would show as a "ghost" until it happened to fill.
+
+**Fix**: added `ib_client.broker_open_order_symbols()` (uses `reqAllOpenOrdersAsync()`, which
+by IBKR's own API contract only ever returns orders NOT YET in a terminal state -- no status
+filtering needed). `reconcile.compare_positions()` now takes an optional
+`broker_pending_symbols` set and excludes those from `only_local` -- a symbol with no broker
+position but a live pending order is the expected state for a pending entry, not a desync.
+`reconcile_with_broker()` fetches this alongside `broker_positions()`. Added 3 new tests to
+`test_reconcile.py` (pending order alone isn't a ghost; a true ghost survives alongside a
+pending-order symbol; omitting the new param preserves old behavior) -- full suite (9 files)
+re-run clean. Redeployed both dashboards.
+
+**No config/strategy change** -- this is a monitoring/alerting fix, not a trading-logic change.
+The 6 real orders will fill (or not) exactly as designed once the market opens; this just stops
+the dashboard from crying wolf about it in the meantime.
+
 ### 🔧 FIXED 2026-07-13: LLM board scan only reviewed the top 10 of 22 watched ETFs, not all
 of them -- the "rest are clear WAIT/WATCH" assumption was false
 User asked (after the prior "day-batched call" phrasing was ambiguous) whether the scan really

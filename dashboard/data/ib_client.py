@@ -208,6 +208,30 @@ def broker_positions() -> dict | None:
     return out
 
 
+def broker_open_order_symbols() -> set[str] | None:
+    """Symbols with at least one live (not yet filled/cancelled) order at the broker --
+    None if IB down. FOUND 2026-07-13: reconcile.py compared local "OPEN" trade records only
+    against broker_positions() (FILLED positions), so a real, correctly-placed GTC MKT order
+    that simply hasn't filled yet (e.g. placed outside market hours -- the exact case that
+    triggered this: 6 orders placed ~04:00 UTC, market doesn't open until 13:30 UTC) looked
+    IDENTICAL to a genuine desync ("ghost" position) until the market opened and it filled.
+    reqAllOpenOrdersAsync() only ever returns orders IBKR hasn't yet resolved to a terminal
+    state (Filled/Cancelled/Inactive), so anything it returns is, by definition, still pending
+    -- no status filtering needed."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+    try:
+        async def _req():
+            return await ib.reqAllOpenOrdersAsync()
+        trades = _run(_req(), timeout=10)
+    except Exception:                                  # noqa: BLE001
+        return None
+    return {getattr(t.contract, "symbol", None) for t in trades
+            if getattr(t.contract, "symbol", None)}
+
+
 # ---- contract resolution ---------------------------------------------------
 
 def _qualify_front(ib, spec: FutureSpec, asof: dt.date):

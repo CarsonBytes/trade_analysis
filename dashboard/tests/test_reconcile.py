@@ -58,6 +58,28 @@ def test_compare_positions_empty_both():
     check("both empty -> no mismatch", out, {"only_local": [], "only_broker": []})
 
 
+def test_compare_positions_pending_order_not_a_ghost():
+    print("compare_positions: local OPEN, no broker POSITION, but a live pending ORDER "
+          "-- must NOT be a ghost (2026-07-13 fix: 6 real GTC MKT orders placed before "
+          "market open sat correctly unfilled for hours and were falsely flagged before this):")
+    out = compare_positions({}, {"CPER", "EEM"}, broker_pending_symbols={"CPER", "EEM"})
+    check("pending orders excluded from only_local", out, {"only_local": [], "only_broker": []})
+
+
+def test_compare_positions_pending_order_mixed_with_real_ghost():
+    print("compare_positions: one symbol has a pending order (fine), another has "
+          "NEITHER a position NOR a pending order (a real ghost):")
+    out = compare_positions({}, {"CPER", "AMLP"}, broker_pending_symbols={"CPER"})
+    check("only the true ghost survives", out, {"only_local": ["AMLP"], "only_broker": []})
+
+
+def test_compare_positions_no_pending_arg_unchanged():
+    print("compare_positions: omitting broker_pending_symbols entirely -- old behavior intact:")
+    out = compare_positions({}, {"AMLP", "ASHR"})
+    check("still flags as ghosts (backward compatible)", out,
+          {"only_local": ["AMLP", "ASHR"], "only_broker": []})
+
+
 def test_mirrored_open_symbols_isolated_db():
     print("mirrored_open_symbols: reads ib_mirror from an isolated temp db:")
     fd, path = tempfile.mkstemp(suffix=".db")
@@ -93,7 +115,11 @@ if __name__ == "__main__":
     for t in (test_compare_positions_clean_match, test_compare_positions_ghost_trade,
               test_compare_positions_untracked_broker_position,
               test_compare_positions_zero_qty_excluded, test_compare_positions_mixed,
-              test_compare_positions_empty_both, test_mirrored_open_symbols_isolated_db):
+              test_compare_positions_empty_both,
+              test_compare_positions_pending_order_not_a_ghost,
+              test_compare_positions_pending_order_mixed_with_real_ghost,
+              test_compare_positions_no_pending_arg_unchanged,
+              test_mirrored_open_symbols_isolated_db):
         t()
     print()
     if _fails:

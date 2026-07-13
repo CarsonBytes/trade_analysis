@@ -12,7 +12,8 @@ from __future__ import annotations
 from dashboard.core.log import log
 
 
-def compare_positions(broker_positions: dict[str, float], local_open_symbols: set[str]) -> dict:
+def compare_positions(broker_positions: dict[str, float], local_open_symbols: set[str],
+                      broker_pending_symbols: set[str] | None = None) -> dict:
     """PURE function (no I/O -- unit-testable in isolation): compare broker's actual non-zero
     positions against the set of instrument symbols this dashboard locally thinks are OPEN.
 
@@ -22,10 +23,19 @@ def compare_positions(broker_positions: dict[str, float], local_open_symbols: se
     - only_broker: the broker holds a position we have no local OPEN record for at all (e.g.
       an order placed outside this dashboard, or a local record that got lost/corrupted).
     Either list being non-empty is a real desync worth surfacing -- neither should ever happen
-    in normal operation."""
+    in normal operation.
+
+    `broker_pending_symbols` (FIXED 2026-07-13): symbols with a live, not-yet-filled order at
+    the broker (from ib_client.broker_open_order_symbols()). A local "OPEN" trade record means
+    "an order was placed for this," NOT "the broker confirms a filled position" -- those are
+    different things, and conflating them produced a false "ghost" alarm for 6 real, correctly
+    -placed GTC MKT orders that simply hadn't filled yet (placed outside market hours). A
+    symbol with no broker POSITION but a live broker ORDER is exactly the expected state for a
+    pending entry, not a desync -- excluded from only_local accordingly."""
     broker_symbols = {sym for sym, qty in broker_positions.items() if qty != 0}
+    pending = broker_pending_symbols or set()
     return {
-        "only_local": sorted(local_open_symbols - broker_symbols),
+        "only_local": sorted(local_open_symbols - broker_symbols - pending),
         "only_broker": sorted(broker_symbols - local_open_symbols),
     }
 
@@ -62,7 +72,13 @@ def reconcile_with_broker() -> dict:
             if retry:
                 broker_pos = retry
                 break
-    result = compare_positions(broker_pos, local_open)
+    # FIXED 2026-07-13: a local "OPEN" trade with no broker POSITION isn't necessarily a
+    # ghost -- it might just be a real order still pending fill (confirmed live: 6 GTC MKT
+    # orders placed before the US market opened sat correctly "Submitted" for hours, with
+    # zero executions, and were flagged as ghosts the whole time). Check broker open orders
+    # too before concluding a real desync.
+    broker_pending = ib_client.broker_open_order_symbols()
+    result = compare_positions(broker_pos, local_open, broker_pending)
     if result["only_local"] or result["only_broker"]:
         log.warning("reconcile: broker/local position MISMATCH on login -- "
                     "only_local(ghost)=%s only_broker(untracked)=%s",
