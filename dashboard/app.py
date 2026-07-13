@@ -940,12 +940,27 @@ def portfolio_panel() -> None:
     # hides a real, ongoing trading drawdown -- this has to be correct regardless of what
     # the user happens to have the equity chart's view set to.
     if len(hist) >= 2:
+        # FIXED 2026-07-13: this duplicated paper.current_drawdown_pct()'s peak-tracking
+        # logic (both walk _adj_full computing a running peak + % drawdown) but WITHOUT its
+        # 2026-07-11 materiality floor -- confirmed live: paper.current_drawdown_pct() itself
+        # correctly returned 0.0 for this exact account at this exact moment (its floor
+        # correctly saw _adj_full's peak, ~40, sitting below 1% of current raw equity,
+        # ~$1,000, and refused to trust a percentage against it), while THIS block's `if
+        # _peak else 0.0` only guards against exactly-zero, not "too small to be a
+        # meaningful reference" -- so it happily computed (4.06 - 40.0) / 40.0 * 100 =
+        # -89.8% and displayed it as the real "Drawdown from peak" stat, on an account whose
+        # actual trading P&L that day was -HKD 34 (-0.03%). The real DD_HALT_PCT gate in
+        # ib_exec.mirror_new() was NEVER at risk -- it calls paper.current_drawdown_pct()
+        # directly, which already had the floor -- this was a DISPLAY-ONLY bug, but a scary
+        # one. Same floor formula as paper.current_drawdown_pct(), applied here too so the
+        # chart and the headline number can't diverge from it again.
+        floor = abs(hist[-1][1]) * 0.01
         _peak = _adj_full[0]
         dxs, dys, cur_dd = [], [], 0.0
         for i, h in enumerate(hist):          # ALWAYS the full series -- true peak, never windowed
             _av = _adj_full[i]
             _peak = max(_peak, _av)
-            cur_dd = (_av - _peak) / _peak * 100.0 if _peak else 0.0
+            cur_dd = (_av - _peak) / _peak * 100.0 if _peak > floor else 0.0
             if _cutoff is None or h[0] >= _cutoff:
                 dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
                 dys.append(round(cur_dd, 2))

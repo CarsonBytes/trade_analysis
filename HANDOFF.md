@@ -5,6 +5,42 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞🐞 FIXED 2026-07-13: "Drawdown from peak: now -89.8%" on live -- a DUPLICATE
+drawdown calculation in app.py never got the 2026-07-11 materiality-floor fix
+Spotted while visually verifying the pending-trade UI refinement (previous entry) -- a
+-89.8% drawdown reading right next to a sane "you are down HKD -34 (-0.03%)" P&L stat was
+worth checking rather than shipping past it.
+
+**`paper.current_drawdown_pct()` itself was correct** -- called it directly with live's real
+`equity_history`/`cash_flows`: returned `0.0`, as it should (the account is essentially flat
+today). But the "Drawdown from peak" stat on the Board doesn't call that function at all --
+`app.py` has its OWN, separate re-implementation of the exact same peak-tracking loop
+(needed there for the per-point chart array, which `current_drawdown_pct()` doesn't provide,
+only the latest value), and that copy was missing the 2026-07-11 materiality floor entirely.
+
+**Root cause, confirmed with the real numbers**: `deposit_adjusted_series()` (pure trading
+P&L, deposits netted out) for this account peaks at exactly the pre-funding artifact (~40
+HKD) and currently sits around ~4 HKD (real, tiny, organic trading P&L) -- `(4.06 - 40.0) /
+40.0 * 100 = -89.8%`, matching exactly. `current_drawdown_pct()`'s floor (require the peak to
+be >=1% of CURRENT RAW equity, ~$1,000 here, before trusting any percentage against it)
+correctly refuses to compute a percentage against a ~40 HKD reference -- app.py's duplicate
+had no such guard.
+
+**Real-money safety was never at risk**: `ib_exec.mirror_new()`'s `DD_HALT_PCT` gate calls
+`paper.current_drawdown_pct()` directly (the correctly-floored canonical function), confirmed
+by reading the call site -- this was a DISPLAY-ONLY bug, but a convincingly scary one, and
+worth fixing with the same urgency as if it weren't (a wrong number on a live real-money
+account is a real problem even when nothing downstream acts on it).
+
+**Fix**: added the identical floor (`abs(hist[-1][1]) * 0.01`) to app.py's duplicate loop,
+gating the same `if _peak > floor else 0.0` paper.py's canonical version uses. Verified
+directly against real live data: both implementations now agree (`0.0`). Not deduplicated
+into one shared function this session (the chart needs the full per-point array,
+`current_drawdown_pct()` only returns the latest value) -- flagged as a real refactor
+opportunity for later, not urgent today. Full test suite (10 files, none touch app.py
+directly since it can't be imported without triggering `ui.run()`) re-run clean, redeployed,
+verified visually.
+
 ### ⭐ 2026-07-13: 10th pending signal (DIA) confirmed same pattern as before; refined
 _pending_reason()'s wording + fixed a wrong claim it was making
 User saw the pending count grow to 10 and asked if that needed fixing. Checked the log
