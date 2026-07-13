@@ -195,11 +195,76 @@ def test_current_portfolio_room_usd():
               ib_exec.current_portfolio_room_usd(), 0.0)
 
 
+def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
+    print("\nsync_closures(): paper resolved independently (EXPIRED) while a real order is "
+          "still working at the broker -- must cancel it, not leave it orphaned forever "
+          "(2026-07-13 fix: paper.resolve_open() runs regardless of broker fill status, so "
+          "a trade can resolve via real price/horizon while its bracket order never filled):")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:   # ensures paper_trades table exists first
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-06-01T00:00:00','CPER','long','ATR rr3.0',38.0,36.7,42.0,3.0,"
+                     "84,'EXPIRED')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'CPER',84.0,50.0,'','2026-06-01T00:00:00','OPEN','etf')")
+
+        cancelled = []
+        fake_order = SimpleNamespace(orderId=1)
+        fake_trade = SimpleNamespace(
+            contract=SimpleNamespace(conId=111),
+            orderStatus=SimpleNamespace(status="Submitted"),
+            order=fake_order,
+        )
+
+        class _FakeIB:
+            def cancelOrder(self, order):
+                cancelled.append(order)
+            def positions(self):
+                return []
+
+        fake_ib = _FakeIB()
+        with mock.patch.object(ib_exec, "_guard", return_value=fake_ib), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[fake_trade]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            logs = ib_exec.sync_closures()
+
+        check("cancelled exactly one order", len(cancelled), 1)
+        check("cancelled the correct order object", cancelled[0] is fake_order, True)
+        check("logged the cancellation, naming the resolved status",
+              any("cancelled stale unfilled order" in l and "EXPIRED" in l for l in logs), True)
+        with ib_exec._conn() as c:
+            status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
+        check("ib_mirror row marked CLOSED to match", status, "CLOSED")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
     test_pending_entry_notional_usd()
     test_current_portfolio_room_usd()
+    test_sync_closures_cancels_stale_order_when_paper_already_resolved()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

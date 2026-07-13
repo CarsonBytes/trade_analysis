@@ -5,6 +5,47 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞 FIXED 2026-07-13: orphaned real broker orders when paper resolves a trade
+independently of a fill; confirmed NO dynamic SL/TP revision (support/resistance or
+otherwise) exists for live-mirrored trades
+User asked whether pending signals get dynamically revised/invalidated, and specifically
+whether SL/TP get updated based on support/resistance. Two separate, honest answers.
+
+**Real gap found and fixed: unfilled real orders could be left orphaned at the broker.**
+`paper.resolve_open()` runs every tick cycle (broker-agnostic, `service.py:309`) and checks
+REAL market OHLC/ticks against a trade's STORED entry/SL/TP/`HORIZON_CAL` (35 calendar days)
+-- regardless of whether that trade ever had a real broker fill. It can resolve a trade to
+WIN/LOSS/EXPIRED purely from price action or horizon expiry while its real bracket order is
+STILL working/unfilled at the broker (e.g. price gapped past the stored levels, or 35 days
+simply ran out before market conditions allowed a fill). `sync_closures()`'s existing guard
+(`if ... and con_id in working_conids: continue`) meant this case was never even reached --
+it just skipped past forever, leaving the real order sitting at the broker indefinitely with
+no local trade tracking it anymore. Confirmed via code read: the only `cancelOrder()` call
+anywhere in `ib_exec.py` was for the sleeve's dynamic exit, unrelated to this path -- core
+trades had NO mechanism to reconcile this at all.
+
+**Fix**: inside that same guard, if paper has ALREADY resolved the trade (`status != "OPEN"`)
+while the broker order is still working, cancel every order tied to that contract (parent +
+children -- OCA groups do NOT auto-cancel siblings on a manual cancel, only on a fill, so all
+must be cancelled individually) and mark the `ib_mirror` row `CLOSED` to match. New test
+`test_sync_closures_cancels_stale_order_when_paper_already_resolved` (mocks the IB connection
+end-to-end: fake working order + fake resolved paper trade -> asserts exactly one cancel call
+on the correct order, the log line, and the mirror row closing). Full suite (10 files)
+re-run clean. Not urgent for TODAY's real orders specifically (35-day horizon, all placed
+today) but a real, previously-unfound gap for any trade that runs the full horizon.
+
+**Confirmed: NO dynamic SL/TP revision based on support/resistance (or anything else) exists
+for live-mirrored trades.** `MIRROR_METHOD = "ATR rr3.0"` is the ONLY method ever sent to the
+real broker (`mirror_new()` filters on it explicitly). A `"STRUCT"` (support/resistance-based)
+variant does exist in `paper.py` and gets evaluated alongside ATR at signal time (`variants =
+[("ATR", rr3.0), ("STRUCT", None)]`), but it only ever produces a SEPARATE, paper-only
+comparison trade -- `mirror_new()` never mirrors it to the broker, and even where it's used,
+it's a ONE-TIME initial SL/TP calculation, not a continuously-updated one. There is currently
+no code path, live or planned, that revises an already-placed order's SL/TP based on new
+support/resistance levels, trailing price action, or anything else -- this would be a genuinely
+new feature, not a bug fix, and would need its own backtest validation before touching real
+money, matching this project's established discipline for any new live-money logic.
+
 ### ⭐ 2026-07-13: split the "Pending" list into 3 grouped sub-sections instead of one flat
 list with per-card text differences
 User pointed out that "genuinely waiting to fill at the broker" and "correctly held back by

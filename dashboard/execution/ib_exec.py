@@ -593,6 +593,31 @@ def sync_closures() -> list[str]:
         # closed when there is ALSO no working order for this contract -- otherwise the
         # trade is pending and would be wrongly closed before it ever fills.
         if (open_pos is None or open_pos.position == 0) and con_id in working_conids:
+            # FIXED 2026-07-13: paper.resolve_open() runs independently on every tick cycle
+            # (broker-agnostic, checks REAL market OHLC/ticks against the trade's stored
+            # SL/TP/HORIZON_CAL=35d regardless of whether a real broker fill ever happened --
+            # see service.py's call site) and can resolve a trade to WIN/LOSS/EXPIRED while
+            # its real bracket order is STILL working/unfilled at the broker (e.g. price
+            # gapped past the stored levels before the order ever filled, or the 35-day
+            # horizon simply ran out). Before this fix, that case just fell through this
+            # `continue` forever -- the real order would sit at the broker indefinitely,
+            # orphaned, with nothing ever cancelling it, since paper already considered the
+            # trade done and would never ask again. Cancel the stale working order(s) for
+            # this contract (parent + any still-working children -- OCA groups do NOT
+            # auto-cancel siblings on a manual cancel, only on a FILL) and mark the mirror
+            # row closed to match, instead of leaving a real order live with no local trade
+            # tracking it anymore.
+            if pt["status"] != "OPEN":
+                for o in open_trades:
+                    if o.contract.conId == con_id:
+                        ib.cancelOrder(o.order)
+                with paper._LOCK, _conn() as c:
+                    c.execute("UPDATE ib_mirror SET status='CLOSED', note=? WHERE paper_id=?",
+                              (f"order cancelled: paper independently resolved to "
+                               f"{pt['status']} while still unfilled at the broker", paper_id))
+                msg = (f"{local_symbol}: cancelled stale unfilled order (paper already "
+                      f"resolved {pt['status']} via real price/horizon, not a broker fill)")
+                logs.append(msg); log.info("ib_exec: %s", msg)
             continue
         # (a) position closed at broker (SL/TP filled) while paper still OPEN ->
         #     resolve the paper trade from the broker's actual exit.
