@@ -5,6 +5,43 @@ Last updated 2026-07-13.
 
 ---
 
+### ⭐ 2026-07-13: manually cancelled ASHR to bring live's ALREADY-PLACED pending orders back
+under PORTFOLIO_CAP (the code fix above only protects FUTURE signals, not orders already sitting
+at the broker)
+Same-day follow-up to the `_pending_entry_notional_usd()` fix: that fix stops FUTURE signals
+from over-sizing, but doesn't retroactively shrink the 6 orders already placed before it
+existed. User asked to prevent those 6 (~124.7% of equity if all filled) from actually
+breaching the cap once the market opened.
+
+**User-confirmed decision**: cancel ASHR specifically (of the 6), bringing total to ~99.8% of
+equity. Chosen over CPER (near-identical notional) because ASHR was chronologically the LAST
+of the 6 placed (04:16:29 UTC vs 04:00:40-42 for the other 5) -- consistent with the same
+"later signals get scaled/skipped first" principle `PORTFOLIO_CAP`'s own sizing logic already
+uses. Mathematically clean too: room left after the other 5 is less than 1 share of ASHR, so
+scaling it down would round to 0 anyway.
+
+**Execution note, worth remembering**: a DIFFERENT clientId cannot cancel another clientId's
+orders (`Error 10147`) -- there's no master client configured
+(`OverrideTwsMasterClientID=` blank in `C:\IBC-Live\config.ini`). Cancelling required freeing
+clientId 21 first: stopped `DashboardAppLive` (killed the orphaned port-8081 process, the same
+recurring quirk documented elsewhere in this doc), connected AS clientId=21 while it was free,
+cancelled all 3 ASHR legs (confirmed via `reqCompletedOrdersAsync` -- all `Cancelled`), then
+restarted `DashboardAppLive` normally. The other 5 orders are real GTC orders at the broker,
+entirely unaffected by the dashboard being briefly offline for this.
+
+**Local records corrected to match precedent, not improvised**: found the EXACT established
+convention by checking `paper_trades_archive` for the historical 2026-07-08 Error-435 VOID
+entries -- `status='VOID'`, `exit_price=0.0`, `realized_r=0.0`, a `exit_reason` explaining what
+happened. Applied identically to ASHR's `ib_mirror` row (paper_id=17) and its `paper_trades`
+row, with a reason describing the ACTUAL cause this time (manual cancellation for the
+portfolio-cap fix, not a broker rejection). This also correctly un-blocks `_has_open()` so a
+future ASHR signal can be considered again (VOID, not OPEN).
+
+**Result, verified after restart**: `paper_trades` OPEN count is now 6 (CPER/EEM/DBC/VNQ/AMLP,
+the 5 healthy pending orders, + CWB, still unresolved from the earlier finding -- a separate
+open decision, not touched here). Live reconnected cleanly (confirmed "LIVE trading ENABLED"
+in the log). Remaining real pending exposure: ~99.8% of equity, under the 100% cap.
+
 ### 🐞🐞 FIXED 2026-07-13: PORTFOLIO_CAP silently breached (~125% deployed) via a blind spot
 GrossPositionValue can't see -- confirmed live, same failure class the cap was built to fix
 User asked whether the "Active Trades (0 open · 7 pending)" panel was still updating, and
