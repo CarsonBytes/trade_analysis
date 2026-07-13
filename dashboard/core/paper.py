@@ -370,6 +370,10 @@ class Trade:
     macro_note: str = ""      # macro backdrop at the time of entry
     entry_facts: str = ""     # JSON snapshot of the key facts at entry
     exit_reason: str = ""     # human reason at close (TP/SL/horizon/manual)
+    macro_linkage: str = ""   # ADDED 2026-07-14: LLM's explicit check of whether ITS OWN
+                              # macro_note actually applies to THIS instrument (e.g. a
+                              # USD-strength headwind), not just the general backdrop --
+                              # see board_scan.py's InstrumentSignal.macro_linkage
 
 
 def _conn() -> sqlite3.Connection:
@@ -389,6 +393,7 @@ def _conn() -> sqlite3.Connection:
         ("macro_note", "TEXT DEFAULT ''"),
         ("entry_facts", "TEXT DEFAULT ''"),
         ("exit_reason", "TEXT DEFAULT ''"),
+        ("macro_linkage", "TEXT DEFAULT ''"),
     ]
     for table in ("paper_trades", "paper_trades_archive"):
         if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -676,7 +681,8 @@ def place_from_state(state: dict) -> list[str]:
                 invalidation=(llm_sig.invalidation if llm_sig else ""),
                 llm_bias=(llm_sig.bias if llm_sig else ""),
                 det_strength=score.strength, det_note=score.note[:300],
-                macro_note=macro[:500], entry_facts=entry_facts))
+                macro_note=macro[:500], entry_facts=entry_facts,
+                macro_linkage=(llm_sig.macro_linkage if llm_sig else "")))
             msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
                    f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
             logs.append(msg)

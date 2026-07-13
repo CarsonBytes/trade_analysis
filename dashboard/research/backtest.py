@@ -1100,6 +1100,44 @@ def _resolve_voltrail(direction, entry, sl, tp, bars, mult=3.0):
     return None
 
 
+def _resolve_structtrail(direction, entry, sl, tp, bars, lookback=60):
+    """SUPPORT/RESISTANCE trailing stop (2026-07-14, requested after a user question about
+    whether SL/TP get dynamically revised based on structure -- confirmed live they do NOT,
+    this backtests whether they SHOULD before building it). Trails the stop up to the
+    trailing `lookback`-bar CLOSE-price low (support) for a long / high (resistance) for a
+    short, using the EXACT SAME definition as the live system's own support_60/resistance_60
+    (analyst/features.py: `prices.tail(60).min()/.max()` on CLOSE, not high/low -- kept
+    consistent so this tests "the live system's own notion of structure, applied
+    continuously" rather than a different definition). Conservative: only ever TIGHTENS the
+    stop (never loosens it back out), same philosophy as _resolve_trail/_resolve_voltrail.
+    Needs per-bar f'support_{lookback}'/f'resistance_{lookback}' columns on `bars` (rolling
+    min/max of CLOSE, computed on the full df before slicing per-trade -- see _exit_test());
+    a DIFFERENT column per lookback so testing several window sizes in the same run can't
+    silently read the wrong one."""
+    sup_col, res_col = f"support_{lookback}", f"resistance_{lookback}"
+    for n, (_ts, row) in enumerate(bars.iterrows(), start=1):
+        hi, lo = row["high"], row["low"]
+        if direction == "long":
+            if lo <= sl:
+                return ("WIN" if sl > entry else "LOSS"), sl, n
+            if hi >= tp:
+                return "WIN", tp, n
+            sup = row.get(sup_col)
+            if sup is not None and sup == sup:          # not NaN (early bars, <lookback history)
+                sl = max(sl, sup)
+        else:
+            if hi >= sl:
+                return ("WIN" if sl < entry else "LOSS"), sl, n
+            if lo <= tp:
+                return "WIN", tp, n
+            res = row.get(res_col)
+            if res is not None and res == res:
+                sl = min(sl, res)
+    if len(bars):
+        return "EXPIRED", float(bars["close"].iloc[-1]), len(bars)
+    return None
+
+
 def _direction_test(data, span, years) -> None:
     """REGIME/ASYMMETRY test (the testable core of regime-dependent allocation):
     does the SHORT side earn its keep, or is long-only / asymmetric better? Futures
@@ -1269,12 +1307,21 @@ def _exit_test(data, span, years) -> None:
             f"BARS, so running this on daily bars silently tests a completely different "
             f"(much shorter) horizon than the live weekly system.")
     # per-bar ATR for the volatility-adaptive trail (chandelier needs CURRENT ATR);
-    # per-bar RSI for the momentum-exhaustion exit (needs CURRENT RSI each bar)
+    # per-bar RSI for the momentum-exhaustion exit (needs CURRENT RSI each bar);
+    # per-bar support/resistance for the 2026-07-14 structural trail at each tested lookback
+    # (60-bar matches the live system's own support_60/resistance_60 definition exactly:
+    # rolling CLOSE min/max, inclusive of the current bar -- no lookahead)
     for df in data.values():
         if "atr" not in df.columns:
             df["atr"] = _atr(df, 14)
         if "rsi" not in df.columns:
             df["rsi"] = _rsi(df["close"], 14)
+        for lb in (10, 20, 30, 60):
+            sup_col, res_col = f"support_{lb}", f"resistance_{lb}"
+            if sup_col not in df.columns:
+                df[sup_col] = df["close"].rolling(lb, min_periods=1).min()
+            if res_col not in df.columns:
+                df[res_col] = df["close"].rolling(lb, min_periods=1).max()
     # (label -> (sl_method, resolver)). sl_method sets SL/TP PLACEMENT (ATR vs
     # STRUCT); resolver sets EXIT MANAGEMENT (None=fixed, breakeven, trailing).
     methods = {
@@ -1296,6 +1343,18 @@ def _exit_test(data, span, years) -> None:
         "exhaustion RSI-20pt": ("ATR",   partial(_resolve_exhaustion, arm_r=0.5, rsi_drop=20.0)),
         "time-decay bar3->BE": ("ATR",   partial(_resolve_time_decay, decay_bar=3, decay_sl_r=0.0)),
         "time-decay bar3->-0.5R": ("ATR", partial(_resolve_time_decay, decay_bar=3, decay_sl_r=-0.5)),
+        # ADDED 2026-07-14: dynamic SL revision based on support/resistance (user question
+        # -- confirmed live this doesn't exist, backtested here before building it). Uses
+        # the SAME support_60/resistance_60 definition the live system already computes
+        # (rolling 60-bar CLOSE min/max), trailed continuously instead of only at entry.
+        # 60bar came back IDENTICAL to fixed (a strong-uptrend entry's 60-bar low sits far
+        # below the tight ATR stop, so it never binds) -- testing shorter, tighter lookbacks
+        # too, to see if S/R trailing does anything at ANY reasonable window before
+        # concluding it's simply irrelevant at this strategy's entry conditions.
+        "struct-trail 60bar":  ("ATR",   partial(_resolve_structtrail, lookback=60)),
+        "struct-trail 30bar":  ("ATR",   partial(_resolve_structtrail, lookback=30)),
+        "struct-trail 20bar":  ("ATR",   partial(_resolve_structtrail, lookback=20)),
+        "struct-trail 10bar":  ("ATR",   partial(_resolve_structtrail, lookback=10)),
     }
     cut = min(min(df.index) for df in data.values()) + (span * 0.6)
     print(f"\nEXIT-METHOD TEST ({len(data)} instruments, current live config, "

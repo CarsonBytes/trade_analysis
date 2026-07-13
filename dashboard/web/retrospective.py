@@ -179,6 +179,8 @@ def build() -> str:
                      f"— {t.get('exit_reason') or t['status']}")
         L.append(f"- LLM: bias {t.get('llm_bias') or '?'}, conf "
                  f"{t['confidence']:.2f} — {t['rationale']}")
+        if t.get("macro_linkage"):
+            L.append(f"- macro linkage: {t['macro_linkage']}")
         if t.get("invalidation"):
             L.append(f"- invalidation: {t['invalidation']}")
         L.append(f"- deterministic: strength {t.get('det_strength')}/5 — "

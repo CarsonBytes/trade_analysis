@@ -26,6 +26,14 @@ class InstrumentSignal(BaseModel):
     action: Literal["BUY", "SELL", "WAIT"]
     confidence: float = Field(ge=0, le=1)
     rationale: str = Field(description="1-2 sentences grounded in the provided facts/news.")
+    macro_linkage: str = Field(description=
+        "Does any theme from YOUR OWN macro_note actually apply to THIS instrument "
+        "specifically (e.g. a USD-strength headwind on metals, a shared commodity-complex "
+        "driver, risk-off FX flows)? One short sentence, and be concrete about the "
+        "MECHANISM (not just 'macro is risk-on') -- e.g. copper isn't necessarily bearish "
+        "just because oil spiked on a supply shock, but IS exposed if that same shock is "
+        "driving safe-haven USD strength. Say 'none material' if nothing genuinely "
+        "connects -- don't force a link that isn't really there.")
     invalidation: str = Field(description="specific price/condition that proves this wrong.")
 
 
@@ -34,13 +42,26 @@ class BoardScan(BaseModel):
     signals: list[InstrumentSignal]
 
 
+# ADDED 2026-07-14: macro_linkage field + this paragraph, after a real trade (CPER, placed
+# 2026-07-13) got a purely technical rationale ("uptrend, momentum favors continuation")
+# despite the SAME board scan's own macro_note flagging Iran/Middle-East tension driving
+# safe-haven USD strength -- a real, statistically-supported headwind for copper (-0.54
+# correlation with DXY over the trailing 2mo, confirmed against real data) that never made it
+# into the per-instrument reasoning. The LLM was identifying macro themes at the board level
+# but not systematically checking whether they applied to each instrument it scored --
+# forcing a dedicated field (rather than hoping the free-text rationale mentions it) makes
+# this reliable and auditable instead of hopeful.
 SYSTEM = (
     "You are the head analyst on a trading desk. You are given pre-computed, "
     "factual indicators for several instruments (metals, energy, FX, indices, "
     "crypto) plus recent "
     "headlines. Do NOT invent numbers; reason only from the facts provided. "
-    "For each instrument give a bias, an action (BUY/SELL/WAIT), a calibrated "
-    "confidence, a one-line rationale, and the explicit invalidation level. "
+    "First form the macro_note (2-3 sentences on the overall backdrop). THEN, for each "
+    "instrument, give a bias, an action (BUY/SELL/WAIT), a calibrated confidence, a "
+    "one-line rationale, an explicit macro_linkage (does any theme from your OWN "
+    "macro_note actually apply to THIS instrument, through what mechanism -- or "
+    "genuinely nothing? Say so either way, don't skip this step even when the answer is "
+    "'none material'), and the explicit invalidation level. "
     "WAIT is correct when signals conflict or a trend is overextended. Only "
     "count headlines actually relevant to an instrument. You advise a human who "
     "makes the final call -- never overstate confidence."

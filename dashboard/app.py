@@ -515,6 +515,13 @@ def _open_detail(key: str) -> None:
             ui.label("LLM view").classes("font-bold text-sm")
             ui.label(f"{sig.action} · {sig.bias} · confidence {sig.confidence:.0%}")
             ui.label(sig.rationale).classes("text-sm")
+            # ADDED 2026-07-14: explicit check of whether a macro theme the LLM already
+            # identified (in the board's own macro_note) actually applies to THIS
+            # instrument -- previously only existed implicitly (or not at all) in the
+            # free-text rationale; see board_scan.py's InstrumentSignal.macro_linkage.
+            if getattr(sig, "macro_linkage", None):
+                ui.label(f"Macro linkage: {sig.macro_linkage}").classes(
+                    "text-sm text-blue-8")
             ui.label(f"Invalidation: {sig.invalidation}").classes("text-sm text-grey-7")
         ui.button("Close", on_click=dlg.close).props("flat")
     dlg.open()

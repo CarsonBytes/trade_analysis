@@ -34,7 +34,7 @@ def _score(signal: str, strength: int = 5) -> Score:
 def _llm(action: str, rationale: str = "test rationale") -> InstrumentSignal:
     return InstrumentSignal(key="SPY", bias="bullish" if action == "BUY" else "neutral",
                             action=action, confidence=0.7, rationale=rationale,
-                            invalidation="n/a")
+                            macro_linkage="none material", invalidation="n/a")
 
 
 def test_no_llm_sig_watch_is_plain_noise():

@@ -1,9 +1,68 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-13.
+Last updated 2026-07-14.
 
 ---
+
+### ⭐ 2026-07-14: (1) shipped LLM macro_linkage field; (2) backtested dynamic S/R-based SL
+trailing FIRST as requested -- REJECTED, matching every other exit-method alternative
+tested this project. Also (3) live real trades filled today, confirmed via broker.
+
+**(1) macro_linkage -- shipped.** After a real trade (CPER, placed 2026-07-13) got a purely
+technical LLM rationale despite the SAME board scan's own macro_note flagging Iran/Middle-East
+tension driving safe-haven USD strength (a real, statistically-confirmed headwind for copper:
+-0.54 correlation with DXY over the trailing 2mo, checked against real data -- oil and copper
+themselves are NOT correlated, -0.11, so "oil up" isn't itself the mechanism; USD strength is),
+added `InstrumentSignal.macro_linkage` to `board_scan.py`'s structured output -- the LLM must
+now explicitly state whether any theme from its OWN macro_note applies to each specific
+instrument, through what mechanism, or say "none material" if genuinely nothing connects (a
+forced field, not hoping the free-text rationale happens to mention it). Wired through:
+new `paper_trades.macro_linkage` column (additive migration, same pattern as
+`llm_bias`/`macro_note`), `Trade` dataclass, `place_from_state()`'s insert, surfaced in
+`retrospective.py`'s trade-by-trade dump and `app.py`'s live signal detail dialog. Full test
+suite (10 files) re-run clean (had to update `test_evaluate_signal.py`'s `_llm()` helper --
+`macro_linkage` is a new required pydantic field, would have broken existing tests otherwise).
+
+**(2) Dynamic SL/TP revision based on support/resistance -- backtested FIRST, as requested,
+before building anything live. REJECTED.** Added `_resolve_structtrail()` to
+`research/backtest.py`'s existing 18-method exit-comparison battery (now 22), using the
+EXACT SAME support/resistance definition the live system already computes at entry
+(`analyst/features.py`'s `support_60`/`resistance_60`: rolling 60-bar CLOSE min/max) but
+applied CONTINUOUSLY (trailing the stop up to it every bar) instead of only once at signal
+time. Tested 4 lookback windows on the full 22-ETF weekly history (IS/OOS/FULL, matching the
+project's own established rigor):
+
+| lookback | IS cd | OOS expR | OOS CAGR% | OOS DD% | OOS cd | FULL cd |
+|---|---|---|---|---|---|---|
+| fixed (baseline) | 0.22 | +0.352 | 11.4 | -12.3 | 0.93 | 0.50 |
+| struct-trail 60bar | 0.22 | +0.352 | 11.4 | -12.3 | 0.93 | 0.50 |
+| struct-trail 30bar | 0.22 | +0.352 | 11.4 | -12.3 | 0.93 | 0.50 |
+| struct-trail 20bar | 0.21 | +0.355 | 11.5 | -11.8 | 0.97 | 0.52 |
+| struct-trail 10bar | 0.12 | +0.342 | 11.3 | -11.1 | 1.02 | 0.47 |
+
+**60-bar and 30-bar are numerically IDENTICAL to fixed** -- this strategy only enters near
+strength-5 multi-timeframe uptrends, meaning the 60/30-bar rolling low sits far below the
+already-tight ATR-based stop, so the structural trail's `max(sl, support)` never actually
+picks the support level; it's completely inert at these windows. **20-bar and 10-bar DO bind
+(different trade counts, n changed)**, but fail this project's own already-adopted rule
+("adopt a dynamic exit ONLY if it beats fixed on OOS expR, OOS CAGR/DD, AND IS CAGR/DD"): both
+show a real IS degradation (0.21 and 0.12 vs 0.22) alongside only a marginal, inconsistent OOS
+change -- the exact "OOS-only apparent win, IS degradation" pattern this project has
+repeatedly flagged as a lucky-window red flag rather than a real edge, consistent with
+"trend-following theory says cutting winners early should lose."
+
+**Conclusion: no config change, feature NOT built.** This is the 23rd tested alternative
+exit method (of 18 previously + 4 new struct-trail variants) and the 23rd to fail to beat
+"fixed (ATR-SL+RR3-TP)" cleanly -- reinforces rather than challenges the currently-adopted
+design. Kept `_resolve_structtrail()` and all 4 variants in the permanent `methods` dict
+(matching this file's own established convention: every tested-and-rejected method stays in
+the tool as a documented comparison, not deleted) so this doesn't need re-deriving later.
+
+**(3) Confirmed while checking on other work**: live's core strategy's real trades from
+2026-07-13 (CPER/EEM/DBC/VNQ/AMLP) filled today once the market opened -- `broker_positions()`
+now shows real non-zero holdings for all 5. First real filled live positions this project has
+ever had.
 
 ### 🐞 FIXED 2026-07-13: orphaned real broker orders when paper resolves a trade
 independently of a fill; confirmed NO dynamic SL/TP revision (support/resistance or
