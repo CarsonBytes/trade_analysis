@@ -5,6 +5,40 @@ Last updated 2026-07-13.
 
 ---
 
+### 🔧 FIXED 2026-07-13: LLM board scan only reviewed the top 10 of 22 watched ETFs, not all
+of them -- the "rest are clear WAIT/WATCH" assumption was false
+User asked (after the prior "day-batched call" phrasing was ambiguous) whether the scan really
+only runs once a day, and whether all watched instruments get checked. Both were worth
+correcting -- one was a wording problem, one was a real gap.
+
+**Cadence: NOT once a day.** "Day-batched" in the earlier explanation meant "one call covers
+the WHOLE BOARD" (batching ACROSS INSTRUMENTS, per `board_scan.py`'s own docstring: "Instead of
+4 calls x N instruments, the whole board costs a single structured-output call"), not "batched
+once per day." The actual cadence is `SETTINGS["llm_min"] = 15` minutes (`app.py`), confirmed
+against real data: 13 board scans occurred between 04:00-07:09 UTC today, ~14.5min apart on
+average. Poor phrasing on my part, not a code issue -- no fix needed here, just the correction.
+
+**Coverage: a real gap, confirmed against real data before fixing.** `board_scan.py`'s
+`MAX_INSTRUMENTS = 10` sliced the ranked list to only the top 10 by `obviousness` before
+sending to the LLM, with a comment claiming "the rest are clear WAIT/WATCH." Checked this
+directly: today, **EFA, HYD, HYG, and SHY all had a real deterministic BUY/SELL signal** (they
+were rejected on a DIFFERENT gate -- trend-strength/RSI -- meaning `action` HAD resolved to
+BUY/SELL) but were NOT among the 10 sent to the LLM that scan. These 4 were evaluated with
+`llm_sig=None`, falling back to `action = score.signal` in `evaluate_signal()` with none of the
+LLM's news-awareness or "signals conflict/overextended" judgment applied -- the exact opposite
+of the cap's own stated assumption.
+
+**Root cause of the cap**: a stale token-budget worry ("free tiers cap at ~4k") that doesn't
+apply to this deployment's actual configured model, `OPENAI_MODEL=gpt-5-mini` (checked
+`analyst/.env` directly) -- a large-context model, not a free-tier one. **Fix**: raised
+`MAX_INSTRUMENTS` from 10 to 40 (comfortably covers the current 22-ETF universe with headroom
+for growth) so every watched instrument gets a real LLM look every scan. Cost is unaffected in
+the way that matters -- `store.can_call()`'s daily budget guard caps the number of CALLS, not
+per-call size, so this doesn't add API calls, it just makes the one call already being made
+actually cover the whole book. Compiled clean, full test suite re-run (all 9 files pass, no
+test asserted the old cap value). No config-value regression test added -- this is a single
+tuning constant, not logic with edge cases to regress-test.
+
 ### 🔧 FIXED 2026-07-13: LLM WAIT-vetoes of a real deterministic BUY/SELL were invisible to
 the retrospective/constraint scorecard
 User asked what could cause the LLM layer specifically to reject a signal, beyond the plain

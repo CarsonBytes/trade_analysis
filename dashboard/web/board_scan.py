@@ -57,10 +57,20 @@ def _facts_block(scores: list[Score]) -> str:
     return "\n\n".join(blocks)
 
 
-# Only the TOP of the deterministic ranking is worth an LLM deep-dive -- the
-# rest are clear WAIT/WATCH. Capping this also keeps the prompt within provider
-# input-token limits (free tiers cap at ~4k). Tune to your provider's budget.
-MAX_INSTRUMENTS = 10
+# FIXED 2026-07-13: this cap's own assumption ("the rest are clear WAIT/WATCH") is false --
+# checked directly against a real day's data: EFA/HYD/HYG/SHY all had a real deterministic
+# BUY/SELL that day (rejected on a DIFFERENT gate, trend-strength/RSI) but weren't in the
+# top-10 sent here, so they got evaluated with NO llm_sig at all (see evaluate_signal() in
+# core/paper.py -- action falls back to the deterministic signal, with none of the LLM's
+# news-awareness or "signals conflict/overextended" judgment applied). The original "~4k free
+# tier" token concern doesn't apply to this deployment's actual configured model
+# (OPENAI_MODEL=gpt-5-mini, a large context window) -- 22 instruments' worth of facts_text
+# plus headlines is a small fraction of it. Raised to cover the full active ETF universe (22
+# today) with headroom for growth, so every watched instrument gets a real LLM look every
+# scan, not just the most "obvious" 10. Cost is still bounded by store.can_call()'s daily
+# call-COUNT budget (unaffected by per-call size) -- this doesn't add calls, just completeness
+# within the one call already being made.
+MAX_INSTRUMENTS = 40
 MAX_NEWS = 10
 
 
