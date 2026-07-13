@@ -288,6 +288,25 @@ def current_equity_usd() -> float | None:
     return _equity_usd(ib)
 
 
+def current_portfolio_room_usd() -> float | None:
+    """PUBLIC: USD notional still available under PORTFOLIO_CAP right now (filled +
+    pending commitment subtracted from equity x cap) -- None if not connected, or if
+    PORTFOLIO_CAP is disabled (0, meaning "no cap" -- there's no meaningful "room" to report).
+    Added 2026-07-13 alongside app.py's _pending_reason() fix: a signal correctly held back
+    by cap_qty_to_portfolio_room() (e.g. SPY/QQQ/IWM, confirmed live) used to show the same
+    "awaiting the next mirror cycle" message as a signal about to place normally -- misleading,
+    since it will NEVER place until room frees up. This lets the UI tell them apart."""
+    ib = _guard()
+    if ib is None:
+        return None
+    portfolio_cap = float(os.environ.get("PORTFOLIO_CAP", "1.0"))
+    if portfolio_cap <= 0:
+        return None
+    equity = _equity_usd(ib)
+    deployed = _gpv_usd(ib) + _pending_entry_notional_usd()
+    return max(equity * portfolio_cap - deployed, 0.0)
+
+
 def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
                    acct: str | None = None) -> str | None:
     inst = FUT_BY_KEY.get(t["instrument"])

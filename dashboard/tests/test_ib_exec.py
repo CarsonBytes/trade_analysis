@@ -164,10 +164,42 @@ def test_pending_entry_notional_usd():
             pass
 
 
+def test_current_portfolio_room_usd():
+    print("current_portfolio_room_usd(): PUBLIC accessor app.py's _pending_reason() uses "
+          "to tell 'blocked by PORTFOLIO_CAP' apart from 'awaiting the next mirror cycle' "
+          "(2026-07-13 fix -- confirmed live: SPY/QQQ/IWM were mislabeled as the latter):")
+    from dashboard.execution import ib_exec
+
+    with mock.patch.object(ib_exec, "_guard", return_value=None):
+        check("not connected -> None", ib_exec.current_portfolio_room_usd(), None)
+
+    with mock.patch.dict(os.environ, {"PORTFOLIO_CAP": "0"}), \
+         mock.patch.object(ib_exec, "_guard", return_value=object()):
+        check("PORTFOLIO_CAP disabled (0) -> None (no meaningful room to report)",
+              ib_exec.current_portfolio_room_usd(), None)
+
+    with mock.patch.dict(os.environ, {"PORTFOLIO_CAP": "1.0"}), \
+         mock.patch.object(ib_exec, "_guard", return_value=object()), \
+         mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+         mock.patch.object(ib_exec, "_gpv_usd", return_value=80_000.0), \
+         mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=15_000.0):
+        check("equity 100k, cap 100%, 80k filled + 15k pending -> 5k room left",
+              ib_exec.current_portfolio_room_usd(), 5_000.0)
+
+    with mock.patch.dict(os.environ, {"PORTFOLIO_CAP": "1.0"}), \
+         mock.patch.object(ib_exec, "_guard", return_value=object()), \
+         mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+         mock.patch.object(ib_exec, "_gpv_usd", return_value=90_000.0), \
+         mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=25_000.0):
+        check("already OVER the cap -> room floors at 0.0, not negative",
+              ib_exec.current_portfolio_room_usd(), 0.0)
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
     test_pending_entry_notional_usd()
+    test_current_portfolio_room_usd()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

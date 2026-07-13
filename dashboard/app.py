@@ -1024,6 +1024,17 @@ def _pending_reason(t: dict) -> tuple[str, bool]:
     if t["id"] in _bk.executed_ids():
         return ("order already placed, waiting to fill (e.g. outside market hours, "
                 "or a slow fill) -- check IBKR directly for the order status", True)
+    # FOUND 2026-07-13: a signal correctly held back by PORTFOLIO_CAP's own room check
+    # (confirmed live: SPY/QQQ/IWM all logged "<1 share at the risk/cap budget, SKIP" while
+    # ~99.8% of equity was already committed to other pending orders) fell all the way
+    # through to "awaiting the next mirror cycle" -- true for a signal about to place
+    # normally, actively misleading for one that will NEVER place until an existing
+    # position closes or a pending order resolves.
+    room = _bk.portfolio_room_usd()
+    if room is not None and room < t["entry"]:
+        return (f"no PORTFOLIO_CAP room left (~${room:,.0f} available, needs ~${t['entry']:,.0f}"
+                f"/share) -- won't place until an existing position/order frees up capacity",
+                False)
     return "awaiting the next mirror cycle", False
 
 

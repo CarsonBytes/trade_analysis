@@ -5,6 +5,52 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞 FIXED 2026-07-13: "9 pending trades" on live -- the PORTFOLIO_CAP fix from earlier
+today IS working correctly, but the UI couldn't tell "blocked, will never place" apart from
+"about to place normally"
+User saw live jump from 6 to 9 "pending" and asked if that was too many. Investigated fresh
+rather than assuming the earlier fix had failed.
+
+**Good news first: the pending-notional fix from earlier today is working exactly as
+intended.** 3 NEW signals fired (SPY, QQQ, IWM, ~08:23 UTC) -- confirmed in the log, all three
+correctly SKIPPED at the broker: `"SPY: <1 share at the risk/cap budget, SKIP"` (same for QQQ,
+IWM). With ~99.8% of equity already committed (the 5 healthy pending orders), there was no
+room left, and `cap_qty_to_portfolio_room()` correctly sized them to 0 rather than pushing the
+account further over. **No real broker order exists for any of these 3** -- confirmed via
+`ib_mirror` (only 6 rows total: the 5 healthy + CWB, no SPY/QQQ/IWM rows at all).
+
+**So "9 pending" actually breaks down as: 5 genuinely pending (fine), CWB (dead, cancelled at
+broker, still displaying as if pending), and 3 (SPY/QQQ/IWM) permanently blocked by the cap
+until room frees up -- but `active_panel()`'s pending count and `_pending_reason()` couldn't
+tell any of these apart, showing the same undifferentiated "pending" label for all 9.**
+
+**Two real bugs found and fixed, not just narrated:**
+
+1. **`broker.executed_ids()` counted VOID rows as "broker truth executed."** Its SQL had no
+   status filter at all -- CWB's `ib_mirror` row (status='VOID' since the 2026-07-13 ASHR/CWB
+   cleanup) still counted, making `_pending_reason()` tell the user CWB was "already placed,
+   waiting to fill" when it's actually permanently dead. Fixed: `WHERE status != 'VOID'`.
+
+2. **`_pending_reason()` had no concept of the portfolio-cap room check at all** -- a signal
+   correctly blocked by `cap_qty_to_portfolio_room()` fell through to the same "awaiting the
+   next mirror cycle" message as a signal genuinely about to place normally. Added
+   `ib_exec.current_portfolio_room_usd()` (PUBLIC accessor, mirrors `current_equity_usd()`'s
+   existing pattern: equity x PORTFOLIO_CAP minus filled+pending deployed, None if cap
+   disabled or not connected) + `broker.portfolio_room_usd()` dispatch wrapper, wired into
+   `_pending_reason()`: if the room left can't even afford 1 share at this signal's price, it
+   now says so explicitly ("no PORTFOLIO_CAP room left... won't place until an existing
+   position/order frees up capacity") instead of implying imminent placement.
+
+**New tests**: `test_broker.py` (VOID exclusion from `executed_ids()`; `portfolio_room_usd()`
+dispatch with/without backend support) + `test_current_portfolio_room_usd()` in
+`test_ib_exec.py` (not-connected -> None; cap disabled -> None; normal room calculation;
+already-over-cap floors at 0.0, not negative). Full suite (10 files) re-run clean. Redeployed
+both dashboards.
+
+**No config/strategy change** -- purely a UI-accuracy fix. The underlying sizing behavior
+(correctly blocking SPY/QQQ/IWM) was already right; only the explanation shown to the user
+was wrong.
+
 ### ⭐ 2026-07-13: manually cancelled ASHR to bring live's ALREADY-PLACED pending orders back
 under PORTFOLIO_CAP (the code fix above only protects FUTURE signals, not orders already sitting
 at the broker)

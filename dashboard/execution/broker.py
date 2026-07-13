@@ -53,6 +53,15 @@ def equity_usd() -> float | None:
     return None
 
 
+def portfolio_room_usd() -> float | None:
+    """USD notional still available under PORTFOLIO_CAP (IB only). None if not connected,
+    the backend doesn't support it (e.g. MT5), or the cap is disabled."""
+    b = _backend()
+    if hasattr(b, "current_portfolio_room_usd"):
+        return b.current_portfolio_room_usd()
+    return None
+
+
 def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     """Free cash for a manual withdrawal from the cash shield (idle USD -> SGOV) FIRST,
     never the Core book; earmarks a reserve the sweep respects. IB only. Does NOT move
@@ -111,13 +120,20 @@ def mirror_table() -> str:
 
 def executed_ids() -> set:
     """paper_ids the active broker actually placed (have a mirror row) -- the
-    'broker truth' set for the retrospective. Empty set on any error."""
+    'broker truth' set for the retrospective. Empty set on any error.
+
+    FIXED 2026-07-13: excludes VOID rows -- a mirror row existing at all used to be enough,
+    but VOID means "we found out this never actually filled/was cancelled at the broker"
+    (see the historical Error-435 entries and the 2026-07-13 manual ASHR cancellation). Before
+    this fix, a VOID trade still counted as "broker truth executed," which made
+    app.py's _pending_reason() wrongly tell the user a genuinely-cancelled order was
+    "already placed, waiting to fill" -- true once, no longer true once VOID."""
     import sqlite3
     from dashboard.core import paper
     try:
         c = sqlite3.connect(paper._DB)
         ids = {r[0] for r in c.execute(
-            f"SELECT paper_id FROM {mirror_table()}").fetchall()}
+            f"SELECT paper_id FROM {mirror_table()} WHERE status != 'VOID'").fetchall()}
         c.close()
         return ids
     except Exception:
