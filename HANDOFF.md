@@ -5,6 +5,31 @@ Last updated 2026-07-13.
 
 ---
 
+### 🔧 FIXED 2026-07-13 (second follow-up, same day): live still slow (5-8s/request) after
+the portfolio_room_usd fix -- one more redundant per-card broker call found and removed
+After redeploying the `portfolio_room_usd()` fix and confirming HTTP 200 (previous entry),
+checked response TIME too, not just status code -- live still took 5.6-8.0s/request vs
+paper's 1.6-2.5s, a real gap worth explaining rather than accepting "it returns 200" as good
+enough.
+
+**Found the residual cause**: `_pending_reason()` still called `_bk.equity_usd()` once PER
+pending card (unchanged from before today -- this part predates today's fixes), AND
+`_fundable_count()` (called once per render already) ALSO calls `equity_usd()` independently
+-- two+ separate real broker round-trips for the exact same render, for a value that doesn't
+change within one render pass.
+
+**Fix**: `_fundable_count()` and `_pending_reason()` both now take `eq` as a plain parameter
+instead of calling `_bk.equity_usd()` themselves; `active_panel()` computes it exactly once
+per render and threads it to both. Same pattern as the `portfolio_room_usd()` fix earlier
+today -- consolidating broker calls to the render root rather than the leaf functions that
+happen to run in a loop. Full suite (10 files) re-run clean.
+
+**Practical note for whoever reads this later**: the underlying "LIVE trading ENABLED"
+log-line volume (dozens/hour) predates ALL of today's changes -- checked timestamps from
+before this session started, same rate. Not something introduced today, not fixed here --
+flagged for awareness, not actioned, since it wasn't demonstrated to be the cause of anything
+broken (only the per-card multiplication was).
+
 ### 🐞🐞 FIXED 2026-07-13 (same-day follow-up): the _pending_reason() fix above made live
 UNRESPONSIVE -- caught immediately on redeploy, not left running broken
 Redeployed the `_pending_reason()`/`portfolio_room_usd()` fix (previous entry) and checked

@@ -1002,7 +1002,7 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
-def _pending_reason(t: dict, room: float | None) -> tuple[str, bool]:
+def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str, bool]:
     """Why a qualifying signal isn't showing as a confirmed position yet. Returns
     (reason, order_already_placed) -- the second flag distinguishes an order that's
     ALREADY sitting at the broker (just not filled yet -- e.g. placed outside market
@@ -1010,20 +1010,20 @@ def _pending_reason(t: dict, room: float | None) -> tuple[str, bool]:
     small to size even 1 share). These need very different framing: "will never fill
     on its own" is true for the latter but actively WRONG for the former.
 
-    `room` (PORTFOLIO_CAP room left, USD): computed ONCE by the caller (active_panel()),
-    NOT per-card here. FIXED 2026-07-13: an earlier version called
-    `_bk.portfolio_room_usd()` per pending card -- 3 real broker round-trips each (equity +
-    GrossPositionValue + open-order notional), so a render with several pending cards
-    fired that many TIMES that number of synchronous IB calls, confirmed live to make the
-    whole dashboard unresponsive (port stopped answering HTTP entirely). Computing it once
-    per render and threading it through fixes both the mislabeling AND the performance
-    regression at the same time."""
+    `room` (PORTFOLIO_CAP room left, USD) and `eq` (equity, USD): both computed ONCE by
+    the caller (active_panel()), NOT per-card here. FIXED 2026-07-13: an earlier version
+    called `_bk.portfolio_room_usd()` per pending card -- 3 real broker round-trips each
+    (equity + GrossPositionValue + open-order notional), so a render with several pending
+    cards fired that many TIMES that number of synchronous IB calls, confirmed live to make
+    the whole dashboard unresponsive (port stopped answering HTTP entirely). `eq` had the
+    SAME per-card problem independently (also called once more, separately, inside
+    _fundable_count() for the very same render) -- both now computed once and threaded
+    through as plain parameters."""
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         return "not yet mirrored to the broker", False
     from dashboard.core import paper
     from dashboard.data import contracts
-    eq = _bk.equity_usd()
     stop_per_share = abs(t["entry"] - t["sl"])
     if eq is None or stop_per_share <= 0:
         return "not yet mirrored to the broker", False
@@ -1046,7 +1046,8 @@ def _pending_reason(t: dict, room: float | None) -> tuple[str, bool]:
     return "awaiting the next mirror cycle", False
 
 
-def _trade_card(t: dict, pos: dict | None, room: float | None = None) -> None:
+def _trade_card(t: dict, pos: dict | None, room: float | None = None,
+                eq: float | None = None) -> None:
     key = t["instrument"]
     live = service.STATE.get("live", {}).get(key)
     price = live["price"] if live else t["entry"]
@@ -1085,7 +1086,7 @@ def _trade_card(t: dict, pos: dict | None, room: float | None = None) -> None:
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
         else:
-            _reason, _placed = _pending_reason(t, room)
+            _reason, _placed = _pending_reason(t, room, eq)
             if _placed:
                 ui.label(f"Signal fired, {_reason}.").classes("text-xs text-grey-8")
             else:
@@ -1102,7 +1103,7 @@ def _trade_card(t: dict, pos: dict | None, room: float | None = None) -> None:
         ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
 
 
-def _fundable_count() -> tuple[int | None, int]:
+def _fundable_count(eq: float | None) -> tuple[int | None, int]:
     """How many of the active universe's instruments could size >=1 share RIGHT NOW at
     current equity + risk/trade. Explains the gap between the backtest's SIGNAL frequency
     (BACKTEST_SIGNAL_FREQ_YR, fixed at the account's target/planned scale) and the account's
@@ -1110,12 +1111,14 @@ def _fundable_count() -> tuple[int | None, int]:
     on a small account, but an expensive/high-ATR one (e.g. SPY, QQQ) can eat most of a small
     account's risk budget in one position, so many qualifying signals go unfunded until the
     account grows. First element is None if equity is unavailable (e.g. broker disconnected)
-    -- distinct from 0 fundable, which is a real (if grim) answer."""
-    from dashboard.execution import broker as _bk
+    -- distinct from 0 fundable, which is a real (if grim) answer.
+
+    `eq` is computed ONCE by the caller (active_panel()), not here -- see _pending_reason()'s
+    2026-07-13 docstring for why per-call broker round-trips in a render path are a real
+    performance risk, not just a style nit."""
     from dashboard.core import paper
     from dashboard.data import contracts
     from dashboard.instruments import active_universe
-    eq = _bk.equity_usd()
     universe = active_universe()
     if eq is None or not universe:
         return None, len(universe)
@@ -1150,8 +1153,12 @@ def active_panel() -> None:
     hdr += f" · {len(pending)} pending)" if pending else ")"
     ui.label(hdr).classes("text-lg font-bold")
     from dashboard.execution import broker as _bk
+    # computed ONCE for the whole render -- both _fundable_count() and _pending_reason()
+    # used to each call _bk.equity_usd() independently (a real broker round-trip), once per
+    # pending CARD for the latter; see the 2026-07-13 fix note on _pending_reason().
+    eq = _bk.equity_usd() if _bk.is_ib() else None
     if _bk.is_ib():
-        fundable, total = _fundable_count()
+        fundable, total = _fundable_count(eq)
         freq = (f"Signal freq (backtest): ~{BACKTEST_SIGNAL_FREQ_YR}/yr "
                 f"(~{BACKTEST_SIGNAL_FREQ_WK:.1f}/wk)")
         if fundable is not None:
@@ -1182,7 +1189,7 @@ def active_panel() -> None:
         room = _bk.portfolio_room_usd() if _bk.is_ib() else None
         with ui.row().classes("w-full flex-wrap gap-3"):
             for t in pending:
-                _trade_card(t, None, room=room)
+                _trade_card(t, None, room=room, eq=eq)
 
 
 @ui.refreshable
