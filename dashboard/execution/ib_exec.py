@@ -174,7 +174,12 @@ def mirror_new() -> list[str]:
     # the same cycle can't collectively overshoot the cap (each only sees room actually left
     # after earlier ones in the same batch, same "walk the book chronologically" logic the
     # backtest itself uses).
-    deployed = [_gpv_usd(ib)]
+    # FIXED 2026-07-13: GrossPositionValue alone only counts FILLED positions -- a pending,
+    # not-yet-filled order (e.g. placed outside market hours) contributed nothing here,
+    # letting PORTFOLIO_CAP be silently breached (confirmed live: 6 pending orders already
+    # totalled ~125% of equity before IBKR's OWN margin check, not this cap, cancelled the
+    # 7th). _pending_entry_notional_usd() adds that missing commitment.
+    deployed = [_gpv_usd(ib) + _pending_entry_notional_usd()]
     # Error 435 "You must specify an account" (confirmed live 2026-07-10): IBKR requires an
     # explicit order.account whenever the login manages MORE than one account (this one does:
     # the real U12991898 + an unrelated empty U20738951) -- without it, orders get silently
@@ -234,6 +239,43 @@ def _gpv_usd(ib) -> float:
         if rate:
             return summ["GrossPositionValue"] * rate
     return 0.0
+
+
+def _pending_entry_notional_usd() -> float:
+    """Sum of entry notional (qty x entry price, USD -- US ETFs price in USD, no FX needed)
+    for every symbol with a REAL order sitting at the broker that hasn't filled yet.
+
+    FOUND 2026-07-13: `_gpv_usd()` (GrossPositionValue) only reflects FILLED positions --
+    while an order sits pending (e.g. placed outside market hours, exactly what happened:
+    6 orders placed ~9.5h before the US market opened), it contributes ZERO to `deployed`,
+    so PORTFOLIO_CAP sizing sees "no exposure yet" and happily sizes the NEXT signal as if
+    there's full room. Confirmed live: 6 pending orders alone already totalled ~125% of
+    equity -- PORTFOLIO_CAP=1.0 was silently breached before a 7th order (CWB) got cancelled
+    by IBKR's OWN margin check, not by this bot's safety mechanism. This closes that gap by
+    adding pending (not-yet-filled) commitment to the same `deployed` figure PORTFOLIO_CAP
+    already uses, using LOCAL records (ib_mirror qty x paper_trades entry) for the notional
+    -- no extra broker price lookups needed, and a symbol here is guaranteed not-yet-filled
+    (broker_open_order_symbols() only returns orders IBKR hasn't resolved to a terminal
+    state) so this can never double-count against `_gpv_usd()`."""
+    pending_syms = ib_client.broker_open_order_symbols()
+    if not pending_syms:
+        return 0.0
+    # exclude anything the broker ALREADY shows as a filled position (e.g. only the SL/TP
+    # children remain open after the parent filled) -- that's already inside GrossPositionValue.
+    broker_pos = ib_client.broker_positions() or {}
+    pending_syms = pending_syms - set(broker_pos.keys())
+    if not pending_syms:
+        return 0.0
+    total = 0.0
+    with paper._LOCK, _conn() as c:
+        for sym in pending_syms:
+            row = c.execute(
+                "SELECT m.qty, p.entry FROM ib_mirror m JOIN paper_trades p "
+                "ON m.paper_id = p.id WHERE m.local_symbol=? AND m.status='OPEN'",
+                (sym,)).fetchone()
+            if row:
+                total += float(row[0]) * float(row[1])
+    return total
 
 
 def current_equity_usd() -> float | None:

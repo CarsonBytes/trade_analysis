@@ -12,6 +12,7 @@ Run:  uv run python -m dashboard.tests.test_ib_exec
 from __future__ import annotations
 
 import os
+import tempfile
 from unittest import mock
 
 from dashboard.execution.ib_exec import cap_qty_to_portfolio_room
@@ -99,9 +100,74 @@ def test_mirror_new_dd_halt_end_to_end():
           took_halt_path, False)
 
 
+def test_pending_entry_notional_usd():
+    print("_pending_entry_notional_usd(): FIXED 2026-07-13 -- GrossPositionValue alone "
+          "misses pending (not-yet-filled) order commitment, confirmed live: 6 pending "
+          "orders already totalled ~125% of equity before this fix existed:")
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:   # ensures paper_trades table exists first
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-13T04:00:00','CPER','long','ATR rr3.0',38.0,36.7,42.0,3.0,84,'OPEN')")
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(2,'2026-07-13T04:00:00','EEM','long','ATR rr3.0',67.0,63.2,78.0,3.0,34,'OPEN')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'CPER',84.0,50.0,'','2026-07-13T04:00:00','OPEN','etf')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(2,0,222,'EEM',34.0,50.0,'','2026-07-13T04:00:00','OPEN','etf')")
+
+        with mock.patch.object(ib_exec.ib_client, "broker_open_order_symbols",
+                              return_value={"CPER", "EEM"}), \
+             mock.patch.object(ib_exec.ib_client, "broker_positions", return_value={}):
+            total = ib_exec._pending_entry_notional_usd()
+        check("sums qty x entry across both pending symbols",
+              total, 84.0 * 38.0 + 34.0 * 67.0)
+
+        # EEM already FILLED (a real broker position exists) -- must NOT double-count it
+        # alongside GrossPositionValue, only CPER's pending notional should remain
+        with mock.patch.object(ib_exec.ib_client, "broker_open_order_symbols",
+                              return_value={"CPER", "EEM"}), \
+             mock.patch.object(ib_exec.ib_client, "broker_positions",
+                              return_value={"EEM": 34.0}):
+            total2 = ib_exec._pending_entry_notional_usd()
+        check("a filled symbol is excluded (no double-count with GrossPositionValue)",
+              total2, 84.0 * 38.0)
+
+        with mock.patch.object(ib_exec.ib_client, "broker_open_order_symbols",
+                              return_value=None):
+            total3 = ib_exec._pending_entry_notional_usd()
+        check("broker unavailable (None) -> 0.0, fails safe", total3, 0.0)
+
+        with mock.patch.object(ib_exec.ib_client, "broker_open_order_symbols",
+                              return_value=set()):
+            total4 = ib_exec._pending_entry_notional_usd()
+        check("no pending orders -> 0.0", total4, 0.0)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
+    test_pending_entry_notional_usd()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

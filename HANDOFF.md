@@ -5,6 +5,59 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞🐞 FIXED 2026-07-13: PORTFOLIO_CAP silently breached (~125% deployed) via a blind spot
+GrossPositionValue can't see -- confirmed live, same failure class the cap was built to fix
+User asked whether the "Active Trades (0 open · 7 pending)" panel was still updating, and
+whether the LLM was rejecting these trades. Neither -- the panel updates fine (tick loop
+confirmed alive), and `_pending_reason()`'s code has no LLM involvement at all (its four
+reasons are broker-availability, funding-gap, "order placed, waiting to fill", and "awaiting
+next mirror cycle" -- nothing LLM-related). But checking why 6 of the 7 were "pending" led to
+finding something much bigger.
+
+**Confirmed directly against the broker (fresh, read-only clientId, never touches order
+placement)**: the 6 orders (CPER/EEM/DBC/VNQ/AMLP/ASHR) are real, correctly-placed GTC MKT
+orders sitting `Submitted` -- 0 executions in 14h, placed ~9.5h before the US market opens
+(13:30 UTC), a completely normal state for an order placed outside market hours. Genuinely
+healthy, not evidence of anything wrong.
+
+**The 7th, CWB, is different: cancelled.** `reqCompletedOrdersAsync()` shows all 3 legs of its
+bracket (parent BUY + both children) as `Cancelled`, with real IBKR-assigned permIds --
+accepted then cancelled, not rejected outright. No live errorEvent listener exists in this
+codebase (`ib_client.py` has none wired in for ongoing operation, only ever used ad-hoc for a
+past diagnosis), so the EXACT IBKR error/reason for the cancellation could not be retrieved
+retroactively -- flagged as an honest gap, not guessed at.
+
+**Investigating WHY led to the real bug**: computed the actual notional of the 6 pending
+orders from local records (qty x entry price) -- **$15,981, ~124.7% of live equity (~$12,820)
+-- already OVER `PORTFOLIO_CAP=1.0` before CWB was even added.** Root cause: `_gpv_usd()`
+(GrossPositionValue) only reflects FILLED positions. While every order sits pending (market
+closed), `deployed` sees "$0 committed," so each new signal is sized as if there's full room
+-- collectively stacking past the cap with nothing in this codebase noticing. **This is the
+EXACT same failure PORTFOLIO_CAP was built to prevent** ("confirmed live: 7 positions -> ~127%"
+from the 2026-07-11 entry), recurring via a different trigger: IBKR's OWN margin check
+apparently caught it and cancelled CWB -- the broker protected the account where this bot's own
+safety mechanism did not.
+
+**Fix**: added `ib_client.broker_open_order_symbols()` (`reqAllOpenOrdersAsync()` -- by IBKR's
+own API contract, only returns orders NOT YET in a terminal state) and
+`ib_exec._pending_entry_notional_usd()`, which sums qty x entry (local records, no extra
+broker price lookups) for every symbol with a live pending order MINUS any that already show a
+real broker position (so it can never double-count against `_gpv_usd()`). `mirror_new()`'s
+`deployed` seed is now `_gpv_usd(ib) + _pending_entry_notional_usd()` -- the portfolio cap now
+sees TRUE total commitment (filled + pending), not just filled. Added 4 new tests
+(sums correctly across pending symbols; a filled symbol is excluded from double-counting;
+broker-unavailable fails safe to 0.0; no-pending-orders returns 0.0) plus the existing 3
+reconcile tests and everything else -- full suite (9 files) re-run clean. Redeployed both
+dashboards.
+
+**Still open, needs a decision, not silently changed**: CWB's `ib_mirror` row still shows
+`status='OPEN'` locally despite being genuinely cancelled at the broker -- stale, matching the
+historical Error-435 VOID entries' pattern, but not yet corrected the same way. Its
+`paper_trades` row is also still `OPEN`, which blocks the signal logic from re-considering CWB
+until natural horizon expiry (days/weeks out) -- low-risk (same conservative behavior as any
+pending signal), but worth a deliberate choice on whether to mark it VOID/resolved now versus
+let it expire naturally.
+
 ### 🐞 FIXED 2026-07-13: "position mismatch" badge false-alarmed on 6 real, correctly-placed
 GTC orders that simply hadn't filled yet -- LIVE'S CORE STRATEGY HAS STARTED TRADING FOR REAL
 User saw the "⚠ position mismatch" badge on live and asked to debug/fix if needed. This turned
