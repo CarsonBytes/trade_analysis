@@ -5,6 +5,43 @@ Last updated 2026-07-13.
 
 ---
 
+### ⭐ 2026-07-13: 10th pending signal (DIA) confirmed same pattern as before; refined
+_pending_reason()'s wording + fixed a wrong claim it was making
+User saw the pending count grow to 10 and asked if that needed fixing. Checked the log
+first: DIA fired at 16:38:25 HKT, correctly skipped at the broker ("DIA: <1 share at the
+risk/cap budget, SKIP") -- same self-resolving PORTFOLIO_CAP-room pattern as SPY/QQQ/IWM
+earlier the same day. Not a new bug, no code change needed for that part. (Also noticed in
+the same log line: today's earlier LLM-veto-tracking fix caught a real one for the first
+time -- "LLM vetoed to WAIT (deterministic was BUY): DIA is in uptrend but extremely
+overbought RSI (92)..." -- confirms that fix works in production, not just in tests.)
+
+**Then refined the UI text, and fixed a real accuracy problem while doing it.**
+`_pending_reason()` returned `(message, order_already_placed: bool)`, and `_trade_card()`
+appended a universal "will never fill on its own" whenever the bool was False -- true for a
+genuine funding gap, but FACTUALLY WRONG for a cap-blocked signal (SPY/QQQ/IWM/DIA) or one
+just waiting for its next mirror cycle -- both of those resolve automatically, no truer word
+than "never" could be used.
+
+**Changed the return type to a 3-way status** (`"placed"` / `"retrying"` / `"stuck"`) instead
+of a boolean, since the real situations aren't binary:
+- `"placed"`: a real order IS at the broker, just unfilled.
+- `"retrying"`: temporary, self-resolving, no action needed (cap-room-blocked, broker
+  reconnect, awaiting next mirror cycle).
+- `"stuck"`: genuinely won't resolve without the account growing (funding gap).
+
+Reworded every message in plain language (dropped "PORTFOLIO_CAP", "mirror cycle" as
+unexplained jargon; explained WHY each state is fine/not-fine in a sentence) and gave each
+status its own colour cue in `_trade_card()` (grey/blue/orange) so the distinction is visible
+at a glance, not just in hover text. Updated the "Pending" section's own header tooltip too --
+it previously only mentioned the funding-gap case ("account too small"), now explains all
+three reasons a card can be pending and points to each card's own message rather than assuming
+one blanket explanation.
+
+Compiled clean; full test suite (10 files, unrelated to this UI-only change) re-run as a
+sanity check. `app.py` can't be unit-tested directly (module-level `ui.run()` blocks import),
+so this was verified by compile-check + redeploy + manual confirmation rather than a
+regression test.
+
 ### 🔧 FIXED 2026-07-13 (second follow-up, same day): live still slow (5-8s/request) after
 the portfolio_room_usd fix -- one more redundant per-card broker call found and removed
 After redeploying the `portfolio_room_usd()` fix and confirming HTTP 200 (previous entry),

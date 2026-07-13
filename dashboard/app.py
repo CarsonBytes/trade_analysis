@@ -1002,48 +1002,54 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
-def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str, bool]:
+def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str, str]:
     """Why a qualifying signal isn't showing as a confirmed position yet. Returns
-    (reason, order_already_placed) -- the second flag distinguishes an order that's
-    ALREADY sitting at the broker (just not filled yet -- e.g. placed outside market
-    hours, or a slow fill) from one that was never sent at all (e.g. account too
-    small to size even 1 share). These need very different framing: "will never fill
-    on its own" is true for the latter but actively WRONG for the former.
+    (message, status), status is one of:
+      "placed"    -- a real order IS sitting at the broker, just hasn't filled yet.
+      "retrying"  -- not at the broker yet, but this is TEMPORARY and self-resolving --
+                     the system will automatically try again on its own, no action needed.
+      "stuck"     -- will NOT resolve on its own; needs something to actually change
+                     (the account growing) before this can ever place.
+
+    REWORDED 2026-07-13 (previously a boolean): a boolean "already placed?" can't express
+    the real difference between "blocked right now but will retry automatically" (a signal
+    held back by PORTFOLIO_CAP room, or one that just hasn't had its next mirror cycle yet)
+    and "genuinely stuck until the account grows" (a funding gap) -- the old universal
+    "will never fill on its own" wording was factually WRONG for the first two cases
+    (confirmed live: SPY/QQQ/IWM/DIA all correctly held back by the cap, all will place
+    automatically the moment room frees up, none of them "never").
 
     `room` (PORTFOLIO_CAP room left, USD) and `eq` (equity, USD): both computed ONCE by
-    the caller (active_panel()), NOT per-card here. FIXED 2026-07-13: an earlier version
-    called `_bk.portfolio_room_usd()` per pending card -- 3 real broker round-trips each
-    (equity + GrossPositionValue + open-order notional), so a render with several pending
-    cards fired that many TIMES that number of synchronous IB calls, confirmed live to make
-    the whole dashboard unresponsive (port stopped answering HTTP entirely). `eq` had the
-    SAME per-card problem independently (also called once more, separately, inside
-    _fundable_count() for the very same render) -- both now computed once and threaded
-    through as plain parameters."""
+    the caller (active_panel()), NOT per-card here -- see the 2026-07-13 performance fix
+    notes in HANDOFF.md if touching this again (per-card broker calls here once made the
+    live dashboard fully unresponsive)."""
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
-        return "not yet mirrored to the broker", False
+        return "Broker isn't connected right now — this will be retried automatically once it reconnects.", "retrying"
     from dashboard.core import paper
     from dashboard.data import contracts
     stop_per_share = abs(t["entry"] - t["sl"])
     if eq is None or stop_per_share <= 0:
-        return "not yet mirrored to the broker", False
+        return "Broker isn't connected right now — this will be retried automatically once it reconnects.", "retrying"
     needed = contracts.min_equity_for_1_share(stop_per_share, paper.RISK_PER_TRADE)
     if eq < needed:
-        return f"needs ~${needed:,.0f} to size (you have ~${eq:,.0f})", False
+        return (f"Account isn't big enough yet to buy even 1 share of this at the current "
+                f"risk setting (needs ~${needed:,.0f}, you have ~${eq:,.0f}) — this will sit "
+                f"here until the account grows, it won't place on its own.", "stuck")
     if t["id"] in _bk.executed_ids():
-        return ("order already placed, waiting to fill (e.g. outside market hours, "
-                "or a slow fill) -- check IBKR directly for the order status", True)
+        return ("Order is already sitting with the broker, just waiting to fill (e.g. it "
+                "was placed outside market hours, or the fill is simply taking a moment) — "
+                "check IBKR directly if you want the exact live order status.", "placed")
     # FOUND 2026-07-13: a signal correctly held back by PORTFOLIO_CAP's own room check
-    # (confirmed live: SPY/QQQ/IWM all logged "<1 share at the risk/cap budget, SKIP" while
-    # ~99.8% of equity was already committed to other pending orders) fell all the way
-    # through to "awaiting the next mirror cycle" -- true for a signal about to place
-    # normally, actively misleading for one that will NEVER place until an existing
-    # position closes or a pending order resolves.
+    # (confirmed live: SPY/QQQ/IWM/DIA all logged "<1 share at the risk/cap budget, SKIP"
+    # while equity was already fully committed to other pending orders) is a NORMAL, expected,
+    # SELF-RESOLVING state -- not stuck, not an error, just the risk budget doing its job.
     if room is not None and room < t["entry"]:
-        return (f"no PORTFOLIO_CAP room left (~${room:,.0f} available, needs ~${t['entry']:,.0f}"
-                f"/share) -- won't place until an existing position/order frees up capacity",
-                False)
-    return "awaiting the next mirror cycle", False
+        return (f"Nothing wrong here — the strategy's risk budget is fully committed right "
+                f"now (~${room:,.0f} of room left, this one needs ~${t['entry']:,.0f}/share), "
+                f"so it's being held back on purpose. It'll place automatically the moment an "
+                f"existing position closes or a pending order fills.", "retrying")
+    return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 
 def _trade_card(t: dict, pos: dict | None, room: float | None = None,
@@ -1086,12 +1092,12 @@ def _trade_card(t: dict, pos: dict | None, room: float | None = None,
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
         else:
-            _reason, _placed = _pending_reason(t, room, eq)
-            if _placed:
-                ui.label(f"Signal fired, {_reason}.").classes("text-xs text-grey-8")
-            else:
-                ui.label(f"Signal fired, but {_reason} — never placed on the broker, "
-                         "will never fill on its own.").classes("text-xs text-grey-8")
+            _reason, _status = _pending_reason(t, room, eq)
+            # colour cue matches the 3-way status: grey=healthy/normal, blue=temporary
+            # (will resolve on its own, no action needed), orange=genuinely stuck
+            _colour = {"placed": "text-grey-8", "retrying": "text-blue-8",
+                      "stuck": "text-orange-8"}[_status]
+            ui.label(_reason).classes(f"text-xs {_colour}")
         src = f"{_bk.name()} fill" if pos else "paper (unconfirmed)"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
@@ -1168,7 +1174,8 @@ def active_panel() -> None:
             "setup across the whole universe -- NOT how often trades actually FILL. A small "
             "account can't size expensive/high-volatility instruments (e.g. SPY, QQQ) even "
             "when they qualify, so real fill frequency is lower until the account grows -- "
-            "see the funding-gap reason on each pending card below.")
+            "see the reason shown on each pending card below (not always a funding gap -- "
+            "could also be waiting on the risk budget or a broker fill).")
     if not open_t:
         ui.label("No open positions. Setups are logged automatically from "
                  "qualifying signals.").classes("text-sm text-grey")
@@ -1178,11 +1185,15 @@ def active_panel() -> None:
             for t in confirmed:
                 _trade_card(t, positions.get(t["id"]))
     if pending:
-        ui.label("Pending — signal fired but never funded/placed").classes(
+        ui.label("Pending — not yet a real position").classes(
             "text-sm font-bold text-grey-7 mt-2").tooltip(
-            "These are NOT real positions. The strategy found a qualifying setup and "
-            "logged it, but couldn't size even 1 share at the configured risk (usually "
-            "because the account is too small) -- so nothing was ever sent to the broker.")
+            "These are NOT real positions yet. The strategy found a qualifying setup and "
+            "logged it, but it hasn't turned into a real broker position for one of a few "
+            "different reasons, shown on each card below: a real order may already be "
+            "sitting with the broker waiting to fill; the risk budget may be fully committed "
+            "elsewhere right now (normal, self-resolving, no action needed); or the account "
+            "may genuinely be too small to size this one yet. Check each card's own message "
+            "rather than assuming they're all the same situation.")
         # computed ONCE for the whole panel, not per-card (see _pending_reason()'s
         # docstring -- per-card was 3 real broker round-trips EACH, confirmed live to
         # make the whole dashboard unresponsive with several pending cards on screen)
