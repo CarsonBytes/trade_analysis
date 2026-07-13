@@ -5,6 +5,20 @@ Last updated 2026-07-13.
 
 ---
 
+### ⭐ 2026-07-13: CWB marked VOID -- the last loose end from the day's live-trading debugging
+User asked "is [10 pending] still legit" -- re-verified all 6 mirrored symbols fresh against
+the broker rather than reusing the earlier check: CPER/EEM/DBC/VNQ/AMLP still genuinely
+`Submitted` and pending (market opens 13:30 UTC); CWB still confirmed `Cancelled` (all 3
+legs, real permIds) via `reqCompletedOrdersAsync()`. User confirmed marking it resolved now
+rather than waiting for natural horizon expiry (days/weeks out) -- same precedent as ASHR
+earlier the same day: `ib_mirror` + `paper_trades` rows both set to `VOID`, with a reason
+explaining the cause isn't retroactively determinable (no live errorEvent listener existed
+at the time) but is most likely the same margin/risk-check class of event that hit ASHR.
+
+**No code change, no redeploy needed** -- pure data correction; `paper.open_trades()` reads
+live from the DB on every render. `paper_trades` OPEN count confirmed 9 (was 10), correctly
+excluding CWB: `CPER, EEM, DBC, VNQ, AMLP, SPY, QQQ, IWM, DIA`.
+
 ### 🐞🐞 FIXED 2026-07-13: "Drawdown from peak: now -89.8%" on live -- a DUPLICATE
 drawdown calculation in app.py never got the 2026-07-11 materiality-floor fix
 Spotted while visually verifying the pending-trade UI refinement (previous entry) -- a
