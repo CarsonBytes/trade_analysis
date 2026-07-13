@@ -117,6 +117,7 @@ def record_rejections(rows: list[dict]) -> None:
 # canonical constraint labels: match a reason to its gate so different numeric
 # values aggregate into one bucket (the scorecard counts gates, not values).
 _GATE_PREFIXES = [
+    ("llm vetoed to wait", "LLM vetoed a deterministic BUY/SELL to WAIT"),
     ("confidence", "confidence below threshold"),
     ("objective edge", "objective edge below threshold (losing regime)"),
     ("overextended", "overextended entry (chasing RSI extreme)"),

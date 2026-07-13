@@ -497,6 +497,19 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     reasons: list[str] = []
     action = (llm_sig.action if llm_sig else score.signal)
     if action not in ("BUY", "SELL"):
+        # Two different things collapse to the same WAIT/WATCH action, and only one of
+        # them is noise: (a) the instrument never had a real deterministic setup at all
+        # (score.signal itself is WATCH) -- genuinely uninteresting, most of the 22-ETF
+        # book sits here most days; (b) the LLM actively VETOED a real deterministic
+        # BUY/SELL into WAIT (news it judged relevant, its own overextension read, or a
+        # low-confidence calibration -- see board_scan.py's system prompt). (b) is a
+        # meaningful, LLM-driven rejection -- place_from_state()'s "skip WAIT/WATCH
+        # noise" filter (`reasons != ["action is WAIT/WATCH"]`) was silently discarding
+        # it too, since both cases produced the exact same one-line reason. Distinguish
+        # them so (b) reaches the rejected_signals journal / retrospective scorecard.
+        if llm_sig and score.signal in ("BUY", "SELL") and llm_sig.action == "WAIT":
+            return False, [f"LLM vetoed to WAIT (deterministic was {score.signal}): "
+                          f"{(llm_sig.rationale or '')[:100]}"], ""
         return False, ["action is WAIT/WATCH"], ""
     direction = "long" if action == "BUY" else "short"
     if LONG_ONLY and direction == "short":

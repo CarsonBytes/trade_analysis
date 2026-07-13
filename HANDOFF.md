@@ -1,9 +1,49 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-12.
+Last updated 2026-07-13.
 
 ---
+
+### 🔧 FIXED 2026-07-13: LLM WAIT-vetoes of a real deterministic BUY/SELL were invisible to
+the retrospective/constraint scorecard
+User asked what could cause the LLM layer specifically to reject a signal, beyond the plain
+deterministic checks (trend strength, RSI overextension) -- then asked to make sure the
+retrospective actually tracks those LLM-driven reasons. It didn't, for the most important one.
+
+`evaluate_signal()`'s first gate resolves `action = llm_sig.action if llm_sig else
+score.signal`, and returns early with the single reason `"action is WAIT/WATCH"` whenever
+that's not BUY/SELL. `place_from_state()` then explicitly filters this exact string out before
+logging to the rejected_signals journal ("skip WAIT/WATCH noise" -- most of the 22-ETF book
+sits at WATCH on any given day with no real setup, genuinely uninteresting). But this one
+reason string covers TWO very different cases: (a) the deterministic scorer itself never found
+a real setup (`score.signal` is WATCH) -- correctly noise; (b) the deterministic scorer found a
+real BUY/SELL and the LLM actively vetoed it to WAIT -- a news veto, its own overextension
+judgment, or a low-confidence calibration (see `board_scan.py`'s system prompt: "WAIT is
+correct when signals conflict or a trend is overextended... never overstate confidence"). Case
+(b) is the ONE channel where the LLM's news-awareness (the deterministic scorer has zero) can
+override a signal, and it was being silently discarded identically to case (a) -- meaning
+neither `journal.rejection_counts()` (the retrospective's constraint scorecard) nor the
+Criteria-loosening section had ever recorded a single one of these, however many actually
+occurred historically.
+
+**Fix**: `evaluate_signal()` now checks whether `score.signal` was actually BUY/SELL AND
+`llm_sig.action == "WAIT"` before falling through to the generic label -- when true, returns a
+distinguishable reason (`"LLM vetoed to WAIT (deterministic was BUY): <its own rationale>"`)
+instead. `place_from_state`'s existing exact-match filter (`reasons != ["action is
+WAIT/WATCH"]`) then naturally lets this through unchanged, no further edit needed there. Added
+a canonical `journal._GATE_PREFIXES` entry ("LLM vetoed a deterministic BUY/SELL to WAIT") so it
+aggregates cleanly in the scorecard instead of fragmenting by rationale text. New regression
+test `test_evaluate_signal.py` (6 checks: plain-noise case unchanged both with and without an
+agreeing llm_sig, BUY-vetoed and SELL-vetoed cases produce the distinguishable reason, the
+journal canonicalizes it correctly, and an LLM-agreeing BUY still passes the gate cleanly).
+
+**Checked against today's real data first, before writing the fix**: 2026-07-13's 84 (live) /
+91 (paper) rejections were both 100% the two plain-deterministic reasons (trend strength, RSI)
+-- none were LLM WAIT-vetoes today, so this fix has nothing retroactive to surface yet, but the
+next time a news-driven or overextension-judgment veto fires, it will now show up correctly in
+the constraint scorecard and Criteria-loosening sensitivity sections of `retrospective.py`
+instead of vanishing into the "no confluence"-adjacent noise bucket.
 
 ### 🎮 2026-07-12: scheduled-task hardening applied + game-experience CPU-priority investigation
 User ran the previously-blocked scheduled-task fix themselves from an elevated PowerShell
