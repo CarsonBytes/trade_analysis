@@ -508,8 +508,20 @@ def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
         # it too, since both cases produced the exact same one-line reason. Distinguish
         # them so (b) reaches the rejected_signals journal / retrospective scorecard.
         if llm_sig and score.signal in ("BUY", "SELL") and llm_sig.action == "WAIT":
+            # FIXED 2026-07-13: journal.rejection_counts() joins each trade's reasons with
+            # "; " and splits back on the SAME bare ";" to re-separate them for the
+            # scorecard -- an assumption that was safe for the fixed-template reasons
+            # elsewhere in this function ("trend strength X < 5", etc.) but breaks the
+            # moment free-text LLM rationale is embedded here, since the LLM's own
+            # sentences routinely contain semicolons (confirmed live: "...muted short-term
+            # returns; wait for break" got sliced into two bogus scorecard rows, one of
+            # them a meaningless truncated fragment). Strip semicolons from the embedded
+            # rationale so it can never accidentally fragment across that split boundary --
+            # the canonical gate label _canon() matches on ("llm vetoed to wait...") is
+            # unaffected either way, this only protects the free-text tail.
+            rationale = (llm_sig.rationale or "")[:100].replace(";", ",")
             return False, [f"LLM vetoed to WAIT (deterministic was {score.signal}): "
-                          f"{(llm_sig.rationale or '')[:100]}"], ""
+                          f"{rationale}"], ""
         return False, ["action is WAIT/WATCH"], ""
     direction = "long" if action == "BUY" else "short"
     if LONG_ONLY and direction == "short":

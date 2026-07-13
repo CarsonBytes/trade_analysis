@@ -5,6 +5,47 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞 FIXED 2026-07-13: constraint scorecard showed garbled LLM-rationale fragments as if
+they were gate names -- a bug in THIS SESSION's own earlier LLM-veto-tracking fix, not raw
+LLM output leaking through by design
+User asked whether entries like "wait for break" (1), "near-term overbought but trend favors
+buy" (1), "risk of mean reversion is hig" (1, visibly truncated) were really coming from the
+LLM, and pushed back on relying on free-form LLM text for scorecard categories instead of a
+standard template. Right instinct -- but the actual bug was narrower and already fixed.
+
+**Root cause, found in this session's own earlier work (`evaluate_signal()`'s LLM-veto fix,
+same day)**: that fix embeds the LLM's own rationale (truncated to 100 chars) into the stored
+reason string: `f"LLM vetoed to WAIT (deterministic was {signal}): {rationale}"`.
+`journal.rejection_counts()` joins a trade's reasons with `"; "` and splits back on a bare
+`";"` to re-separate them for the scorecard -- safe for the FIXED-TEMPLATE reasons elsewhere
+in the file ("trend strength X < 5", etc.), but the LLM's own sentences routinely contain
+semicolons, and whenever one did, the split cut ONE entry into TWO: a correctly-canonicalized
+"LLM vetoed a deterministic BUY/SELL to WAIT" row, plus a meaningless truncated fragment
+("...; wait for break" -> "wait for break" as its own bogus scorecard line, matching no gate
+prefix so `_canon()`'s fallback kept it verbatim). Confirmed directly: pulled the 6 raw stored
+`reasons` values, every single garbled fragment traced to a semicolon inside genuine LLM
+rationale text (e.g. "...muted short-term returns; wait for break").
+
+**Fix**: strip semicolons from the embedded rationale (`.replace(";", ",")`) before storing --
+the canonical gate label itself (`"LLM vetoed to WAIT (deterministic was BUY): "`) is
+unaffected, only the free-text tail is sanitized, so the content is still fully visible in the
+audit trail, just comma-joined instead of semicolon-joined. New test
+`test_llm_rationale_semicolons_are_sanitized()` (asserts the stored form survives a
+join(";")-then-split(";") round trip as exactly one part, reproducing the exact scorecard
+mechanism that broke). **Also retroactively sanitized the 6 already-corrupted rows** in
+`rejected_signals` (same replace, applied directly to the stored data, not just future
+writes) -- verified the scorecard now shows exactly 5 clean canonical gates, no fragments:
+`overextended entry (1477), trend strength below MIN_STRENGTH (1246), LLM vetoed a
+deterministic BUY/SELL to WAIT (18), cooldown after recent close (6), long-only: short side
+disabled (2)`. Full suite (10 files) re-run clean.
+
+**To be clear, since the user's underlying concern is worth confirming directly**: the
+CANONICAL scorecard categories were NEVER free-form LLM output by design -- `_GATE_PREFIXES`
+in `journal.py` is exactly the "standard reason template" being asked for, and every ROW in
+the fixed scorecard output above IS one of those fixed templates. The bug was a parsing
+accident (semicolon-splitting) that let LLM free text leak through as fake EXTRA rows
+alongside the real templated ones, not the templates themselves being abandoned.
+
 ### ⭐ 2026-07-13: CWB marked VOID -- the last loose end from the day's live-trading debugging
 User asked "is [10 pending] still legit" -- re-verified all 6 mirrored symbols fresh against
 the broker rather than reusing the earlier check: CPER/EEM/DBC/VNQ/AMLP still genuinely

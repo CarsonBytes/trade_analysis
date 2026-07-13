@@ -71,6 +71,23 @@ def test_llm_vetoes_real_sell_signal():
           reasons[0].startswith("LLM vetoed to WAIT (deterministic was SELL)"), True)
 
 
+def test_llm_rationale_semicolons_are_sanitized():
+    print("\nFIXED 2026-07-13: rationale containing ';' must not corrupt the scorecard split "
+          "(confirmed live: 'muted short-term returns; wait for break' fragmented into 2 "
+          "bogus rows because journal.rejection_counts() splits reasons on bare ';'):")
+    rationale_with_semicolon = "Uptrends across horizons but near resistance; wait for break"
+    ok, reasons, _ = evaluate_signal("SPY", _score("BUY"), _llm("WAIT", rationale_with_semicolon))
+    check("rejected", ok, False)
+    check("no semicolon survives into the stored reason", ";" in reasons[0], False)
+    check("the content is still present (comma-joined, not dropped)",
+          "wait for break" in reasons[0], True)
+    # this is exactly the scenario that broke before: joining reasons with "; " then
+    # splitting back on ";" must yield ONE part for this trade, not two
+    joined = "; ".join(reasons)
+    check("split(';') on the joined/stored form yields exactly one part (no fragmentation)",
+          len(joined.split(";")), 1)
+
+
 def test_journal_canonicalizes_the_new_reason():
     print("\njournal._canon() maps the new reason to a clean scorecard label:")
     raw = "LLM vetoed to WAIT (deterministic was BUY): Fed decision risk"
@@ -91,6 +108,7 @@ if __name__ == "__main__":
     test_llm_agrees_watch_is_plain_noise()
     test_llm_vetoes_real_buy_signal()
     test_llm_vetoes_real_sell_signal()
+    test_llm_rationale_semicolons_are_sanitized()
     test_journal_canonicalizes_the_new_reason()
     test_llm_agrees_buy_passes_the_action_gate()
     print()
