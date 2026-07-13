@@ -5,6 +5,32 @@ Last updated 2026-07-13.
 
 ---
 
+### 🐞🐞 FIXED 2026-07-13 (same-day follow-up): the _pending_reason() fix above made live
+UNRESPONSIVE -- caught immediately on redeploy, not left running broken
+Redeployed the `_pending_reason()`/`portfolio_room_usd()` fix (previous entry) and checked
+health before moving on, per this session's own established discipline -- paper (8080)
+responded fine, **live (8081) timed out on a plain HTTP GET**, and the shared log showed
+dozens of "LIVE trading ENABLED" lines within the same second.
+
+**Root cause: the fix called `current_portfolio_room_usd()` PER PENDING CARD, not once per
+render.** That function does 3 real, synchronous broker round-trips (`_equity_usd()` +
+`_gpv_usd()` + `_pending_entry_notional_usd()`, and the last one ALSO calls
+`broker_open_order_symbols()` + `broker_positions()` internally -- 5 real IB calls per card).
+With 9 pending cards on screen, that's ~45 synchronous broker round-trips on every single
+panel render, confirmed live to make the whole dashboard stop answering HTTP entirely.
+
+**Fix**: moved the `_bk.portfolio_room_usd()` call OUT of `_pending_reason()` and into
+`active_panel()`, computed exactly ONCE per render (only when there's at least one pending
+card, only when `_bk.is_ib()`), then threaded through `_trade_card(t, pos, room=room)` ->
+`_pending_reason(t, room)` as a plain parameter. Same correct labeling, ~45x fewer broker
+calls per render. Full suite (10 files) re-run clean, redeployed, confirmed both dashboards
+respond HTTP 200 before moving on.
+
+**Lesson for next time**: any new PUBLIC accessor that does real I/O (broker round-trips,
+network calls) needs a moment's thought about call-site multiplicity BEFORE wiring it into a
+per-item render loop, not just correctness -- this shipped the correctness fix and the
+performance regression in the same edit, and only the redeploy health-check caught it.
+
 ### 🐞 FIXED 2026-07-13: "9 pending trades" on live -- the PORTFOLIO_CAP fix from earlier
 today IS working correctly, but the UI couldn't tell "blocked, will never place" apart from
 "about to place normally"

@@ -1002,13 +1002,22 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
-def _pending_reason(t: dict) -> tuple[str, bool]:
+def _pending_reason(t: dict, room: float | None) -> tuple[str, bool]:
     """Why a qualifying signal isn't showing as a confirmed position yet. Returns
     (reason, order_already_placed) -- the second flag distinguishes an order that's
     ALREADY sitting at the broker (just not filled yet -- e.g. placed outside market
     hours, or a slow fill) from one that was never sent at all (e.g. account too
     small to size even 1 share). These need very different framing: "will never fill
-    on its own" is true for the latter but actively WRONG for the former."""
+    on its own" is true for the latter but actively WRONG for the former.
+
+    `room` (PORTFOLIO_CAP room left, USD): computed ONCE by the caller (active_panel()),
+    NOT per-card here. FIXED 2026-07-13: an earlier version called
+    `_bk.portfolio_room_usd()` per pending card -- 3 real broker round-trips each (equity +
+    GrossPositionValue + open-order notional), so a render with several pending cards
+    fired that many TIMES that number of synchronous IB calls, confirmed live to make the
+    whole dashboard unresponsive (port stopped answering HTTP entirely). Computing it once
+    per render and threading it through fixes both the mislabeling AND the performance
+    regression at the same time."""
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         return "not yet mirrored to the broker", False
@@ -1030,7 +1039,6 @@ def _pending_reason(t: dict) -> tuple[str, bool]:
     # through to "awaiting the next mirror cycle" -- true for a signal about to place
     # normally, actively misleading for one that will NEVER place until an existing
     # position closes or a pending order resolves.
-    room = _bk.portfolio_room_usd()
     if room is not None and room < t["entry"]:
         return (f"no PORTFOLIO_CAP room left (~${room:,.0f} available, needs ~${t['entry']:,.0f}"
                 f"/share) -- won't place until an existing position/order frees up capacity",
@@ -1038,7 +1046,7 @@ def _pending_reason(t: dict) -> tuple[str, bool]:
     return "awaiting the next mirror cycle", False
 
 
-def _trade_card(t: dict, pos: dict | None) -> None:
+def _trade_card(t: dict, pos: dict | None, room: float | None = None) -> None:
     key = t["instrument"]
     live = service.STATE.get("live", {}).get(key)
     price = live["price"] if live else t["entry"]
@@ -1077,7 +1085,7 @@ def _trade_card(t: dict, pos: dict | None) -> None:
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
         else:
-            _reason, _placed = _pending_reason(t)
+            _reason, _placed = _pending_reason(t, room)
             if _placed:
                 ui.label(f"Signal fired, {_reason}.").classes("text-xs text-grey-8")
             else:
@@ -1168,9 +1176,13 @@ def active_panel() -> None:
             "These are NOT real positions. The strategy found a qualifying setup and "
             "logged it, but couldn't size even 1 share at the configured risk (usually "
             "because the account is too small) -- so nothing was ever sent to the broker.")
+        # computed ONCE for the whole panel, not per-card (see _pending_reason()'s
+        # docstring -- per-card was 3 real broker round-trips EACH, confirmed live to
+        # make the whole dashboard unresponsive with several pending cards on screen)
+        room = _bk.portfolio_room_usd() if _bk.is_ib() else None
         with ui.row().classes("w-full flex-wrap gap-3"):
             for t in pending:
-                _trade_card(t, None)
+                _trade_card(t, None, room=room)
 
 
 @ui.refreshable
