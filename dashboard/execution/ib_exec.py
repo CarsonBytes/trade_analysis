@@ -159,6 +159,8 @@ def mirror_new() -> list[str]:
             msg = (f"DD-halt: current drawdown {cur_dd:.1f}% <= {dd_halt:.1f}% threshold -- "
                    "pausing ALL new entries this cycle (existing positions untouched)")
             log.warning("ib_exec: %s", msg)
+            from dashboard.core import notable_events
+            notable_events.record(msg, level="warning")
             return [msg]
     done = _mirrored_ids()
     logs: list[str] = []
@@ -423,8 +425,11 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
                    qty, risk_money, "",
                    dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                    "OPEN", "etf"))
-    return (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
-            f"SL {sl_px} TP {tp_px}")
+    msg = (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
+          f"SL {sl_px} TP {tp_px}")
+    from dashboard.core import notable_events
+    notable_events.record(f"New order placed: {msg}")
+    return msg
 
 
 def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
@@ -508,8 +513,11 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
                    qty, risk_money, "",
                    dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                    "OPEN", "sleeve"))
-    return (f"{t['instrument']}: SLEEVE bracket placed {action} {qty}sh "
-            f"SL {sl_px} TP {tp_px} (risk {risk_pct:.1%})")
+    msg = (f"{t['instrument']}: SLEEVE bracket placed {action} {qty}sh "
+          f"SL {sl_px} TP {tp_px} (risk {risk_pct:.1%})")
+    from dashboard.core import notable_events
+    notable_events.record(f"New SLEEVE order placed: {msg}")
+    return msg
 
 
 def manual_close_sleeve(trade: dict, reason: str) -> str | None:
@@ -618,6 +626,8 @@ def sync_closures() -> list[str]:
                 msg = (f"{local_symbol}: cancelled stale unfilled order (paper already "
                       f"resolved {pt['status']} via real price/horizon, not a broker fill)")
                 logs.append(msg); log.info("ib_exec: %s", msg)
+                from dashboard.core import notable_events
+                notable_events.record(msg, level="warning")
             continue
         # (a) position closed at broker (SL/TP filled) while paper still OPEN ->
         #     resolve the paper trade from the broker's actual exit.
@@ -673,8 +683,11 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
     exit_ts = pd.Timestamp.now(tz="UTC")
     paper._update_resolution(trade["id"], status, str(exit_ts), exit_price,
                              round(r, 3), exit_reason="closed at broker (IB)")
-    return (f"#{trade['id']} {trade['instrument']} resolved from BROKER (IB): "
-            f"{status} R={r:+.2f} exit={exit_price}")
+    msg = (f"#{trade['id']} {trade['instrument']} resolved from BROKER (IB): "
+          f"{status} R={r:+.2f} exit={exit_price}")
+    from dashboard.core import notable_events
+    notable_events.record(f"Position closed: {msg}")
+    return msg
 
 
 def _last_exit_price(ib, con_id: int) -> float | None:

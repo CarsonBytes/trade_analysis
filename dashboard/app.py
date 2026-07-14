@@ -307,6 +307,70 @@ def header_status() -> None:
 
 
 @ui.refreshable
+def health_banner() -> None:
+    """ADDED 2026-07-14: a single at-a-glance row for 'is anything actually wrong', after
+    this session found several real issues that were each individually invisible until
+    someone happened to check the right sub-panel or time a request by hand (a -89.8% fake
+    drawdown display, a response-time regression from ~2s to 5-8s, a position-mismatch false
+    alarm). None of these are NEW checks -- every value here already existed in STATE
+    somewhere; this just aggregates them into one scannable place instead of requiring a
+    tour of the whole Board to notice something's off."""
+    now = dt.datetime.now()
+
+    def _age_txt(ts) -> tuple[str, str]:
+        if ts is None:
+            return "never", "text-grey-5"
+        age_s = (now - ts).total_seconds()
+        txt = f"{age_s:.0f}s ago" if age_s < 120 else f"{age_s/60:.0f}m ago"
+        return txt, "text-grey-5"
+
+    dur = service.STATE.get("last_tick_duration_sec")
+    tick_ts = service.STATE.get("last_tick_ts")
+    tick_txt, _ = _age_txt(tick_ts)
+    # thresholds calibrated against this session's own regression: ~2-3s is the normal
+    # baseline for this app, ~5-8s is exactly what the per-card broker-call bug produced
+    dur_colour = ("text-grey-6" if dur is None else
+                  "text-green" if dur < 3 else "text-orange" if dur < 8 else "text-red")
+    dur_txt = "n/a" if dur is None else f"{dur:.1f}s"
+
+    cheap_txt, _ = _age_txt(service.STATE.get("last_cheap"))
+    llm_txt, _ = _age_txt(service.STATE.get("last_llm"))
+
+    bc = service.STATE.get("broker_conn") or {}
+    broker_ok = bc.get("ok")
+    broker_colour = "text-green" if broker_ok else "text-orange" if bc else "text-red"
+    broker_txt = bc.get("detail", "no broker") if bc else "not connected"
+
+    rec = service.STATE.get("reconcile") or {}
+    if rec.get("only_local") or rec.get("only_broker"):
+        rec_colour, rec_txt = "text-red", "mismatch found"
+    elif rec.get("skipped"):
+        rec_colour, rec_txt = "text-grey-5", "skipped (broker unavailable)"
+    elif rec:
+        rec_colour, rec_txt = "text-green", "matched"
+    else:
+        rec_colour, rec_txt = "text-grey-5", "no check yet this session"
+
+    with ui.row().classes("w-full items-center gap-4 bg-grey-1 rounded px-3 py-1"):
+        ui.label("System health").classes("text-xs uppercase text-grey-7 font-bold")
+        with ui.row().classes("items-baseline gap-1"):
+            ui.label("tick:").classes("text-xs text-grey-6")
+            ui.label(f"{tick_txt} ({dur_txt})").classes(f"text-xs {dur_colour}").tooltip(
+                "When the last tick cycle ran, and how long it took. ~2-3s is normal for "
+                "this app; several seconds slower with no other symptom is exactly what a "
+                "past regression here looked like (excess per-request broker calls).")
+        with ui.row().classes("items-baseline gap-1"):
+            ui.label("cheap/llm:").classes("text-xs text-grey-6")
+            ui.label(f"{cheap_txt} / {llm_txt}").classes("text-xs text-grey-5")
+        with ui.row().classes("items-baseline gap-1"):
+            ui.label("broker:").classes("text-xs text-grey-6")
+            ui.label(broker_txt).classes(f"text-xs {broker_colour}")
+        with ui.row().classes("items-baseline gap-1"):
+            ui.label("reconcile:").classes("text-xs text-grey-6")
+            ui.label(rec_txt).classes(f"text-xs {rec_colour}")
+
+
+@ui.refreshable
 def macro_banner() -> None:
     note = service.STATE.get("macro_note") or "Run an LLM scan for a macro read."
     with ui.card().classes("w-full bg-blue-1"):
@@ -1024,7 +1088,8 @@ def portfolio_panel() -> None:
             f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
 
 
-def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str, str]:
+def _pending_reason(t: dict, room: float | None, eq: float | None,
+                    earliest_free: str | None = None) -> tuple[str, str]:
     """Why a qualifying signal isn't showing as a confirmed position yet. Returns
     (message, status), status is one of:
       "placed"    -- a real order IS sitting at the broker, just hasn't filled yet.
@@ -1044,7 +1109,16 @@ def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str,
     `room` (PORTFOLIO_CAP room left, USD) and `eq` (equity, USD): both computed ONCE by
     the caller (active_panel()), NOT per-card here -- see the 2026-07-13 performance fix
     notes in HANDOFF.md if touching this again (per-card broker calls here once made the
-    live dashboard fully unresponsive)."""
+    live dashboard fully unresponsive).
+
+    `earliest_free` (ISO date string, 2026-07-14): the EARLIEST `horizon_end` among whatever
+    is currently occupying deployed capital (confirmed positions + already-placed pending
+    orders) -- a worst-case "by this date, SOMETHING currently deployed is guaranteed to
+    resolve one way or another" estimate, since HORIZON_CAL forces a resolution (WIN/LOSS/
+    EXPIRED) even if SL/TP never hit. Deliberately NOT a prediction of when THIS specific
+    signal will place -- freeing one position's capital may or may not be enough room for
+    this one, and SL/TP could resolve any of the occupying trades far sooner. Framed as a
+    bound, not a forecast, to avoid false precision."""
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         return "Broker isn't connected right now — this will be retried automatically once it reconnects.", "retrying"
@@ -1067,10 +1141,19 @@ def _pending_reason(t: dict, room: float | None, eq: float | None) -> tuple[str,
     # while equity was already fully committed to other pending orders) is a NORMAL, expected,
     # SELF-RESOLVING state -- not stuck, not an error, just the risk budget doing its job.
     if room is not None and room < t["entry"]:
+        eta = ""
+        if earliest_free:
+            try:
+                d = dt.datetime.fromisoformat(earliest_free).date()
+                eta = (f" At the latest, something currently deployed resolves by {d} "
+                       f"(its {paper.HORIZON_CAL}-day horizon) -- could easily be sooner via "
+                       f"a stop/target hit, this is just the guaranteed outer bound.")
+            except ValueError:
+                pass
         return (f"Nothing wrong here — the strategy's risk budget is fully committed right "
                 f"now (~${room:,.0f} of room left, this one needs ~${t['entry']:,.0f}/share), "
                 f"so it's being held back on purpose. It'll place automatically the moment an "
-                f"existing position closes or a pending order fills.", "retrying")
+                f"existing position closes or a pending order fills.{eta}", "retrying")
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 
@@ -1092,13 +1175,23 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
     else:                                          # PENDING: unmistakably different look
         col = "bg-grey-2"
         card_extra = " border-dashed border-2 border-grey-5 opacity-80"
+    # ADDED 2026-07-14: surface macro_linkage as a badge on the card itself, not only in the
+    # Details dialog -- the whole point of forcing this field (see board_scan.py) was to make
+    # cross-asset macro risk visible, which a buried dialog undermines. Only shown when there's
+    # something to say (skips the common "none material" case to avoid clutter).
+    _mlink = (t.get("macro_linkage") or "").strip()
+    _has_macro_flag = _mlink and _mlink.lower() not in ("none material", "none", "n/a", "")
     with ui.card().classes(f"min-w-[210px] grow {col}{card_extra}"):
         with ui.row().classes("items-center justify-between w-full"):
             with ui.row().classes("items-baseline gap-1"):
                 ui.label(active_by_key(key).name).classes("font-bold")
                 ui.label(key).classes("text-xs text-grey-6 font-mono")
-            ui.badge(t["direction"],
-                     color="positive" if t["direction"] == "long" else "negative")
+            with ui.row().classes("items-center gap-1"):
+                if _has_macro_flag:
+                    ui.badge("🌐 macro", color="purple").classes("text-xs")\
+                        .tooltip(_mlink)
+                ui.badge(t["direction"],
+                         color="positive" if t["direction"] == "long" else "negative")
         if not pos:
             ui.badge("⏳ PENDING", color="grey-7").classes("text-xs")
         ui.label(f"{price:,.4f}").classes("text-base")
@@ -1113,6 +1206,18 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
             ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
+            # ADDED 2026-07-14: after this session's CWB/ASHR confusion (local records
+            # showing a status the broker no longer agreed with), show WHEN this position
+            # was last actually cross-checked against the broker, not just trust the display
+            # is current. Reuses service.STATE["last_cheap"] -- broker.live_positions() (the
+            # call that populates `pos` here) runs as part of the same refresh_cheap() cycle
+            # that sets this timestamp, so it's already exactly "how fresh is this position
+            # data," no new tracking needed.
+            _last_cheap = service.STATE.get("last_cheap")
+            if _last_cheap:
+                _age_min = (dt.datetime.now() - _last_cheap).total_seconds() / 60
+                _age_txt = f"{_age_min:.0f}m ago" if _age_min >= 1 else "just now"
+                ui.label(f"verified vs broker: {_age_txt}").classes("text-xs text-grey-5")
         else:
             # (reason, status) now computed ONCE per pending trade by active_panel() --
             # see its 2026-07-13 grouping note -- and passed straight through here, not
@@ -1218,9 +1323,20 @@ def active_panel() -> None:
         # on screen), and (reason, status) computed once per trade here, not inside
         # _trade_card() -- passed straight through as plain values.
         room = _bk.portfolio_room_usd() if _bk.is_ib() else None
+        # ADDED 2026-07-14: worst-case bound on when SOMETHING currently deployed resolves
+        # (see _pending_reason()'s earliest_free docstring) -- computed from confirmed
+        # positions + already-placed pending orders, ONCE, before the grouping loop (which
+        # is what determines "placed" status per trade, but this needs that answer for ALL
+        # pending trades up front, hence the separate executed_ids() pass here -- a local DB
+        # read, not a broker round-trip, so this doesn't reintroduce the 2026-07-13
+        # per-card-broker-call problem).
+        executed_ids = _bk.executed_ids() if _bk.is_ib() else set()
+        _occupying = confirmed + [t for t in pending if t["id"] in executed_ids]
+        _horizons = [t["horizon_end"] for t in _occupying if t.get("horizon_end")]
+        earliest_free = min(_horizons) if _horizons else None   # ISO strings sort chronologically
         groups: dict[str, list[tuple[dict, str]]] = {"placed": [], "retrying": [], "stuck": []}
         for t in pending:
-            msg, status = _pending_reason(t, room, eq)
+            msg, status = _pending_reason(t, room, eq, earliest_free)
             groups[status].append((t, msg))
         _PENDING_SECTIONS = {
             "placed": ("Waiting to fill", "text-grey-7",
@@ -1254,7 +1370,7 @@ def retrospective_panel() -> None:
     """Live equity curve + constraint scorecard for the forward test."""
     from dashboard.core import paper
     from dashboard.core import journal
-    from dashboard.web.retrospective import equity_curve, _demo_executed_ids
+    from dashboard.web.retrospective import equity_curve, _demo_executed_ids, confidence_calibration
 
     trades = paper.all_trades()
     # broker truth: KPIs/equity from trades the demo ACTUALLY executed (have an
@@ -1309,6 +1425,48 @@ def retrospective_panel() -> None:
         ui.label("No closed trades yet — the equity curve appears as trades settle.")\
             .classes("text-sm text-grey")
 
+    # ADDED 2026-07-14: confidence calibration -- retrospective.confidence_calibration()
+    # already existed (used by the text-export report) but was never surfaced live, so the
+    # question "is the LLM's confidence actually predictive?" required generating a report.
+    # A bar chart of realized expectancy per confidence band answers it at a glance: if
+    # higher bands don't show higher expectancy, the confidence gate is noise, not signal.
+    with ui.row().classes("items-center gap-2 mt-4"):
+        ui.label("LLM confidence calibration").classes("text-sm font-bold")
+        ui.label("realized expectancy (R) by the LLM's OWN confidence band, over broker-"
+                 "executed trades -- higher bands should show higher expectancy if "
+                 "confidence is actually predictive, not just a number").classes(
+            "text-xs text-grey-6")
+    cal = confidence_calibration(closed)
+    if cal:
+        # NOTE: no custom JS tooltip formatter -- ui.echart() JSON-serializes the whole
+        # options dict (confirmed: no precedent for a JS-function-string formatter anywhere
+        # else in this file), so a formatter string here would arrive as an inert STRING,
+        # not an executable function. Same fix as the portfolio pie chart elsewhere in this
+        # file: bake the extra info (win rate, n) directly into the x-axis label text
+        # instead of relying on a callback.
+        _labels = [f"{c['band']}\nwin {c['win']:.0%}  n={c['n']}" for c in cal]
+        ui.echart({
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": _labels, "name": "LLM confidence",
+                      "axisLabel": {"fontSize": 10}},
+            "yAxis": {"type": "value", "name": "expectancy (R)"},
+            "series": [{"type": "bar",
+                        # per-bar colour is a plain JSON itemStyle property, not a JS
+                        # callback -- safe, unlike the removed tooltip formatter above
+                        "data": [{"value": round(c["expR"], 3),
+                                  "itemStyle": {"color": "#16a34a" if c["expR"] > 0
+                                               else "#dc2626"}}
+                                 for c in cal]}],
+            "grid": {"left": 55, "right": 20, "top": 20, "bottom": 55},
+        }).classes("w-full h-56").tooltip(
+            "Each bar = one confidence band's realized expectancy over broker-executed "
+            "trades. A useful confidence signal should show bars rising left-to-right -- "
+            "flat or inverted bars mean the LLM's confidence number isn't actually earning "
+            "its place as a filter.")
+    else:
+        ui.label("No closed, broker-executed trades with confidence data yet.")\
+            .classes("text-sm text-grey")
+
     # monthly attribution: where did the P&L actually come from
     with ui.row().classes("items-center gap-2 mt-4"):
         ui.label("Monthly attribution (USD)").classes("text-sm font-bold")
@@ -1354,6 +1512,32 @@ def retrospective_panel() -> None:
                  "every blocked BUY/SELL is tallied here by gate.")\
             .classes("text-sm text-grey")
 
+    # ADDED 2026-07-14: recent notable events (new orders, closes, DD-halts, reconcile
+    # mismatches, orphaned-order cancellations) -- previously this history only existed in
+    # the raw log file or HANDOFF.md, both external to the dashboard itself. Same source
+    # (core/notable_events.py) that also feeds the Telegram alerts, so this view and any
+    # alert you got should always agree.
+    with ui.row().classes("items-center gap-2 mt-4"):
+        ui.label("Recent notable events").classes("text-sm font-bold")
+        ui.label("new orders, closes, DD-halts, reconcile mismatches -- the same events "
+                 "that trigger a Telegram alert if configured").classes("text-xs text-grey-6")
+    from dashboard.core import notable_events
+    events = notable_events.recent(limit=20)
+    if events:
+        rows = [{"ts": e["ts"][:19].replace("T", " "), "level": e["level"],
+                 "message": e["message"]} for e in events]
+        ui.table(rows=rows,
+                 columns=[{"name": "ts", "label": "when (UTC)", "field": "ts",
+                           "align": "left"},
+                          {"name": "level", "label": "level", "field": "level",
+                           "align": "left"},
+                          {"name": "message", "label": "event", "field": "message",
+                           "align": "left"}])\
+            .classes("w-full").props("dense")
+    else:
+        ui.label("No notable events recorded yet this instance.")\
+            .classes("text-sm text-grey")
+
 
 # connection_panel removed -- access points are switched manually; the header
 # already shows the live access point + ping. (See git history / link_monitor
@@ -1361,8 +1545,8 @@ def retrospective_panel() -> None:
 
 
 def _refresh_all_panels() -> None:
-    header_status.refresh(); macro_banner.refresh(); opportunities.refresh()
-    grid.refresh(); paper_panel.refresh(); active_panel.refresh()
+    header_status.refresh(); health_banner.refresh(); macro_banner.refresh()
+    opportunities.refresh(); grid.refresh(); paper_panel.refresh(); active_panel.refresh()
     gate_panel.refresh(); retrospective_panel.refresh(); portfolio_panel.refresh()
 
 
@@ -1398,6 +1582,13 @@ async def _tick() -> None:
     if _busy["flag"]:
         return
     _busy["flag"] = True
+    # ADDED 2026-07-14: wall-clock duration of the WHOLE cycle (not just cheap/llm when they
+    # actually run), stored for the new system-health banner -- the closest measurable proxy
+    # this server-side process has for "is something making the system sluggish," after this
+    # session found a real regression (a fix that added per-card broker round-trips) that
+    # made response times jump from ~2s to 5-8s with no visible error, only caught because a
+    # human happened to time a curl request. This surfaces that signal continuously instead.
+    _t0 = dt.datetime.now()
     try:
         async def _do_tick_work():
             now = dt.datetime.now()
@@ -1416,6 +1607,8 @@ async def _tick() -> None:
                  "actually stuck -- it may still be running in the background)",
                  _TICK_TIMEOUT_SEC)
     finally:
+        service.STATE["last_tick_duration_sec"] = (dt.datetime.now() - _t0).total_seconds()
+        service.STATE["last_tick_ts"] = dt.datetime.now()
         _busy["flag"] = False
 
 
@@ -1861,6 +2054,7 @@ def main_page() -> None:
                          "relaunches it (~30-60s + 2FA if prompted)")
 
         header_status()
+        health_banner()
 
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")

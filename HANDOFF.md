@@ -5,6 +5,66 @@ Last updated 2026-07-14.
 
 ---
 
+### ⭐ 2026-07-14: 7 UI/UX + feature improvements built, all grounded in real friction from
+this project's own history, not generic suggestions
+User asked for UI/UX and feature suggestions, then asked to build all of them. All 7 trace
+directly to a real incident or gap found earlier this session -- not invented ideas.
+
+1. **`macro_linkage` badge on trade cards** (`app.py`). The field added earlier today was
+   only visible in the buried Details dialog -- now shows a `🌐 macro` badge directly on the
+   card (tooltip = the actual linkage text) whenever it's not "none material".
+
+2. **Estimated room-free-up time for cap-blocked signals** (`app.py`,
+   `_pending_reason()`/`active_panel()`). For a signal held back by `PORTFOLIO_CAP`, shows
+   the earliest `horizon_end` among whatever's currently deployed (confirmed positions +
+   already-placed pending orders) as an explicit WORST-CASE bound ("at the latest, by
+   [date]... could easily be sooner via a stop/target hit") -- deliberately not framed as a
+   prediction, to avoid false precision.
+
+3. **"Verified vs broker: Xm ago" on confirmed positions** (`app.py`). Reuses
+   `service.STATE["last_cheap"]` (already set by the SAME `refresh_cheap()` cycle that
+   populates the position data shown) -- no new tracking needed, just surfaced. Direct
+   response to this session's CWB/ASHR confusion (a local record showing a status the broker
+   no longer agreed with, undetected until manually checked).
+
+4. **LLM confidence calibration chart, live** (`app.py`, reuses
+   `retrospective.confidence_calibration()`). Previously only in the text-export report --
+   now a bar chart in the Retrospective tab. **Caught and fixed a real bug while building
+   this**: a JS-function-string tooltip formatter would have silently failed, since
+   `ui.echart()` JSON-serializes the whole options dict (confirmed: no precedent anywhere
+   else in this file for a JS-callback formatter) -- a function-as-string arrives inert, not
+   executable. Fixed the same way the existing portfolio pie chart already does it: bake the
+   extra info (win rate, n) into the axis label text instead of a callback.
+
+5. **System health banner** (`app.py`, new `health_banner()`). One row, always visible:
+   last tick time + duration, cheap/LLM refresh age, broker connection, reconcile status.
+   The tick-duration metric is new instrumentation (`_tick()` now times itself,
+   `STATE["last_tick_duration_sec"]`) -- thresholds (green <3s / orange <8s / red else)
+   calibrated directly against this session's OWN response-time regression (~2-3s normal,
+   ~5-8s was the actual bug).
+
+6. **Recent notable events feed** (`app.py`, Retrospective tab) + 7. **Telegram alerting**
+   (`core/notify.py`) -- built together since they need to fire from the SAME event-detection
+   points to avoid drifting out of sync. New `core/notable_events.py` is the single hook:
+   `record(message, level)` writes to a local `changelog` table (per-instance, same pattern
+   as every other table) AND calls `notify.send()` (Telegram Bot API, reads
+   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` from env, no-ops silently if unset, 5-minute
+   de-dup cooldown on identical messages, never raises). Wired into 5 real event points:
+   DD-halt trigger, reconcile mismatch, the 2026-07-13 orphaned-order cancellation fix, new
+   core/sleeve order placement, and a real broker-truth position close.
+   **Telegram alerts need YOUR setup to actually send** -- message @BotFather to create a
+   bot, get the token, message your bot once, then check
+   `https://api.telegram.org/bot<token>/getUpdates` for your chat_id; put both in
+   `analyst/.env` as `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`. Until then this silently no-ops
+   (confirmed via test, not just claimed) -- nothing breaks, it just doesn't send anything.
+
+**New tests**: `test_notify.py` (10 checks: config detection, no-op when unconfigured,
+send+cooldown de-dup, non-200 handled gracefully, request exception handled gracefully) and
+`test_notable_events.py` (12 checks: isolated-db record/recent round trip, limit respected,
+forwards to notify.send() correctly, a notify failure never propagates). Full suite now 12
+files, all clean. `app.py` changes verified by compile-check + redeploy + response-time +
+visual check (can't unit-test directly, module-level `ui.run()` blocks import).
+
 ### ⭐ 2026-07-14: quant.carsonng.com (PAPER) made public (Cloudflare Access removed) --
 added local access logging as the compensating control
 User is removing Cloudflare Access's login/OTP gate on `quant.carsonng.com` (the PAPER

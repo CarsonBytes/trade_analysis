@@ -80,9 +80,12 @@ def reconcile_with_broker() -> dict:
     broker_pending = ib_client.broker_open_order_symbols()
     result = compare_positions(broker_pos, local_open, broker_pending)
     if result["only_local"] or result["only_broker"]:
-        log.warning("reconcile: broker/local position MISMATCH on login -- "
-                    "only_local(ghost)=%s only_broker(untracked)=%s",
-                    result["only_local"], result["only_broker"])
+        msg = (f"reconcile: broker/local position MISMATCH -- "
+              f"only_local(ghost)={result['only_local']} "
+              f"only_broker(untracked)={result['only_broker']}")
+        log.warning(msg)
+        from dashboard.core import notable_events
+        notable_events.record(msg, level="warning")
     else:
         log.info("reconcile: broker/local positions match (%d open)", len(local_open))
     return result
