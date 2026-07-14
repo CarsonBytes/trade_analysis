@@ -1456,6 +1456,29 @@ async def _tick_loop() -> None:
 app.on_startup(lambda: asyncio.create_task(_tick_loop()))
 
 
+@app.middleware("http")
+async def _log_access(request, call_next):
+    """ADDED 2026-07-14: logs every HTTP request (client IP, method, path, status,
+    user-agent) to logs/access.log -- added when quant.carsonng.com's Cloudflare Access
+    login gate was removed to make it public. This is the compensating visibility control,
+    since without Access there's no built-in per-request identity log anymore, and this
+    runs entirely locally rather than depending on a paid Cloudflare Logpush plan.
+
+    IP resolution: behind a Cloudflare Tunnel, the real visitor IP arrives in the
+    `CF-Connecting-IP` header (Cloudflare sets this on every proxied request, tunnel or
+    not) -- the raw ASGI connection IP would just be cloudflared's own local process.
+    Falls back to X-Forwarded-For (first hop) then the raw connection as a last resort
+    for direct (non-Cloudflare) access, e.g. localhost during development."""
+    from dashboard.core.log import access_log
+    ip = (request.headers.get("cf-connecting-ip")
+          or (request.headers.get("x-forwarded-for", "").split(",")[0].strip() or None)
+          or (request.client.host if request.client else "?"))
+    response = await call_next(request)
+    access_log.info("%s %s %s -> %s (UA: %s)", ip, request.method, request.url.path,
+                    response.status_code, request.headers.get("user-agent", "?"))
+    return response
+
+
 async def _manual_refresh() -> None:
     if _busy["flag"]:
         ui.notify("Refresh already running…"); return

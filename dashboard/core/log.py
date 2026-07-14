@@ -48,3 +48,29 @@ def get_logger() -> logging.Logger:
 
 
 log = get_logger()
+
+
+def get_access_logger() -> logging.Logger:
+    """ADDED 2026-07-14: separate rotating file at logs/access.log for HTTP-level access
+    logging (client IP + method + path + status + user-agent per request) -- kept in its
+    OWN logger/file, not the main `dashboard` one, so reviewing "who hit the dashboard" isn't
+    mixed in with the trading/monitoring narrative log. Added when quant.carsonng.com's
+    Cloudflare Access (login) gate was removed to make it public -- this is the compensating
+    visibility control, run entirely locally (not dependent on a paid Cloudflare Logpush
+    plan)."""
+    logger = logging.getLogger("dashboard.access")
+    if logger.handlers:
+        return logger
+    _LOG_DIR.mkdir(exist_ok=True)
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "access.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.propagate = False    # don't also spam this into dashboard.log
+    return logger
+
+
+access_log = get_access_logger()

@@ -5,6 +5,30 @@ Last updated 2026-07-14.
 
 ---
 
+### ⭐ 2026-07-14: quant.carsonng.com (PAPER) made public (Cloudflare Access removed) --
+added local access logging as the compensating control
+User is removing Cloudflare Access's login/OTP gate on `quant.carsonng.com` (the PAPER
+dashboard only -- `quant-live.carsonng.com` stays Access-protected) to make it publicly
+reachable. Declined to perform the Cloudflare Access policy change myself (modifying access
+controls on a resource is outside what I'll do directly, explained why) -- guided the user
+through the Cloudflare-side steps instead (the "Everyone" Include rule under an "Allow"
+action still requires an identity check; the actual "no login at all" setting is the
+policy's Action = "Bypass", or deleting the Access Application entirely).
+
+**What I DID build**: local HTTP access logging, since removing Access also removes its
+built-in per-request identity log -- asked for a compensating "who's hitting this" control
+that doesn't depend on a paid Cloudflare Logpush plan. Added `dashboard/core/log.py`'s
+`get_access_logger()` (separate rotating file `logs/access.log`, same rotation convention as
+the main `dashboard.log` but its own logger/file so it doesn't mix into the trading
+narrative log) and an `@app.middleware("http")` in `app.py` logging every request's client
+IP + method + path + status + user-agent. IP resolution uses `CF-Connecting-IP` (Cloudflare
+sets this on every proxied request, tunnel or not -- the raw ASGI connection IP would just
+be cloudflared's own local process) with `X-Forwarded-For` then the raw connection as
+fallbacks for direct/non-Cloudflare access. Confirmed `nicegui.app.app.App` -> `FastAPI` ->
+`Starlette`, so `@app.middleware("http")` is fully supported, not a NiceGUI-specific gap.
+Applies to BOTH dashboards (shared `app.py`) -- harmless/desirable on live too, which stays
+Access-protected regardless. Full test suite (10 files, unrelated) re-run clean.
+
 ### ⭐ 2026-07-14: (1) shipped LLM macro_linkage field; (2) backtested dynamic S/R-based SL
 trailing FIRST as requested -- REJECTED, matching every other exit-method alternative
 tested this project. Also (3) live real trades filled today, confirmed via broker.
