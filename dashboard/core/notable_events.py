@@ -15,11 +15,22 @@ import sqlite3
 from dashboard.core.log import log
 
 
+_table_ready: set[str] = set()   # DB paths already confirmed to have the table -- avoids
+                                 # re-running CREATE TABLE IF NOT EXISTS on every single
+                                 # call (found 2026-07-14: recent() runs on every dashboard
+                                 # render via retrospective_panel(), so a schema-touching
+                                 # statement on every read is real, avoidable overhead in a
+                                 # hot path, not just a style nit)
+
+
 def _conn() -> sqlite3.Connection:
     from dashboard.core import paper
-    c = sqlite3.connect(paper._DB, check_same_thread=False)
-    c.execute("""CREATE TABLE IF NOT EXISTS changelog (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT)""")
+    db_path = str(paper._DB)
+    c = sqlite3.connect(db_path, check_same_thread=False)
+    if db_path not in _table_ready:
+        c.execute("""CREATE TABLE IF NOT EXISTS changelog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT)""")
+        _table_ready.add(db_path)
     return c
 
 

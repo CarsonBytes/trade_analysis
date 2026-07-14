@@ -95,6 +95,35 @@ MAX_INSTRUMENTS = 40
 MAX_NEWS = 10
 
 
+# FIXED 2026-07-14: found live (both instances share one OpenAI-compatible API key/quota)
+# hammering a THIRD-PARTY free-tier daily limit (chatanywhere.tech, 200 req/day, resets at
+# the provider's local midnight) every single tick cycle once exhausted -- 876 identical
+# `openai.RateLimitError` failures logged in under a few hours, each one a real, slow
+# network round-trip that failed anyway. `store.can_call(cap=cap)`'s own internal counter
+# didn't prevent this: it's tracked PER-INSTANCE (paper/live each keep their own count), but
+# the real quota is shared account-wide across BOTH, so each instance's own counter can sit
+# well under its configured cap while the SHARED provider-side quota is already exhausted --
+# the internal budget guard and the real external limit can disagree. Confirmed this was
+# real, ongoing degradation (checked timestamps: every ~15-30s, matching the tick cadence)
+# during a routine response-time check for an unrelated change, not something invented.
+_RATE_LIMIT_BACKOFF_KEY = "llm_rate_limited_until"
+
+
+def _rate_limited_until() -> str | None:
+    cached, _ = store.cache_get(_RATE_LIMIT_BACKOFF_KEY)
+    return cached
+
+
+def _set_rate_limit_backoff() -> None:
+    """Back off until the next local midnight -- matches this provider's own stated reset
+    schedule ("请00:00后再试" / "please try again after 00:00"). A different provider's
+    actual reset time may differ; this is a reasonable default, not a guarantee."""
+    import datetime as _dt
+    tomorrow = _dt.date.today() + _dt.timedelta(days=1)
+    until = _dt.datetime.combine(tomorrow, _dt.time.min).isoformat()
+    store.cache_set(_RATE_LIMIT_BACKOFF_KEY, until)
+
+
 def run_board_scan(scores: list[Score], headlines: list[str],
                    cap: int = 200) -> tuple[BoardScan | None, str]:
     """Returns (BoardScan|None, status). status explains why None if applicable.
@@ -102,6 +131,15 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     LLM -- it deep-dives the most actionable, not the whole board."""
     if not store.can_call(cap=cap):
         return None, f"budget guard: {store.calls_today()}/{cap} calls used today"
+
+    import datetime as _dt
+    backoff = _rate_limited_until()
+    if backoff:
+        try:
+            if _dt.datetime.now() < _dt.datetime.fromisoformat(backoff):
+                return None, f"rate-limited by provider -- backing off until {backoff[:16]}"
+        except ValueError:
+            pass    # malformed cached value -- ignore and attempt normally
 
     top = scores[:MAX_INSTRUMENTS]
     news = headlines[:MAX_NEWS]
@@ -112,9 +150,15 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         "Return a signal for EVERY instrument above, plus a macro_note."
     )
     llm = make_llm().with_structured_output(BoardScan)
-    result = llm.invoke([
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": human},
-    ])
+    try:
+        result = llm.invoke([
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": human},
+        ])
+    except Exception as e:                      # noqa: BLE001
+        if "429" in str(e) or "RateLimitError" in type(e).__name__:
+            _set_rate_limit_backoff()
+            return None, f"rate-limited by provider -- backing off until next reset ({e})"
+        raise    # anything else is a real, unexpected failure -- don't swallow it
     store.record_call(1)
     return result, "ok"
