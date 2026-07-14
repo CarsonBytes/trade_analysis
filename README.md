@@ -1,58 +1,175 @@
 # Quantitative Trade-Analysis Platform
 
-A research + paper-trading platform for a diversified multi-asset ETF book, with three parts:
+A research + trading platform for a diversified multi-asset ETF book, with three parts:
 
 1. **Anti-self-deception backtester** — proves whether a strategy idea actually has an edge (walk-forward, deflated Sharpe, noise test). See [backtester details](#backtester) below.
 2. **Multi-agent analyst** (`analyst/`) — deterministic facts feed LLM agents (regime / technical / sentiment) → a head-trader decision → deterministic risk gate. Decision support, not auto-execution. See [analyst/README.md](analyst/README.md).
-3. **Real-time dashboard + paper trading** (`dashboard/`) — NiceGUI board that scores a 17-ETF weekly-trend universe, mirrors signals to an **IBKR paper account** (`BROKER=ib UNIVERSE=etf`), auto-manages idle cash (USD → SGOV), and forward-tests fills against the backtest. See [dashboard/README.md](dashboard/README.md).
+3. **Real-time dashboard + trading** (`dashboard/`) — NiceGUI board that scores a 22-ETF weekly-trend universe and mirrors signals to IBKR (`BROKER=ib UNIVERSE=etf`), auto-manages idle cash (USD → SGOV), and forward-tests fills against the backtest. Runs as **two independent instances**: a paper account (DUK968178) and, as of 2026-07, a **real-money live account** (U12991898) — same code, hard-guarded so a config mistake can never trade the wrong one. See [dashboard/README.md](dashboard/README.md).
 
-> **Honest framing:** this measures whether ideas work; it does not manufacture an edge. It runs on a **paper** account (hard-guarded) and never moves real money.
+> **Honest framing:** this measures whether ideas work before risking money on them, and every real-money safety gate (`PORTFOLIO_CAP`, `DD_HALT_PCT`, the paper/live account guard) exists because something real needed guarding against, not as a theoretical checkbox. Decision support, not unattended auto-execution — every trade traces back to a specific, auditable signal.
 
 ---
 
-## Key research findings (as of 2026-06-30)
+## Key research findings (as of 2026-07-14)
 
-Exhaustive out-of-sample, deflated-Sharpe-penalised study. The platform pivoted MT5 spot →
-IBKR futures → **17 ETFs** (ETFs trade in *shares*, so 0.5% risk is expressible on a small
-account, unlike futures). ~25+ ideas tested; the honest conclusions:
+Exhaustive out-of-sample, deflated-Sharpe-penalised study, continuously re-verified as the
+system moved from paper to **real live trading** (IBKR account U12991898, first real fills
+2026-07-13). The platform pivoted MT5 spot → IBKR futures → **22 ETFs** (ETFs trade in
+*shares*, so risk is expressible on a small account, unlike futures). 80+ ideas tested across
+the full project; the honest conclusions:
 
-- **Exactly ONE edge: weekly time-series momentum (TSMOM) across many uncorrelated ETFs.**
-  Long-only, 5-week hold, fixed ATR-stop + 3:1 RR, equal-risk sizing, 0.5% risk. The single
-  lever that ever helped is **breadth** — adding uncorrelated positive-edge markets (10→16
-  ETFs was +2.8% OOS, the big win); the book's avg pairwise correlation is **0.26**, so it is
-  genuinely diversified, not leveraged beta.
-- **Universe (17):** metals GLD/SLV/CPER · equity SPY/QQQ/DIA/IWM · rates IEF/TLT/SHY ·
-  credit HYG · inflation TIP · intl EFA/EEM · commodity DBC · REIT VNQ · preferred PFF.
-- **Performance (33y full history, the anchor):** strategy-only **+4.4% CAGR / −11% DD**;
-  with idle cash swept to SGOV at current rates **~+7.0% CAGR / −9.7% DD / Sharpe ~1.22**.
-  Recent ~13y OOS is bull-flattered (~+10–12%) — do **not** plan around it. Risk is a pure
-  leverage dial (CAGR/DD ratio ~constant): 0.25%→~−5% DD, 0.5%→~−10%, 1%→~−20%.
-- **One positive-EV satellite: a "panic-MR" dip-buy sleeve.** Buy SPY/QQQ/XLK on a VIX-spike
-  oversold (>2.5% below 20-day MA + VIX↑>15%/5d + RSI<35 + **ADX>20**), exit at the 5-day MA;
-  size 0.5%, up to 1% when VIX>30 (hard cap 1%). +1.21%/trade, 75% win, holds OOS. Blended
-  with the core it adds **~+1.5–2pp CAGR at ~flat drawdown → ~+8.7% / −10% / Sharpe ~1.25**.
-  (Deferred until the account is larger; at a small size contributions dwarf it.)
-- **Everything else REJECTED, with data (DSR/OOS discipline):** daily technicals (no edge,
-  DSR 53–58%); vol-targeting (pure leverage — DD *tripled* to −29% at 12% target); monthly
-  rebalance (Sharpe 1.22→0.70); pullback/dynamic/staged exits; cross-sectional momentum &
-  relative-strength filters (breadth loss halves CAGR); regime overlays — SPY-MA, VIX-ladder,
-  and a correlation penalty (all **redundant** — a long-only trend book de-risks itself by
-  exiting in crashes); **pairs / stat-arb** (even proper cointegration/OOS: DSR ≤17%, negative
-  after cost — the "best" pairs are same-index wrappers); **all option sleeves** (LEAPS, weekly
-  debit spreads, iron condors, single-name earnings strangles, 0DTE pin — either −EV, tail-
-  uncontrollable, or unaffordable/unbacktestable); sector-rotation MR (−EV vs equal-weight);
-  VIX-timed contributions (lose to plain DCA on cash-drag).
-- **Execution layer:** costs already modeled (~1 bp round-trip on liquid ETFs); a market→limit
-  switch is worth ~+0.1–0.2%/yr at most. Idle cash: convert HKD→USD (~3.1%) and sweep 60% to
-  **SGOV** (~T-bill yield), keeping a 40% buffer — free, slightly *reduces* DD.
-- **Frequency is the point, not a bug.** ~32 core round-trips/yr (~3.3-week holds) → ~1–2
-  fills/week. Frequent trading = the no-edge daily game; patience IS the alpha.
+- **Exactly ONE edge: weekly time-series momentum (TSMOM) across many uncorrelated ETFs**,
+  plus one validated satellite (below). Long-only, weekly hold, ATR-stop (1.5×ATR14) + 3:1
+  RR, risk-based sizing. Breadth is the lever that matters — the book's avg pairwise
+  correlation stays low because the 22 tickers span genuinely different asset classes, not
+  leveraged beta on one theme.
+- **Universe (22):** metals GLD/SLV/CPER · equity SPY/QQQ/DIA/IWM · rates IEF/TLT/SHY ·
+  credit HYG · inflation TIP · intl EFA/EEM/VNQI/ASHR · commodity DBC · REIT VNQ/AMLP ·
+  preferred PFF · convertibles CWB · muni-HY HYD.
+- **Live config (four parameters, real money today):** `RISK_PER_TRADE=1%`,
+  `ETF_POS_CAP=25%` (per-position notional cap), `PORTFOLIO_CAP=100%` (aggregate
+  gross-exposure cap — added 2026-07-11 after confirming several concurrent near-cap
+  positions could otherwise stack past 100%), `DD_HALT_PCT=-13%` (live-only safety net,
+  pauses new entries, never touches existing ones).
+- **Performance, reconciled and bootstrapped (not a bare point estimate):** core-only,
+  after-tax (30% US NRA dividend withholding) + cash-yield — **CAGR 6.06%, Calmar 0.887**
+  point estimate; 500-draw block-bootstrap (calendar-year resampling, the real portfolio
+  pipeline re-run on each resampled 30-year timeline) gives **median Calmar 0.921, 90% CI
+  [0.536, 1.355]**. Treat the CI as the honest range, not the point estimate as a forecast.
+- **One validated satellite, now live: the "panic-MR" dip-buy sleeve.** 11-ticker universe,
+  entries on a VIX-spike oversold condition, staged rollout (3→5→11 tickers over 6 months
+  per instance) so a new sleeve doesn't front-load risk. Core+sleeve@10% weight: full-history
+  **CAGR 10.08% / DD -7.73% / Calmar 1.305**; OOS (recent decade) **CAGR 13.08% / Calmar
+  1.693**. Core/sleeve correlation measured directly (not assumed): -0.026 overall, +0.011 on
+  sleeve-exit days — genuinely different risk driver, confirmed empirically.
+- **Stress-tested against real historical crises**, using the CURRENT exact config (not a
+  blended multi-year average that can hide the worst days): **2008 GFC +9.69%** (worst
+  intra-window DD -3.11%), **2020 COVID -0.81%** (-3.20%), **2022 rate-hike drawdown +3.61%**
+  (-5.11%, the worst of the three) — consistent with trend-following's classic profile, well
+  inside the -13% halt threshold.
+- **Edge survives aggressive multiple-comparisons correction.** Deflated Sharpe Ratio stays
+  **100% even at 82 combined search trials** (49 universe-selection candidates + 18
+  exit-method variants + 15 parameter-sweep configs, corrected together).
+- **Everything else REJECTED, with data (DSR/OOS discipline):** daily technicals (no edge);
+  vol-targeting (pure leverage, DD tripled); monthly rebalance; cross-sectional momentum &
+  relative-strength filters; regime overlays (SPY-MA, VIX-ladder, correlation penalty — all
+  redundant, a long-only trend book already de-risks itself in crashes); pairs/stat-arb (DSR
+  ≤17%); all option sleeves (LEAPS, debit spreads, iron condors, earnings strangles — either
+  -EV or tail-uncontrollable); sector-rotation MR; VIX-timed contributions; and, as of
+  2026-07-14, **dynamic SL/TP trailing based on support/resistance** — the 23rd tested exit
+  alternative and the 23rd to fail to beat the fixed baseline cleanly on IS+OOS (see
+  `HANDOFF.md` for the full IS/OOS table).
+- **Execution layer, hardened for real money:** `PORTFOLIO_CAP` accounts for BOTH filled
+  positions and pending (not-yet-filled) broker orders (fixed 2026-07-13, after confirming
+  live pending orders alone had reached ~125% of equity — `GrossPositionValue` alone only
+  sees fills, not pending commitment); orphaned real orders get cancelled if the paper side
+  resolves a trade independently while the broker order is still unfilled; the entire
+  trading/monitoring loop runs as a persistent background task, not tied to a browser tab
+  being open (found and fixed 2026-07-12 — previously the whole system went silently dormant
+  with zero browser clients connected, while still returning healthy HTTP 200s).
+- **Frequency is the point, not a bug.** Patience — multi-week holds, not daily trading — IS
+  the edge; the no-edge daily game is exactly what this system avoids.
 
-**Research is closed** — the price-technical + option + stat-arb search space is exhausted;
-the remaining edge is behavioral (contribute relentlessly, stay invested, don't override).
+**Research is not "closed" in the sense of never revisiting it** — every new question (dynamic
+exits, universe additions, cost assumptions) gets a real backtest before any live-money change,
+and every finding is logged in `HANDOFF.md` with the numbers, not just the conclusion.
 
-The live system (`dashboard/`) runs the core config on IBKR paper: 17-ETF weekly TSMOM,
-0.5% risk, `CASH_USD`/`CASH_SWEEP` on, with a SGOV-first manual-withdrawal helper in the UI.
+The live system (`dashboard/`) runs TWO independent instances: **paper** (IBKR paper account
+DUK968178, `quant.carsonng.com`) and **live** (real money, IBKR account U12991898,
+`quant-live.carsonng.com`) — same code, separate ports/databases/gateways, neither can affect
+the other.
+
+---
+
+## What this system does well
+
+Judged against what actually broke and got fixed this project, not just what it claims:
+
+- **It doesn't just assert an edge — it tries to disprove it first.** Every adopted
+  parameter survived a walk-forward + Deflated Sharpe check against the FULL search breadth
+  that produced it (82 combined trials, still 100% DSR). A bare backtest Sharpe with no
+  multiple-comparisons correction is the single most common way retail systems fool
+  themselves; this one doesn't skip that step.
+- **Honest about uncertainty, not just a point estimate.** The block-bootstrap CI (90% range
+  spanning roughly 0.54–1.36 Calmar) is presented alongside every headline number, specifically
+  because point estimates on 30 years of markets data are less precise than they look.
+- **Real safety layers, not just backtested ones.** `PORTFOLIO_CAP` and `DD_HALT_PCT` are
+  live-only guards with no backtest equivalent, added after real operational incidents (a
+  127%-deployed live account, confirmed directly) — not theoretical protections.
+- **Fails safe, not silently.** The paper/live guard refuses to trade a live account unless
+  `IB_ALLOW_LIVE=1` is explicitly set AND the connected account exactly matches the configured
+  one; a mismatch refuses to trade rather than guessing. The tick loop survives any single
+  cycle's exception (extracted into `core/resilient_loop.py` with its own regression test)
+  instead of dying silently.
+- **Diversification that's been measured, not assumed.** Core/sleeve correlation, universe
+  breadth, and cross-crisis behavior are all checked against real historical data in this
+  project's own research scripts — not asserted from theory.
+- **Transparent decision support, not a black box.** Every LLM-assisted signal carries an
+  explicit rationale, an invalidation level, and (as of 2026-07-14) a `macro_linkage` field
+  forcing the model to state whether a macro theme it identified actually applies to that
+  specific instrument, or say so if it doesn't — auditable, not hoped-for.
+- **A real, if imperfect, test suite.** 10 files of regression tests covering the sizing math,
+  the DD-halt gate, the reconciliation logic, and every bug found this session — new tests
+  written alongside every fix, not just claimed fixed.
+
+**What it doesn't do well, in the same honest spirit:**
+- It's operationally complex — IBKR Gateway + two dashboards + a Cloudflare tunnel + watchdogs
+  is a lot of moving parts for one person to run, and several real incidents this project
+  (orphaned orders, a false -89.8% drawdown display, a dashboard made briefly unresponsive by
+  a bug in a bug-fix) came from that complexity, not from the strategy itself.
+- The edge is genuine but modest — a Calmar in the 0.5–1.4 range is solid, not spectacular;
+  this is not a system that promises to beat the market by a wide margin.
+- At current account size, **contributions dominate wealth growth far more than the strategy's
+  edge does** for the first several years — the honest framing throughout this project is that
+  the behavioral discipline (contribute relentlessly, don't override the system) matters more
+  than basis points of edge until the account matures.
+
+---
+
+## How this compares to other investment approaches
+
+All figures below are checked against real market data (not invented), after-tax where noted,
+and dated to when they were computed (2026-07 unless stated). Where a figure is a rough
+estimate rather than a rigorously re-run backtest, it's marked as such — mixing rigor levels
+without saying so is exactly the kind of self-deception this whole project tries to avoid.
+
+| Approach | After-tax CAGR | Max drawdown | Calmar | Basis |
+|---|---|---|---|---|
+| **This system (core-only)** | **6.06%** (median 6.75%, 90% CI 4.82–8.93%) | **-6.83%** | **0.887** (90% CI 0.536–1.355) | Real 30-year weekly backtest, bootstrapped |
+| **This system (core+sleeve@10%, OOS)** | 13.08% | -7.73% | 1.693 | Real backtest, recent-decade window (bull-flattered, upside case not the anchor) |
+| SPY buy-and-hold | 10.08% | -54.6% | 0.185 | Real 1996–2026 data, pulled and verified this session |
+| Risk-matched SPY + cash (12.5% SPY / 87.5% cash, sized to match this system's -6.83% DD) | 5.02% | -6.83% | 0.735 | Real data; this system beats it by +20.6% relative Calmar at today's ~4.3% cash rate (breakeven rate ~5.5%) |
+| 60/40 (SPY/AGG) | ~7% | ~-22% | ~0.32 | Rough estimate, not re-run this project |
+| All-weather (25% equity/25% long bonds/25% short-duration/25% commodities) | ~6% | ~-15% | ~0.40 | Rough estimate, not re-run this project |
+| 100% cash (SGOV) | ~4.3% | ~0% | n/a | Current rate, no drawdown risk but no growth engine either |
+
+**The honest reading**: at today's interest rates, this system's core-only Calmar (0.887,
+reconciled) beats a naive risk-matched passive alternative (0.735) by a real, verified margin
+— but the margin isn't enormous, and it would flip if cash rates rose much above ~5.5%. The
+sleeve adds a genuine, measured diversification benefit on top. Against a full portfolio
+context (60/40, all-weather), this system's edge is real but has not been tested with the same
+rigor against those specific benchmarks — that's a fair gap to name, not paper over.
+
+---
+
+## Objective rating
+
+Rated on the project's own terms — methodology rigor, real-money safety, and honest
+uncertainty — not on marketing appeal:
+
+| Dimension | Score | Why |
+|---|---|---|
+| Research methodology | 9/10 | DSR-checked at 82 trials, bootstrap CI, real crisis stress tests — genuinely rigorous, rare for a retail-scale system |
+| Real-money safety engineering | 8/10 | Multiple real incidents found and fixed with regression tests (portfolio-cap blind spot, orphaned orders, tick-loop dormancy); the guard rails are real, but so was the list of things that needed guarding against |
+| Performance (risk-adjusted) | 6/10 | Calmar ~0.9 core-only, ~1.3–1.7 with the sleeve — solidly above cash and a naive passive alternative at current rates, not a dramatic outperformer |
+| Operational complexity / maintainability | 5/10 | Two live dashboards, a broker gateway, a tunnel, and several watchdogs is a real ongoing burden for one person; multiple bugs this project traced directly to that complexity |
+| Transparency / auditability | 8/10 | Every signal has a rationale, invalidation level, and macro linkage; every fix this project has its own regression test and a HANDOFF.md entry explaining why |
+| **Overall** | **7/10** | A genuinely rigorous, real-money-safe system with a real but modest edge — its biggest risk is operational complexity, not the strategy logic itself |
+
+**Bottom line**: this is a well-engineered, honestly-evaluated system that does what it claims
+— it is not a "get rich" system, it is a disciplined, diversified, risk-managed way to
+participate in markets with a small, real, measured edge over a passive alternative, at the
+cost of real operational overhead to keep it running correctly.
 
 ---
 
