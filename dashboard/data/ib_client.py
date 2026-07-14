@@ -481,10 +481,30 @@ def parse_account_summary_rows(rows, target_acct: str | None) -> dict | None:
     return out or None
 
 
+# FIXED 2026-07-14: this is a genuine request-and-wait IB Gateway round-trip (see below),
+# not a read of some already-subscribed local cache -- confirmed real, ~0.2-0.3s each. Once
+# quant.carsonng.com went public (Access login removed), concurrent page loads from multiple
+# real visitors each independently call this (via equity_usd()/portfolio_room_usd(), and the
+# latter alone calls it TWICE more internally, via _equity_usd + _gpv_usd) -- so N concurrent
+# renders made ~3N of these round-trips, serialized through one IB Gateway connection, and
+# response time compounded with concurrent load (confirmed: 82 hits from one external IP in
+# under 20 minutes the day this was found). A short TTL cache means concurrent renders within
+# the same few seconds share one real fetch. 3s is short enough that no risk-sizing decision
+# (which only needs a "close enough" equity figure, not a tick-perfect one) is meaningfully
+# affected, and long enough to collapse a burst of concurrent page loads into one round-trip.
+_SUMMARY_CACHE_SEC = 3.0
+_summary_cache: dict = {"ts": 0.0, "data": None}
+
+
 def account_summary() -> dict | None:
     """Paper account balances for the dashboard: NetLiquidation, cash, available
     funds, buying power, unrealized/realized PnL, gross position value (USD). None
-    if IB down. Read on the loop thread via call() (worker-thread safe)."""
+    if IB down. Read on the loop thread via call() (worker-thread safe).
+
+    Cached for _SUMMARY_CACHE_SEC -- see the FIXED note above."""
+    now = dt.datetime.now().timestamp()
+    if now - _summary_cache["ts"] < _SUMMARY_CACHE_SEC:
+        return _summary_cache["data"]
     with _LOCK:
         ib = _ensure_conn()
         if ib is None:
@@ -500,7 +520,10 @@ def account_summary() -> dict | None:
         vals = _run(ib.accountSummaryAsync(), timeout=10)
     except Exception:                                  # noqa: BLE001
         return None
-    return parse_account_summary_rows(vals, target_acct)
+    result = parse_account_summary_rows(vals, target_acct)
+    _summary_cache["ts"] = now
+    _summary_cache["data"] = result
+    return result
 
 
 def is_paper() -> bool:

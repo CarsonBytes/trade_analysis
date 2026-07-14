@@ -4,6 +4,8 @@ No IB gateway needed (fake row objects stand in for accountSummaryAsync()'s rows
 """
 from __future__ import annotations
 
+from unittest import mock
+
 from dashboard.data.ib_client import parse_account_summary_rows
 
 _fails = []
@@ -86,10 +88,76 @@ def test_no_target_acct_includes_everything():
     check("later row wins with no filter", out["NetLiquidation"], 200.0)
 
 
+# ADDED 2026-07-14: account_summary()'s TTL cache -- found that once quant.carsonng.com went
+# public, concurrent page loads each independently triggered a real IB Gateway round-trip
+# (equity_usd()/portfolio_room_usd() -> account_summary() -> accountSummaryAsync()), and
+# portfolio_room_usd() alone calls it twice internally -- so concurrent visitors multiplied
+# real network round-trips serialized through one IB connection, compounding latency under
+# load. This tests that a burst of calls within the TTL window makes only ONE real fetch.
+def test_account_summary_caches_within_ttl():
+    print("\naccount_summary(): a burst of calls within the TTL window makes only ONE real "
+          "IB round-trip:")
+    import dashboard.data.ib_client as ibc
+    ibc._summary_cache["ts"] = 0.0
+    ibc._summary_cache["data"] = None
+    rows = [FakeRow("NetLiquidation", "1000.0"), FakeRow("TotalCashValue", "800.0")]
+    run_calls = []
+
+    def _fake_run(coro, timeout=None):
+        run_calls.append(1)
+        return rows
+
+    with mock.patch.object(ibc, "_ensure_conn", return_value=mock.Mock()), \
+         mock.patch.object(ibc, "call", return_value=["U1"]), \
+         mock.patch.object(ibc, "_run", side_effect=_fake_run):
+        r1 = ibc.account_summary()
+        r2 = ibc.account_summary()
+        r3 = ibc.account_summary()
+    check("only one real fetch for 3 calls in a burst", len(run_calls), 1)
+    check("all calls return the same (cached) data", r1 == r2 == r3, True)
+    check("NetLiquidation present", r1["NetLiquidation"], 1000.0)
+
+
+def test_account_summary_refetches_after_ttl_expires():
+    print("\naccount_summary(): a call after the TTL window makes a fresh real fetch:")
+    import dashboard.data.ib_client as ibc
+    ibc._summary_cache["ts"] = 0.0
+    ibc._summary_cache["data"] = None
+    rows = [FakeRow("NetLiquidation", "1000.0")]
+    run_calls = []
+
+    def _fake_run(coro, timeout=None):
+        run_calls.append(1)
+        return rows
+
+    with mock.patch.object(ibc, "_ensure_conn", return_value=mock.Mock()), \
+         mock.patch.object(ibc, "call", return_value=["U1"]), \
+         mock.patch.object(ibc, "_run", side_effect=_fake_run):
+        ibc.account_summary()
+        ibc._summary_cache["ts"] -= (ibc._SUMMARY_CACHE_SEC + 1)   # simulate TTL expiry
+        ibc.account_summary()
+    check("TTL expiry triggers a second real fetch", len(run_calls), 2)
+
+
+def test_account_summary_not_connected_bypasses_cache():
+    print("\naccount_summary(): not connected returns None without poisoning the cache:")
+    import dashboard.data.ib_client as ibc
+    ibc._summary_cache["ts"] = 0.0
+    ibc._summary_cache["data"] = None
+    with mock.patch.object(ibc, "_ensure_conn", return_value=None):
+        r = ibc.account_summary()
+    check("returns None when not connected", r, None)
+    check("cache left empty (no false-positive caching of a down connection)",
+          ibc._summary_cache["data"], None)
+
+
 if __name__ == "__main__":
     for t in (test_single_account_no_filter, test_ignores_tags_outside_whitelist,
               test_bad_value_skipped, test_empty_rows_returns_none,
-              test_two_managed_accounts_regression, test_no_target_acct_includes_everything):
+              test_two_managed_accounts_regression, test_no_target_acct_includes_everything,
+              test_account_summary_caches_within_ttl,
+              test_account_summary_refetches_after_ttl_expires,
+              test_account_summary_not_connected_bypasses_cache):
         t()
     print()
     if _fails:
