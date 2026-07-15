@@ -129,8 +129,18 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     """Returns (BoardScan|None, status). status explains why None if applicable.
     Only the top MAX_INSTRUMENTS of the (already-ranked) scores are sent to the
     LLM -- it deep-dives the most actionable, not the whole board."""
-    if not store.can_call(cap=cap):
-        return None, f"budget guard: {store.calls_today()}/{cap} calls used today"
+    # FIXED 2026-07-15: shared_calls_ok() was being called ONLY to build a nicer error
+    # message after store.can_call() (LOCAL count only) had already rejected the call --
+    # meaning it never actually GATED anything. If quant's own local count is still under
+    # cap but the SHARED quota (quant+study+events combined) is already exhausted by other
+    # projects, this would have sailed straight through to llm.invoke() and hit the real
+    # 429 anyway -- the exact shape of the 2026-07-14 incident this was meant to prevent.
+    # Now both checks actually gate the call.
+    from analyst import usage_log
+    shared_ok, shared_calls = usage_log.shared_calls_ok(cap=cap)
+    if not store.can_call(cap=cap) or not shared_ok:
+        shared_txt = f"shared {shared_calls}/{cap}" if shared_calls is not None else "shared quota unreachable"
+        return None, f"budget guard: local {store.calls_today()}/{cap}, {shared_txt} (quant+study+events)"
 
     import datetime as _dt
     backoff = _rate_limited_until()
@@ -149,7 +159,9 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         f"RECENT HEADLINES (may be irrelevant; filter yourself):\n{news_block}\n\n"
         "Return a signal for EVERY instrument above, plus a macro_note."
     )
+    import time
     llm = make_llm().with_structured_output(BoardScan)
+    _start = time.perf_counter()
     try:
         result = llm.invoke([
             {"role": "system", "content": SYSTEM},
@@ -161,4 +173,14 @@ def run_board_scan(scores: list[Score], headlines: list[str],
             return None, f"rate-limited by provider -- backing off until next reset ({e})"
         raise    # anything else is a real, unexpected failure -- don't swallow it
     store.record_call(1)
+    try:                                          # cross-project usage visibility only
+        import os
+        from analyst.usage_log import log_usage
+        log_usage(
+            kind="board_scan", model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+            input_tokens=0, output_tokens=0,       # not available without changing the invoke() shape above
+            latency_ms=int((time.perf_counter() - _start) * 1000),
+        )
+    except Exception:
+        pass                                       # telemetry only -- never affects the scan result
     return result, "ok"

@@ -75,8 +75,10 @@ def _project_of(purpose: str) -> str:
 
 def fetch_shared_usage_today() -> dict:
     """Cross-project usage for today (UTC), from the shared Supabase ledger. Best-effort:
-    returns zeros if Supabase isn't configured/unreachable. Cached for _SHARED_USAGE_CACHE_SEC."""
-    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}}
+    returns zeros (with "ok": False) if Supabase isn't configured/unreachable, so a caller
+    that needs to tell "genuinely 0 calls" apart from "couldn't check" can (see
+    shared_calls_ok(), used by the board-scan budget guard). Cached for _SHARED_USAGE_CACHE_SEC."""
+    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False}
     now = time.time()
     if now - _shared_usage_cache["ts"] < _SHARED_USAGE_CACHE_SEC and _shared_usage_cache["data"]:
         return _shared_usage_cache["data"]
@@ -106,7 +108,19 @@ def fetch_shared_usage_today() -> dict:
         calls_by_project[project] = calls_by_project.get(project, 0) + 1
         total_cost += row.get("cost_usd") or 0.0
 
-    result = {"calls": len(rows), "cost_usd": total_cost, "calls_by_project": calls_by_project}
+    result = {"calls": len(rows), "cost_usd": total_cost, "calls_by_project": calls_by_project, "ok": True}
     _shared_usage_cache["ts"] = now
     _shared_usage_cache["data"] = result
     return result
+
+
+def shared_calls_ok(cap: int = 200, reserve: int = 10) -> tuple[bool, int | None]:
+    """(is_it_safe_to_call, shared_calls_today_or_None). Fails CLOSED: if the
+    shared ledger can't be reached, returns (False, None) rather than treating
+    an unreachable fetch as "0 calls, all clear" -- see store.py::can_call()
+    for why that's the safe default here (skipping one board-scan cycle is
+    free; silently overrunning the shared cap is not)."""
+    usage = fetch_shared_usage_today()
+    if not usage["ok"]:
+        return False, None
+    return usage["calls"] < (cap - reserve), usage["calls"]
