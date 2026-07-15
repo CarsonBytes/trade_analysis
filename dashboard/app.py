@@ -1,7 +1,9 @@
 """NiceGUI dashboard: real-time trade analysis for Gold, Oil and FX.
 
-Decision support only -- it surfaces obvious trends and an LLM read; it never
-places a trade.
+Runs TWO independent instances of this same app: PAPER (IBKR paper account) and
+LIVE (IBKR real-money account, IB_ALLOW_LIVE=1). Both places real broker orders
+automatically from qualifying signals -- this is NOT decision-support-only; a
+human doesn't confirm each trade before it's sent to the broker.
 
 Run:  python -m dashboard.app      (then open http://localhost:8080)
 
@@ -594,12 +596,14 @@ def _open_detail(key: str) -> None:
 @ui.refreshable
 def paper_panel() -> None:
     from dashboard.core import paper
+    from dashboard.execution import broker as _bk
     trades = paper.all_trades()
     closed = [t for t in trades if t["status"] != "OPEN"]
     open_t = [t for t in trades if t["status"] == "OPEN"]
 
+    _title = "Live Trades — Track Record" if _bk.is_live() else "Paper Trades — Forward Track Record"
     with ui.row().classes("items-center justify-between w-full"):
-        ui.label("Paper Trades — Forward Track Record").classes("text-lg font-bold")
+        ui.label(_title).classes("text-lg font-bold")
         with ui.row().classes("gap-1"):
             ui.button("Export results", icon="download", on_click=_export_results).props("flat dense")
             ui.button("Archive & reset", icon="inventory_2", on_click=_archive_reset).props("flat dense")
@@ -1225,7 +1229,9 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             _colour = {"placed": "text-grey-8", "retrying": "text-blue-8",
                       "stuck": "text-orange-8"}[status]
             ui.label(reason).classes(f"text-xs {_colour}")
-        src = f"{_bk.name()} fill" if pos else "paper (unconfirmed)"
+        # NOTE: "unconfirmed" here means "no broker fill matched yet" -- has nothing to do
+        # with PAPER-vs-LIVE mode (this branch is reached in both), so don't say "paper".
+        src = f"{_bk.name()} fill" if pos else "logged, unconfirmed"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
         tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
@@ -1839,10 +1845,12 @@ async def _archive_records(table) -> None:
 
 async def _export_results() -> None:
     from dashboard.web import report
+    from dashboard.execution import broker as _bk
     csvp, repp = await run.io_bound(report.export)
     rep = report.build_report()
+    _title = "Live-trade report (copy to share)" if _bk.is_live() else "Paper-trade report (copy to share)"
     with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
-        ui.label("Paper-trade report (copy to share)").classes("text-lg font-bold")
+        ui.label(_title).classes("text-lg font-bold")
         ui.label(f"Saved: {repp}").classes("text-xs text-grey")
         ui.label(f"CSV:   {csvp}").classes("text-xs text-grey")
         ui.code(rep).classes("w-full max-h-[60vh] overflow-auto")
@@ -1853,10 +1861,12 @@ async def _export_results() -> None:
 
 async def _export_retrospective() -> None:
     from dashboard.web import retrospective
+    from dashboard.execution import broker as _bk
     path = await run.io_bound(retrospective.export)
     rep = retrospective.build()
+    _title = "Live-trading retrospective" if _bk.is_live() else "Forward-test retrospective"
     with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
-        ui.label("Forward-test retrospective").classes("text-lg font-bold")
+        ui.label(_title).classes("text-lg font-bold")
         ui.label(f"Saved: {path}").classes("text-xs text-grey")
         ui.code(rep).classes("w-full max-h-[60vh] overflow-auto")
         ui.button("Close", on_click=dlg.close).props("flat")
@@ -1974,8 +1984,8 @@ def main_page() -> None:
                     _txt, _color = "Phase 2 threshold · sleeve NOT enabled", "grey"
                 ui.badge(_txt, color=_color).classes("text-sm px-3 py-1")\
                     .tooltip(f"equity threshold ~US${_pp.PHASE2_NAV_USD:,.0f} (~500K HKD); "
-                             "sleeve also needs SLEEVE_ENABLED=1 (paper launcher only) to "
-                             "actually place orders")
+                             "sleeve also needs SLEEVE_ENABLED=1 on this instance's launcher "
+                             "to actually place orders (set on both paper and live launchers)")
             except Exception:                                      # never break the header
                 pass
             # CONCURRENT paper+live: both processes run continuously, each on its own Cloudflare
@@ -1992,8 +2002,14 @@ def main_page() -> None:
                             else "border-red-600 text-red-700"))\
                 .tooltip(f"opens the {_other} dashboard (separate always-on instance, own gateway "
                          "+ account + database; both trade concurrently)")
-        ui.label("Decision support, not auto-execution. Verify before risking money.")\
-            .classes("text-sm text-grey-6")
+        if _live:
+            ui.label("Auto-trades qualifying signals with REAL MONEY on this account. "
+                     "Not a suggestion box — verify positions directly in IBKR too.")\
+                .classes("text-sm text-red-6 font-bold")
+        else:
+            ui.label("Auto-trades qualifying signals on the IBKR paper account "
+                     "(simulated fills, no real money).")\
+                .classes("text-sm text-grey-6")
         clock_row()
 
         with ui.row().classes("items-center gap-4 w-full"):
@@ -2059,7 +2075,7 @@ def main_page() -> None:
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")
             t_signals = ui.tab("Signals & Gates", icon="traffic")
-            t_trades = ui.tab("Paper Trades", icon="receipt_long")
+            t_trades = ui.tab("Live Trades" if _live else "Paper Trades", icon="receipt_long")
             t_retro = ui.tab("Retrospective", icon="insights")
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
             with ui.tab_panel(t_board):                # statistics only
