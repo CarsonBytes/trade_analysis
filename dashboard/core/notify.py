@@ -3,7 +3,9 @@ events (a false -89.8% drawdown display, an orphaned real broker order, a reconc
 mismatch, a portfolio-cap breach) that were each only discovered by a human happening to
 check the right place. This is the push-notification side; core/notable_events.py is the
 paired local changelog side -- both fire from the SAME call sites so they can't drift out
-of sync with each other.
+of sync with each other. Only WARNING/ERROR level actually pushes to Telegram (see
+_PUSH_LEVELS below) -- routine INFO events still land in the local changelog, just don't
+buzz your phone.
 
 Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment (put them in
 analyst/.env, or set them directly for whichever instance should alert). No-ops (logs at
@@ -29,11 +31,21 @@ def is_configured() -> bool:
     return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
 
 
+# ADDED 2026-07-15: only WARNING/ERROR actually push to Telegram -- user asked for
+# "important alert or notice" only. INFO-level events (new order placed, sleeve order
+# placed, position closed -- the routine, happens-every-day stuff) still get recorded in
+# the local changelog (notable_events.record() writes that regardless of this filter),
+# just no longer buzz your phone for something that isn't actionable.
+_PUSH_LEVELS = {"warning", "error"}
+
+
 def send(message: str, level: str = "info") -> bool:
     """Send a Telegram alert. Returns True if actually sent (False if not configured,
-    de-duped, or the send failed) -- callers should treat this as best-effort, never as a
-    guarantee, and must never let a failure here break whatever real trading/monitoring
-    logic triggered the alert in the first place."""
+    not an important-enough level, de-duped, or the send failed) -- callers should treat
+    this as best-effort, never as a guarantee, and must never let a failure here break
+    whatever real trading/monitoring logic triggered the alert in the first place."""
+    if level not in _PUSH_LEVELS:
+        return False         # routine/info -- local changelog only, no push
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:

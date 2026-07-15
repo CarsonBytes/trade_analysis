@@ -37,13 +37,30 @@ def test_send_noop_when_not_configured():
     for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         os.environ.pop(k, None)
     notify._last_sent.clear()
-    result = notify.send("test message")
-    check("returns False", result, False)
+    result = notify.send("test message", level="warning")   # important level, so this
+    check("returns False", result, False)                    # tests the NOT-CONFIGURED path,
+                                                              # not the level filter below
+
+
+def test_send_skips_info_level_no_push():
+    print("\nsend(): default/info level never pushes, even when configured -- routine "
+          "events (new order placed, position closed, etc.) shouldn't buzz your phone:")
+    from dashboard.core import notify
+    notify._last_sent.clear()
+    calls = []
+    with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "tok",
+                                      "TELEGRAM_CHAT_ID": "chat"}), \
+         mock.patch("requests.post", side_effect=lambda *a, **k: calls.append(1)):
+        r1 = notify.send("routine info event")                 # default level="info"
+        r2 = notify.send("explicit info event", level="info")
+    check("default level (info) does not push", r1, False)
+    check("explicit info level does not push", r2, False)
+    check("no HTTP call made for either", len(calls), 0)
 
 
 def test_send_success_and_cooldown():
-    print("\nsend(): configured -- sends once, then de-dups the IDENTICAL message within "
-          "the cooldown window:")
+    print("\nsend(): configured + important level -- sends once, then de-dups the "
+          "IDENTICAL message within the cooldown window:")
     from dashboard.core import notify
     notify._last_sent.clear()
     calls = []
@@ -59,9 +76,9 @@ def test_send_success_and_cooldown():
     with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "tok",
                                       "TELEGRAM_CHAT_ID": "chat"}), \
          mock.patch("requests.post", side_effect=_fake_post):
-        r1 = notify.send("hello world")
-        r2 = notify.send("hello world")     # identical message, should be de-duped
-        r3 = notify.send("a different message")   # different message, should send
+        r1 = notify.send("hello world", level="warning")
+        r2 = notify.send("hello world", level="warning")   # identical message, de-duped
+        r3 = notify.send("a different message", level="error")   # different, should send
     check("first send succeeds", r1, True)
     check("identical message within cooldown is de-duped", r2, False)
     check("a different message still sends", r3, True)
@@ -81,7 +98,7 @@ def test_send_handles_non_200_gracefully():
     with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "tok",
                                       "TELEGRAM_CHAT_ID": "chat"}), \
          mock.patch("requests.post", return_value=_FakeResp()):
-        result = notify.send("will fail")
+        result = notify.send("will fail", level="error")
     check("returns False on non-200", result, False)
 
 
@@ -93,13 +110,14 @@ def test_send_handles_exception_gracefully():
     with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "tok",
                                       "TELEGRAM_CHAT_ID": "chat"}), \
          mock.patch("requests.post", side_effect=ConnectionError("network down")):
-        result = notify.send("network test")
+        result = notify.send("network test", level="error")
     check("returns False, no exception propagated", result, False)
 
 
 if __name__ == "__main__":
     test_is_configured()
     test_send_noop_when_not_configured()
+    test_send_skips_info_level_no_push()
     test_send_success_and_cooldown()
     test_send_handles_non_200_gracefully()
     test_send_handles_exception_gracefully()
