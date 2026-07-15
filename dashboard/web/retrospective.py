@@ -1,4 +1,5 @@
-"""Comprehensive retrospective report for the forward (demo) test.
+"""Comprehensive retrospective report -- runs against whichever account this
+instance is (PAPER or LIVE; see broker.is_live()).
 
 Pulls together everything needed to judge the system and tune constraints:
   - KPIs: expectancy-R, win rate, profit factor, equity curve, max drawdown
@@ -6,7 +7,9 @@ Pulls together everything needed to judge the system and tune constraints:
     deterministic strength, macro backdrop, key facts) + exit reason + R
   - constraint scorecard: how often each gate blocked a trade (from the
     rejected-signals journal) -- the evidence for add/adjust/remove decisions
-  - demo reconciliation: paper R vs real demo-fill R, when MT5 is available
+  - broker reconciliation: internally-logged R vs the real broker-fill R
+    (the account is PAPER or LIVE depending on this instance -- "demo" was
+    legacy MT5 terminology and doesn't apply to either IBKR account)
 
 Run:  uv run python -m dashboard.retrospective         # print + write file
       uv run python -m dashboard.retrospective --json   # machine-readable dump
@@ -77,6 +80,7 @@ def _kpi_block(L: list[str], closed: list[dict]) -> None:
 
 
 def build() -> str:
+    from dashboard.execution import broker
     allt = paper.all_trades()
     closed = [t for t in allt if t["status"] != "OPEN"]
     opent = [t for t in allt if t["status"] == "OPEN"]
@@ -84,12 +88,12 @@ def build() -> str:
     demo_closed = [t for t in closed if t["id"] in demo_ids]
 
     L: list[str] = []
-    L.append(f"# Forward-test retrospective — {dt.datetime.now():%Y-%m-%d %H:%M}")
+    _title = "Live-trading retrospective" if broker.is_live() else "Forward-test retrospective"
+    L.append(f"# {_title} — {dt.datetime.now():%Y-%m-%d %H:%M}")
     L.append(f"Trades: {len(allt)} total | {len(opent)} open | {len(closed)} closed "
-             f"| {len(demo_closed)} closed & demo-executed")
+             f"| {len(demo_closed)} closed & {broker.name()}-executed")
     L.append("")
     # PRIMARY: broker truth -- only trades the active broker actually executed
-    from dashboard.execution import broker
     L.append(f"## KPIs — {broker.name()}-executed only (broker truth)")
     L.append(f"Only trades with a real {broker.name()} order/fill. Signals never "
              "placed are excluded here.")
@@ -98,8 +102,9 @@ def build() -> str:
     else:
         L.append(f"(no closed {broker.name()}-executed trades yet)")
     L.append("")
-    # SECONDARY: full signal-logic record (paper, may exceed what the demo took)
-    L.append("## KPIs — all paper signals (signal-logic record)")
+    # SECONDARY: full signal-logic record (every logged signal, may exceed what the
+    # broker actually took -- unrelated to which MODE (paper/live) this instance is)
+    L.append("## KPIs — all logged signals (signal-logic record)")
     L.append("Every signal the logic generated vs real prices, executed or not. "
              "Broader than the broker record above.")
     _kpi_block(L, closed)
@@ -200,12 +205,17 @@ def build() -> str:
     L.append("")
 
     # ---- broker reconciliation ---------------------------------------------
-    from dashboard.execution import broker
-    L.append(f"## {broker.name()} fills vs paper (real broker execution)")
+    # NOTE: "paper_r"/"demo_r"/"demo_pnl" below are the field names broker.reconcile()
+    # returns (shared by both the IB and MT5 backends) -- "demo" there is legacy MT5
+    # terminology meaning "the real broker fill," unrelated to which of the two
+    # actual account modes (paper/live) this instance is. Only the DISPLAYED labels
+    # are renamed here to avoid that confusion; the dict keys are left alone since
+    # they're produced by 3 separate backend implementations.
+    L.append(f"## {broker.name()} fills vs logged signal (real broker execution)")
     try:
         rows = broker.reconcile()
         if rows:
-            L.append("| paper_id | instrument | ticket | closed | paperR | demoR | pnl |")
+            L.append("| paper_id | instrument | ticket | closed | signalR | fillR | pnl |")
             L.append("|---|---|---|---|---|---|---|")
             for r in rows:
                 L.append(f"| {r['paper_id']} | {r['instrument']} | {r['ticket']} | "
@@ -215,12 +225,12 @@ def build() -> str:
             if done:
                 gap = sum(r["demo_r"] - r["paper_r"] for r in done) / len(done)
                 L.append("")
-                L.append(f"avg demo−paper R gap on {len(done)} closed: {gap:+.3f} "
-                         f"(negative ⇒ paper cost model too optimistic)")
+                L.append(f"avg fill−signal R gap on {len(done)} closed: {gap:+.3f} "
+                         f"(negative ⇒ signal-logic cost model too optimistic)")
         else:
-            L.append("(no mirrored demo trades yet)")
+            L.append(f"(no mirrored {broker.name()} trades yet)")
     except Exception as e:
-        L.append(f"(demo reconciliation unavailable: {e})")
+        L.append(f"(broker reconciliation unavailable: {e})")
     return "\n".join(L)
 
 
