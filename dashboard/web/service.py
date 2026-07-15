@@ -13,6 +13,7 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 
 from analyst.features import compute_facts  # quant/
+from analyst import usage_log
 from dashboard.instruments import active_universe
 from dashboard.data.providers import get_history
 from dashboard.core.scoring import score_from_facts, rank, Score
@@ -45,6 +46,8 @@ STATE: dict = {
     "conn": None,          # MT5 connection quality: {server, ping_ms, connected, ...}
     "calls_today": 0,
     "cap": 200,
+    "shared_calls_today": 0,       # cross-project (quant+study+events) usage of the shared key
+    "shared_calls_by_project": {},
 }
 
 
@@ -471,6 +474,12 @@ def refresh_llm(cap: int | None = None) -> str:
             log.exception("executor mirror error: %s", e)
     STATE["last_status"] = status
     STATE["calls_today"] = store.calls_today()
+    try:
+        shared = usage_log.fetch_shared_usage_today()
+        STATE["shared_calls_today"] = shared["calls"]
+        STATE["shared_calls_by_project"] = shared["calls_by_project"]
+    except Exception as e:
+        log.warning("shared usage fetch failed: %s", e)
     log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)
     return status
 

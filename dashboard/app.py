@@ -236,6 +236,14 @@ def header_status() -> None:
     cap = SETTINGS["cap"]
     used = service.STATE.get("calls_today", 0)  # cached; avoids a DB read each second
     near = used >= cap - 10
+    # Shared quota (quant+study+events all draw from the same chatanywhere.tech key) --
+    # THIS is the real constraint, not the line above: the 2026-07-14 incident was this
+    # instance's own counter saying "under budget" while the shared key was already
+    # exhausted by another caller. Fetched on the LLM refresh cadence, cached there --
+    # see analyst/usage_log.py::fetch_shared_usage_today() -- never a per-tick network call.
+    shared_used = service.STATE.get("shared_calls_today", 0)
+    shared_near = shared_used >= cap - 10
+    shared_by_project = service.STATE.get("shared_calls_by_project", {})
     data_txt, data_css = _data_source_text()
     with ui.column().classes("gap-1 w-full"):
         ui.label(data_txt).classes("text-sm " + data_css)
@@ -244,6 +252,9 @@ def header_status() -> None:
             ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
             ui.label(f"API calls today: {used}/{cap}").classes(
                 "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
+            ui.label(f"Shared quota (quant+study+events): {shared_used}/{cap}").classes(
+                "text-sm " + ("text-red font-bold" if shared_near else "text-grey-7")
+            ).tooltip(", ".join(f"{k}: {v}" for k, v in shared_by_project.items()) or "no data yet")
             from dashboard.execution import broker as _broker
             if _broker.is_ib():
                 bc = service.STATE.get("broker_conn") or {}
