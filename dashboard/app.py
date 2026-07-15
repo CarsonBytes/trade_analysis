@@ -580,7 +580,11 @@ def gate_panel() -> None:
 def _open_detail(key: str) -> None:
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
-    with ui.dialog() as dlg, ui.card().classes("min-w-[520px]"):
+    # RESPONSIVE FIX 2026-07-15: was "min-w-[520px]" with no ceiling -- min-width always
+    # wins over max-width when they conflict (CSS spec), so this would force a 520px-wide
+    # dialog on a 375px phone, clipped/overflowing. w-[92vw] scales down with the viewport;
+    # max-w-[Npx] caps it on desktop, and the two never conflict since there's no min-width.
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[520px]"):
         ui.label(active_by_key(key).name).classes("text-xl font-bold")
         ui.label(f"Source: {service.STATE['sources'].get(key,'?')}").classes("text-xs text-grey")
         ui.separator()
@@ -1719,7 +1723,7 @@ def _open_withdraw() -> None:
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         ui.notify("Withdrawal helper is IBKR-only.", type="warning"); return
-    with ui.dialog() as dlg, ui.card().classes("min-w-[500px]"):
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[500px]"):
         ui.label("Withdraw cash — from SGOV / cash shield first, never Core").classes("text-lg font-bold")
         ui.label("Sells SGOV if idle cash is short and reserves the amount so the auto-sweep "
                  "won't re-buy it. Does NOT move money out — withdraw in IBKR manually, then "
@@ -1860,7 +1864,7 @@ async def _export_results() -> None:
     csvp, repp = await run.io_bound(report.export)
     rep = report.build_report()
     _title = "Live-trade report (copy to share)" if _bk.is_live() else "Paper-trade report (copy to share)"
-    with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[680px]"):
         ui.label(_title).classes("text-lg font-bold")
         ui.label(f"Saved: {repp}").classes("text-xs text-grey")
         ui.label(f"CSV:   {csvp}").classes("text-xs text-grey")
@@ -1876,7 +1880,7 @@ async def _export_retrospective() -> None:
     path = await run.io_bound(retrospective.export)
     rep = retrospective.build()
     _title = "Live-trading retrospective" if _bk.is_live() else "Forward-test retrospective"
-    with ui.dialog() as dlg, ui.card().classes("min-w-[680px] max-w-[92vw]"):
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[680px]"):
         ui.label(_title).classes("text-lg font-bold")
         ui.label(f"Saved: {path}").classes("text-xs text-grey")
         ui.code(rep).classes("w-full max-h-[60vh] overflow-auto")
