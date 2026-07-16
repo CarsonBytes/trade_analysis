@@ -175,11 +175,14 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     store.record_call(1)
     try:                                          # cross-project usage visibility only
         import os
+        from analyst.llm import last_model_used, last_provider_used
         from analyst.usage_log import log_usage
         log_usage(
-            kind="board_scan", model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+            kind="board_scan",
+            model=last_model_used() or os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
             input_tokens=0, output_tokens=0,       # not available without changing the invoke() shape above
             latency_ms=int((time.perf_counter() - _start) * 1000),
+            provider=last_provider_used(),
         )
     except Exception:
         pass                                       # telemetry only -- never affects the scan result

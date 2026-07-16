@@ -9,17 +9,35 @@ Two kinds:
 """
 from __future__ import annotations
 
+import os
+import time
+
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from .state import (
     AnalystState, RegimeView, TechnicalView, SentimentView, Decision, RiskAssessment,
 )
-from .llm import make_llm
+from .llm import last_model_used, last_provider_used, make_llm
+from .usage_log import log_usage
 
 
-def _ask(structured_model, system: str, human: str):
-    llm = make_llm().with_structured_output(structured_model)
-    return llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
+def _ask(structured_model, system: str, human: str, kind: str = "analyst"):
+    start = time.perf_counter()
+    llm = make_llm().with_structured_output(structured_model, include_raw=True)
+    result = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
+    try:
+        usage = getattr(result["raw"], "usage_metadata", None) or {}
+        log_usage(
+            kind=kind,
+            model=last_model_used() or os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+            provider=last_provider_used(),
+        )
+    except Exception:
+        pass  # telemetry only -- never let this affect analysis or trading
+    return result["parsed"]
 
 
 # --- LLM analyst nodes ------------------------------------------------------
@@ -30,6 +48,7 @@ def regime_node(state: AnalystState) -> dict:
         "You are a market-regime analyst. Classify the current regime using ONLY "
         "the facts given. Do not invent numbers. Be decisive but calibrate confidence.",
         f"Market facts:\n{state['facts_text']}\n\nClassify the regime.",
+        kind="regime",
     )
     return {"regime": view}
 
@@ -41,6 +60,7 @@ def technical_node(state: AnalystState) -> dict:
         "trend, RSI, and the support/resistance levels in the facts. Pick key levels "
         "from the provided support/resistance. Do not fabricate price levels.",
         f"Market facts:\n{state['facts_text']}\n\nGive your technical view.",
+        kind="technical",
     )
     return {"technical": view}
 
@@ -60,6 +80,7 @@ def sentiment_node(state: AnalystState) -> dict:
         "Only count headlines actually relevant to this instrument; ignore noise. "
         "If nothing is relevant, score 0.",
         f"Instrument: {state['symbol']}\nHeadlines:\n{headlines}\n\nScore the sentiment.",
+        kind="sentiment",
     )
     return {"sentiment": view}
 
@@ -83,6 +104,7 @@ def decision_node(state: AnalystState) -> dict:
         "setup should be WAIT, not a forced trade. You are advising a human who makes "
         "the final call; never overstate confidence.",
         human,
+        kind="decision",
     )
     return {"decision": decision}
 

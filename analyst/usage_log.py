@@ -20,12 +20,19 @@ _PRICING = {"gpt-5-mini": (0.25, 2.00)}
 _DEFAULT_PRICING = (0.50, 1.50)
 
 
-def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, latency_ms: int) -> None:
+def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, latency_ms: int,
+             provider: str = "chatanywhere") -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
     try:
         in_price, out_price = _PRICING.get(model, _DEFAULT_PRICING)
         cost_usd = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
+        # ADDED 2026-07-16: explicit project/call_type/environment columns (see
+        # db/migrations/002_add_project_call_type_environment.sql in the study-platform
+        # repo, the shared table's owner) -- `purpose` is kept for the transition period
+        # (older dashboard/report code + any project not yet updated still reads it), but
+        # is no longer the source of truth for grouping.
+        environment = "live" if os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes") else "paper"
         httpx.post(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers={
@@ -36,6 +43,10 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
             },
             json={
                 "purpose": f"quant:{kind}",
+                "project": "quant",
+                "call_type": kind,
+                "environment": environment,
+                "provider": provider,
                 "model": model,
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,

@@ -81,8 +81,27 @@ def record_call(n: int = 1) -> None:
 
 def can_call(cap: int = 200, reserve: int = 10) -> bool:
     """True if we can spend an LLM call without breaching the cap (minus a small
-    reserve kept for manual refreshes)."""
-    return calls_today() < (cap - reserve)
+    reserve kept for manual refreshes).
+
+    Checks BOTH this instance's own local count AND the cross-project shared
+    total (paper + live + study + event-radar all draw from the SAME
+    chatanywhere.tech key -- see reference-shared-llm-ledger). A purely local
+    check lets paper and live each independently accumulate up to `cap` before
+    either notices, i.e. ~2x the real shared cap before anything blocks.
+    Confirmed live 2026-07-15: local counters read 76/200 (paper) and 75/200
+    (live) -- both individually "fine" -- while the real combined key usage
+    across all four consumers was already past 200 for the day.
+
+    The shared check fails toward BLOCKING (not calling) if the shared fetch
+    itself fails/is unreachable -- skipping one board-scan cycle costs
+    nothing (risk_gate is fully deterministic regardless of the LLM signal),
+    so a conservative default here is free; silently trusting a failed fetch
+    as "0 calls, all clear" would not be."""
+    if calls_today() >= (cap - reserve):
+        return False
+    from analyst import usage_log
+    ok, shared_calls = usage_log.shared_calls_ok(cap=cap, reserve=reserve)
+    return ok
 
 
 # ---- cache (last board scan etc.) -----------------------------------------
