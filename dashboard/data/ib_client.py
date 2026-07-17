@@ -481,6 +481,27 @@ def parse_account_summary_rows(rows, target_acct: str | None) -> dict | None:
     return out or None
 
 
+def filter_by_account(items, target_acct: str | None) -> list:
+    """PURE function (no I/O -- unit-testable in isolation): filter ib.positions() /
+    ib.portfolio() results (each item needs an .account attribute) down to ONLY
+    target_acct's items. Same logic as parse_account_summary_rows()'s filter, applied
+    to a different pair of ib_async calls that share the exact same failure mode.
+
+    FIXED 2026-07-17: ib.positions()/ib.portfolio() can ALSO return rows for multiple
+    managed accounts under one login -- the same underlying cause as the 2026-07-10
+    accountSummaryAsync() fix above (the same ghost account, U20738951, is visible to
+    both calls), but that fix only ever covered accountSummaryAsync(). Found live: the
+    LIVE dashboard's unrealized P&L showed exactly $0 for every open position -- the R
+    multiple (computed locally from price vs entry) was correct, but pos['profit']
+    (from ib.portfolio()'s unrealizedPNL) was always 0, because whichever account's
+    PortfolioItem for a given con_id got processed LAST in the un-filtered dict
+    comprehension silently won, and the ghost account's zero values were overwriting
+    the real ones for at least some positions every refresh."""
+    if not target_acct:
+        return items
+    return [i for i in items if not (getattr(i, "account", None) and i.account != target_acct)]
+
+
 # FIXED 2026-07-14: this is a genuine request-and-wait IB Gateway round-trip (see below),
 # not a read of some already-subscribed local cache -- confirmed real, ~0.2-0.3s each. Once
 # quant.carsonng.com went public (Access login removed), concurrent page loads from multiple

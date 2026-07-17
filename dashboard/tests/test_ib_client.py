@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from unittest import mock
 
-from dashboard.data.ib_client import parse_account_summary_rows
+from dashboard.data.ib_client import filter_by_account, parse_account_summary_rows
 
 _fails = []
 
@@ -151,13 +151,81 @@ def test_account_summary_not_connected_bypasses_cache():
           ibc._summary_cache["data"], None)
 
 
+class FakeItem:
+    """Stand-in for an ib_async Position/PortfolioItem: just needs .account for this filter
+    (the rest of each object -- .contract, .unrealizedPNL, .marketPrice -- is irrelevant to
+    filter_by_account() itself, only to the caller)."""
+    def __init__(self, account="U1", label=""):
+        self.account = account
+        self.label = label      # test-only, to identify which item survived filtering
+
+    def __repr__(self):
+        return f"FakeItem({self.label!r}, acct={self.account!r})"
+
+
+# ADDED 2026-07-17: filter_by_account() -- FIXED after the LIVE dashboard's unrealized P&L
+# showed exactly $0 for every open position. Root cause: ib.positions()/ib.portfolio() can
+# return rows for MULTIPLE managed accounts under one login (the same ghost account,
+# U20738951, already known from the 2026-07-10 accountSummaryAsync() fix above -- that fix
+# only ever covered accountSummaryAsync(), not positions()/portfolio()), and the un-filtered
+# {conId: item} dict comprehensions at every call site let whichever account's row came LAST
+# silently win.
+def test_filter_by_account_keeps_only_target():
+    print("\nfilter_by_account(): keeps only the target account's items:")
+    items = [FakeItem("U12991898", "real"), FakeItem("U20738951", "ghost")]
+    out = filter_by_account(items, "U12991898")
+    check("only the real account's item survives", [i.label for i in out], ["real"])
+
+
+def test_filter_by_account_no_target_returns_everything():
+    print("\nfilter_by_account(): no target_acct (None) -> no filtering, back-compat:")
+    items = [FakeItem("U12991898", "a"), FakeItem("U20738951", "b")]
+    out = filter_by_account(items, None)
+    check("nothing filtered when target_acct is None", len(out), 2)
+
+
+def test_filter_by_account_keeps_items_with_no_account_set():
+    print("\nfilter_by_account(): an item with no .account set is kept (matches "
+          "parse_account_summary_rows()'s same defensive behaviour, not over-filtered):")
+    items = [FakeItem("", "unset"), FakeItem("U20738951", "ghost")]
+    out = filter_by_account(items, "U12991898")
+    check("unset-account item survives, ghost account filtered out",
+          [i.label for i in out], ["unset"])
+
+
+def test_filter_by_account_regression_ghost_account_no_longer_wins():
+    print("\nfilter_by_account(): regression -- rebuilding a {conId: item} dict from "
+          "filtered results, the ghost account can no longer clobber the real one's P&L:")
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _Portfolio(FakeItem):
+        def __init__(self, account, con_id, unrealized_pnl):
+            super().__init__(account, label=f"{account}:{con_id}")
+            self.contract = _Contract(con_id)
+            self.unrealizedPNL = unrealized_pnl
+
+    # ghost account's zero-P&L row processed AFTER the real one -- exactly the ordering
+    # that silently won before this fix.
+    raw = [_Portfolio("U12991898", 12345, 987.65), _Portfolio("U20738951", 12345, 0.0)]
+    filtered = filter_by_account(raw, "U12991898")
+    by_conid = {i.contract.conId: i for i in filtered}
+    check("real account's non-zero unrealizedPNL survives", by_conid[12345].unrealizedPNL, 987.65)
+
+
 if __name__ == "__main__":
     for t in (test_single_account_no_filter, test_ignores_tags_outside_whitelist,
               test_bad_value_skipped, test_empty_rows_returns_none,
               test_two_managed_accounts_regression, test_no_target_acct_includes_everything,
               test_account_summary_caches_within_ttl,
               test_account_summary_refetches_after_ttl_expires,
-              test_account_summary_not_connected_bypasses_cache):
+              test_account_summary_not_connected_bypasses_cache,
+              test_filter_by_account_keeps_only_target,
+              test_filter_by_account_no_target_returns_everything,
+              test_filter_by_account_keeps_items_with_no_account_set,
+              test_filter_by_account_regression_ghost_account_no_longer_wins):
         t()
     print()
     if _fails:

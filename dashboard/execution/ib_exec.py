@@ -538,7 +538,7 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
     con_id, qty, _ = row
 
     def _do():
-        contract = next((p.contract for p in (ib.positions() or [])
+        contract = next((p.contract for p in ib_client.filter_by_account(ib.positions() or [], acct)
                          if p.contract.conId == con_id), None)
         if contract is None:
             return None                                  # already flat; sync_closures handles it
@@ -590,7 +590,8 @@ def sync_closures() -> list[str]:
     working_conids = {t.contract.conId for t in open_trades
                       if t.orderStatus.status in
                       ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
-    positions = ib_client.call(lambda: {p.contract.conId: p for p in (ib.positions() or [])})
+    positions = ib_client.call(lambda: {p.contract.conId: p
+                                        for p in ib_client.filter_by_account(ib.positions() or [], acct)})
     for paper_id, con_id, local_symbol, qty, expiry, mstatus in rows:
         pt = journal.get(paper_id)
         if pt is None or mstatus == "CLOSED":
@@ -711,7 +712,7 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
     close_act = "SELL" if trade["direction"] == "long" else "BUY"
     open_act = "BUY" if trade["direction"] == "long" else "SELL"
     def do_roll():
-        old = next((p.contract for p in (ib.positions() or [])
+        old = next((p.contract for p in ib_client.filter_by_account(ib.positions() or [], acct)
                     if p.contract.conId == old_con_id), None)
         if old is not None:
             close_o = ib_async.MarketOrder(close_act, qty)
@@ -757,10 +758,11 @@ def live_positions() -> dict | None:
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, qty FROM ib_mirror "
                          "WHERE status='OPEN'").fetchall()
+    acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     try:
         positions, portfolio = ib_client.call(lambda: (
-            {p.contract.conId: p for p in (ib.positions() or [])},
-            {i.contract.conId: i for i in (ib.portfolio() or [])}))
+            {p.contract.conId: p for p in ib_client.filter_by_account(ib.positions() or [], acct)},
+            {i.contract.conId: i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)}))
     except Exception:                                  # noqa: BLE001 -- read failed, keep last-good
         return None
     out: dict[int, dict] = {}
@@ -928,8 +930,10 @@ def sweep_cash() -> dict:
     con_id = getattr(contract, "conId", 0)
 
     def _snap():
-        pos = next((p for p in (ib.positions() or []) if p.contract.conId == con_id), None)
-        pf = next((i for i in (ib.portfolio() or []) if i.contract.conId == con_id), None)
+        pos = next((p for p in ib_client.filter_by_account(ib.positions() or [], acct)
+                   if p.contract.conId == con_id), None)
+        pf = next((i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)
+                  if i.contract.conId == con_id), None)
         qty = float(pos.position) if pos else 0.0
         px = float(pf.marketPrice) if (pf and pf.marketPrice and pf.marketPrice == pf.marketPrice
                                        and pf.marketPrice > 0) else SGOV_PX_EST
@@ -1047,8 +1051,10 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     con_id = getattr(contract, "conId", 0) if contract else 0
 
     def _snap():
-        pos = next((p for p in (ib.positions() or []) if p.contract.conId == con_id), None)
-        pf = next((i for i in (ib.portfolio() or []) if i.contract.conId == con_id), None)
+        pos = next((p for p in ib_client.filter_by_account(ib.positions() or [], acct)
+                   if p.contract.conId == con_id), None)
+        pf = next((i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)
+                  if i.contract.conId == con_id), None)
         qty = float(pos.position) if pos else 0.0
         mp = pf.marketPrice if pf else None
         px = float(mp) if (mp and mp == mp and mp > 0) else SGOV_PX_EST
