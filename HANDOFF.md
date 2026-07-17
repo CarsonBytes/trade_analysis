@@ -1,9 +1,62 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-14.
+Last updated 2026-07-18.
 
 ---
+
+### 🔬 2026-07-18: re-entry-gate backtest (ASHR whipsaw) — TWO candidates clear the adoption
+bar, NOT YET LIVE (user explicitly asked for backtest-before-live)
+
+Real trigger: paper account's ASHR stopped out 3x in 8 days (2026-07-09, -14, -16), each
+re-entry within a day or two of the prior stop at nearly the same price (confirmed against
+real yfinance OHLC: ASHR chopped in a ~34.5-35.9 range the whole window). Root cause: the
+live `COOLDOWN_MIN=60` gate (`paper.py`) is 60 *minutes* -- a no-op for a weekly-bar strategy
+re-entering days later once the deterministic scorer re-qualifies the same setup on a bounce.
+
+Added `--reentry-test` to `research/backtest.py` (mirrors `--exit-test`'s structure exactly):
+`_signals()` now takes an optional `reentry_gate` param ('reclaim' | 'bars' | 'consec2') that
+tracks per-instrument loss state and holds back a same-direction re-entry after a LOSS. Ran
+against the CURRENT live config (`BROKER=ib UNIVERSE=etf --pos-cap 0.25 --portfolio-cap 1.0
+--reentry-test`, 22 instruments, IS/OOS/FULL @0.5%):
+
+```
+variant                    IS n IS win  IS cd OOS n OOS expR OOS win OOS CAGR% OOS DD% OOS cd FULL cd
+no gate (baseline)          258    45%   0.92   431   +0.171     43%       7.5    -5.4   1.40    1.07  <- baseline
+reclaim prior entry         177    45%   1.30   315   +0.184     43%       7.6    -5.0   1.52    1.23
+4wk bars cooldown           216    48%   2.33   369   +0.190     43%       6.1    -4.9   1.25    1.50
+8wk bars cooldown           194    45%   1.62   323   +0.200     44%       7.1    -4.8   1.49    1.40
+consec2 -> 4wk cooldown     240    47%   1.41   403   +0.143     41%       4.9    -6.0   0.82    1.02
+consec2 -> 8wk cooldown     226    47%   1.56   365   +0.184     44%       7.2    -5.3   1.37    1.35
+```
+
+Against the project's own rule (beat baseline on OOS expR, OOS CAGR/DD, AND IS CAGR/DD):
+- **"reclaim prior entry"** (block re-entry until price closes back ABOVE the prior losing
+  trade's own entry -- directly targets the whipsaw mechanism) passes all three: IS cd 1.30
+  vs 0.92, OOS expR +0.184 vs +0.171, OOS cd 1.52 vs 1.40.
+- **"8wk bars cooldown"** (flat calendar block, no price awareness) also passes all three,
+  with the best OOS expR of any variant (+0.200) and best FULL cd (1.40) -- but it's a
+  blunter instrument (cuts re-entries on ANY instrument regardless of whether price actually
+  reclaimed anything), so the improvement may partly be "fewer trades, less whipsaw exposure
+  generally" rather than specifically fixing the diagnosed mechanism.
+- "4wk bars", "consec2->4wk", and "consec2->8wk" all FAIL at least one leg (mostly OOS CAGR/DD
+  or OOS expR) -- not adopted, not close.
+
+Both surviving candidates cut trade count meaningfully (258->177 or 194 IS) while expectancy
+AND win rate held or improved (not just "fewer but similar" trades) -- a good sign per the
+RULE's own warning about win-rate-only "improvements."
+
+**NOT YET IMPLEMENTED in `dashboard/core/paper.py` (COOLDOWN_MIN / `_recent_close()`) or
+`ib_exec.py`** -- purely a backtest finding pending a decision between the two candidates (or
+running more variants first). Also fixed in the same session, already live: (1) unrealized P&L
+showing $0 for every LIVE position (ghost second account U20738951 clobbering
+`ib.positions()`/`ib.portfolio()`, same root cause as the 2026-07-10 `accountSummaryAsync()`
+fix, never applied to these two calls until now -- see `ib_client.filter_by_account()`); (2)
+`resolve_open()`'s `exit_reason` now distinguishes a real closed broker position from a signal
+that was resolved by real price action while never actually funded (was identically "stop-loss
+hit" for both, confirmed live: a CWB "loss" the user had to ask about because nothing in the
+record said it was never real money); (3) the Paper Trades table (both Open and Recent Closed)
+now shows a "funded" column (✓ broker / ○ signal only) for the same reason.
 
 ### ⭐ 2026-07-14: 7 UI/UX + feature improvements built, all grounded in real friction from
 this project's own history, not generic suggestions

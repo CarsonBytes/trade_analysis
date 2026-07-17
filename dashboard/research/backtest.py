@@ -115,7 +115,8 @@ def _adx(df, n=14):
 
 def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
              resolver=None, sl_method: str = "ATR",
-             vix_series: pd.Series | None = None) -> list[dict]:
+             vix_series: pd.Series | None = None,
+             reentry_gate: str | None = None, reentry_bars: int = 8) -> list[dict]:
     """All gate-passing setups for one instrument (no look-ahead).
     Returns dicts: entry_i, entry_date, exit_date, direction, r.
     `horizon` (bars) overrides paper.HORIZON_DAYS. `resolver` overrides the fixed
@@ -125,12 +126,25 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
     by 20/VIX-at-entry, clipped to [0.6x, 1.4x] of the base horizon (matches a critique's
     `max(21,min(49,35*(20/vix)))` daily-day proposal, translated to weekly bars: [3,7] wk
     at H=5). None (default) = unchanged fixed-horizon behavior -- fully opt-in, no existing
-    caller/test is affected."""
+    caller/test is affected.
+
+    `reentry_gate` (2026-07-18, --reentry-test): after a LOSS on this instrument, whether/how
+    to hold back a same-direction re-entry -- tests the ASHR whipsaw (3 stop-outs in 8 days,
+    each re-entry within a day or two of the prior stop at nearly the same price) against the
+    live COOLDOWN_MIN=60-*minute* gate, which does nothing for a weekly-bar strategy re-
+    entering days later. None (default) = unchanged. 'reclaim': block until price closes back
+    ABOVE the prior losing trade's own ENTRY price (a genuine new high, not just "still
+    qualifies"). 'bars': block for `reentry_bars` bars after the loss, regardless of price.
+    'consec2': like 'bars', but only kicks in after 2 CONSECUTIVE losses on this instrument."""
     H = horizon if horizon is not None else paper.HORIZON_DAYS
     resolve = resolver or _resolve_daily
     directions = _DIRECTIONS
     close = df["close"]; n = len(df); i = 160; out = []
     adx = _adx(df) if MIN_ADX is not None else None
+    last_loss_entry: float | None = None      # entry price of the most recent LOSS
+    last_loss_direction: str | None = None
+    last_loss_exit_i: int | None = None       # bar index the loss closed at
+    consec_losses = 0
     while i < n - 1:
         facts, _ = compute_facts(close.iloc[: i + 1], key)
         score = score_from_facts(key, facts, "")
@@ -150,6 +164,18 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                 (direction == "long" and rsi > paper.OVEREXT_HI) or
                 (direction == "short" and rsi < paper.OVEREXT_LO)):
             i += 1; continue
+        if reentry_gate and last_loss_direction == direction:
+            if reentry_gate == "reclaim":
+                cleared = (close.iloc[i] > last_loss_entry if direction == "long"
+                          else close.iloc[i] < last_loss_entry)
+                if not cleared:
+                    i += 1; continue
+            elif reentry_gate == "bars":
+                if (i - last_loss_exit_i) < reentry_bars:
+                    i += 1; continue
+            elif reentry_gate == "consec2":
+                if consec_losses >= 2 and (i - last_loss_exit_i) < reentry_bars:
+                    i += 1; continue
         obj = confidence_model.objective(score)        # s5 passes; included for parity
         if obj and obj[2] >= confidence_model.MIN_SAMPLES and obj[1] < paper.MIN_EDGE_R:
             i += 1; continue
@@ -206,6 +232,14 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                     # notional / risk_money = entry / stop_distance -> how much cash this
                     # position ties up per $ risked (for the idle-cash interest model).
                     "nmult": float(entry / max(abs(entry - sl), 1e-9))})
+        if reentry_gate:
+            if status == "LOSS":
+                consec_losses = consec_losses + 1 if last_loss_direction == direction else 1
+                last_loss_entry, last_loss_direction = entry, direction
+                last_loss_exit_i = entry_i + used
+            else:                                  # WIN/EXPIRED resets the streak
+                consec_losses = 0
+                last_loss_direction = None
         i = entry_i + used + 1
     return out
 
@@ -642,6 +676,10 @@ def main():
     ap.add_argument("--exit-test", action="store_true",
                     help="compare exit methods (fixed/breakeven/trailing) on the "
                          "current locked config, OOS -- data fetched once")
+    ap.add_argument("--reentry-test", action="store_true",
+                    help="compare re-entry gates after a same-instrument loss "
+                         "(no-gate/reclaim/bars-cooldown/consec-loss-breaker) on the "
+                         "current locked config, OOS -- data fetched once")
     ap.add_argument("--concentrated", action="store_true",
                     help="[DEPRECATED for futures/ETF -- NO-OP: their keys have empty "
                          "_risk_buckets, so there are no caps to drop. MT5-spot only.] "
@@ -984,6 +1022,9 @@ def main():
         return
     if args.exit_test:
         _exit_test(data, span, years)
+        return
+    if args.reentry_test:
+        _reentry_test(data, span, years)
         return
     if args.direction_test:
         _direction_test(data, span, years)
@@ -1391,6 +1432,66 @@ def _exit_test(data, span, years) -> None:
     print("  AND IS CAGR/DD -- an OOS-only 'win' with a weak/negative IS number is a lucky-")
     print("  window red flag, not a real edge. Trend-following theory says cutting winners")
     print("  early should LOSE; a method that only wins in one slice hasn't refuted that.")
+
+
+def _reentry_test(data, span, years) -> None:
+    """Tests whether gating a same-direction re-entry after a LOSS on the same instrument
+    beats the live system's current behaviour -- ADDED 2026-07-18, after a real live
+    incident: ASHR stopped out 3x in 8 days (2026-07-09, -14, -16), each re-entry within a
+    day or two of the prior stop at nearly the same price (confirmed against real yfinance
+    OHLC: the instrument chopped in a ~34.5-35.9 range the whole window). The live
+    COOLDOWN_MIN=60-*minute* gate (paper.py) does nothing here -- it only blocks same-cycle
+    flip-flopping, not a re-entry days later once the deterministic scorer re-qualifies the
+    same setup on a bounce within an ongoing chop.
+
+    baseline = today's live behaviour (no gate). Variants gate a same-direction re-entry
+    after a LOSS on that instrument -- see _signals()'s reentry_gate docstring for what each
+    does. User explicitly asked this be tested BEFORE any live code changes."""
+    cut = min(min(df.index) for df in data.values()) + (span * 0.6)
+    print(f"\nRE-ENTRY GATE TEST ({len(data)} instruments, current live config, "
+          "IS/OOS/FULL @0.5%). Data fetched once.\n")
+
+    def _row(cands):
+        if len(cands) < 2:
+            return None
+        yrs = _span_years(cands)
+        eq, real = _portfolio(cands, 0.005)
+        m = _metrics(eq, real, yrs); ss = paper.stats(real)
+        cd = (m["cagr"] / abs(m["maxdd"])) if m["maxdd"] else 0
+        return {"n": len(real), "expR": ss["expectancy_R"], "cagr": m["cagr"],
+                "dd": m["maxdd"], "cd": cd, "win": ss["win_rate"]}
+
+    variants = {
+        "no gate (baseline)":     (None, 0),
+        "reclaim prior entry":    ("reclaim", 0),
+        "4wk bars cooldown":      ("bars", 4),
+        "8wk bars cooldown":      ("bars", 8),
+        "consec2 -> 4wk cooldown": ("consec2", 4),
+        "consec2 -> 8wk cooldown": ("consec2", 8),
+    }
+    print(f"  {'variant':<26}{'IS n':>5}{'IS win':>7}{'IS cd':>7}{'OOS n':>6}"
+          f"{'OOS expR':>9}{'OOS win':>8}{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}{'FULL cd':>8}")
+    for label, (gate, bars_n) in variants.items():
+        cands = []
+        for key, df in data.items():
+            cands += _signals(df, key, reentry_gate=gate, reentry_bars=bars_n)
+        is_r = _row([c for c in cands if c["entry_date"] <= cut])
+        oos_r = _row([c for c in cands if c["entry_date"] > cut])
+        full_r = _row(cands)
+        if oos_r is None:
+            continue
+        tag = "  <- baseline" if label.startswith("no gate") else ""
+        print(f"  {label:<26}{(is_r['n'] if is_r else 0):>5}"
+              f"{(is_r['win']*100 if is_r else 0):>6.0f}%{(is_r['cd'] if is_r else 0):>7.2f}"
+              f"{oos_r['n']:>6}{oos_r['expR']:>+9.3f}{oos_r['win']*100:>7.0f}%"
+              f"{oos_r['cagr']*100:>10.1f}{oos_r['dd']*100:>8.1f}"
+              f"{oos_r['cd']:>7.2f}{(full_r['cd'] if full_r else 0):>8.2f}{tag}")
+    print()
+    print("  RULE: adopt a re-entry gate ONLY if it beats no-gate on OOS expR, OOS CAGR/DD,")
+    print("  AND IS CAGR/DD -- same bar as every other rule change tested here. A gate that")
+    print("  only helps in one slice, or that wins on win-rate while losing on expR/CAGR")
+    print("  (fewer, more selective trades can raise win% while cutting total edge), hasn't")
+    print("  earned a live change.")
 
 
 def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:
