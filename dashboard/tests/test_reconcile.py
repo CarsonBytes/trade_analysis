@@ -80,6 +80,31 @@ def test_compare_positions_no_pending_arg_unchanged():
           {"only_local": ["AMLP", "ASHR"], "only_broker": []})
 
 
+def test_compare_positions_excludes_cash_sweep_holding():
+    print("\ncompare_positions: SGOV (the cash-sweep shield, intentionally never in "
+          "ib_mirror) is excluded, not flagged as an untracked broker position -- "
+          "confirmed live 2026-07-18: this fired a real 'position MISMATCH' alarm for "
+          "exactly SGOV, which self-resolved 6 minutes later on its own -- not a real "
+          "desync, a missing exclusion for an intentional non-strategy holding:")
+    out = compare_positions({"SGOV": 500.0, "CPER": 30.0}, {"CPER"},
+                            excluded_symbols={"SGOV"})
+    check("SGOV excluded, real position unaffected", out, {"only_local": [], "only_broker": []})
+
+
+def test_compare_positions_excluded_does_not_hide_a_real_ghost():
+    print("\ncompare_positions: excluded_symbols only suppresses the excluded symbol -- "
+          "a genuine untracked position elsewhere still gets flagged:")
+    out = compare_positions({"SGOV": 500.0, "SPY": 3.0}, set(), excluded_symbols={"SGOV"})
+    check("SPY still flagged, SGOV still excluded", out, {"only_local": [], "only_broker": ["SPY"]})
+
+
+def test_compare_positions_no_excluded_arg_unchanged():
+    print("\ncompare_positions: omitting excluded_symbols entirely -- old behavior intact "
+          "(back-compat for any other caller):")
+    out = compare_positions({"SGOV": 500.0}, set())
+    check("SGOV flagged when no exclusion given", out, {"only_local": [], "only_broker": ["SGOV"]})
+
+
 def test_mirrored_open_symbols_isolated_db():
     print("mirrored_open_symbols: reads ib_mirror from an isolated temp db:")
     fd, path = tempfile.mkstemp(suffix=".db")
@@ -119,6 +144,9 @@ if __name__ == "__main__":
               test_compare_positions_pending_order_not_a_ghost,
               test_compare_positions_pending_order_mixed_with_real_ghost,
               test_compare_positions_no_pending_arg_unchanged,
+              test_compare_positions_excludes_cash_sweep_holding,
+              test_compare_positions_excluded_does_not_hide_a_real_ghost,
+              test_compare_positions_no_excluded_arg_unchanged,
               test_mirrored_open_symbols_isolated_db):
         t()
     print()

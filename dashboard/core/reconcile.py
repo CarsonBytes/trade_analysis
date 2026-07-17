@@ -13,7 +13,8 @@ from dashboard.core.log import log
 
 
 def compare_positions(broker_positions: dict[str, float], local_open_symbols: set[str],
-                      broker_pending_symbols: set[str] | None = None) -> dict:
+                      broker_pending_symbols: set[str] | None = None,
+                      excluded_symbols: set[str] | None = None) -> dict:
     """PURE function (no I/O -- unit-testable in isolation): compare broker's actual non-zero
     positions against the set of instrument symbols this dashboard locally thinks are OPEN.
 
@@ -31,12 +32,21 @@ def compare_positions(broker_positions: dict[str, float], local_open_symbols: se
     different things, and conflating them produced a false "ghost" alarm for 6 real, correctly
     -placed GTC MKT orders that simply hadn't filled yet (placed outside market hours). A
     symbol with no broker POSITION but a live broker ORDER is exactly the expected state for a
-    pending entry, not a desync -- excluded from only_local accordingly."""
+    pending entry, not a desync -- excluded from only_local accordingly.
+
+    `excluded_symbols` (FIXED 2026-07-18): intentional NON-strategy broker holdings that are
+    never added to ib_mirror by design -- currently just the cash-sweep's SGOV shield (see
+    ib_exec.py's SGOV_SYMBOL) -- so they'd otherwise ALWAYS false-positive as "only_broker
+    (untracked)" every single time the sweep holds any shares. Confirmed live 2026-07-18: this
+    fired a real "position MISMATCH" alarm for exactly SGOV, self-resolved 6 minutes later once
+    the sweep's own next cycle happened to true it back up -- not a real desync, a permanently
+    missing exclusion for an intentional holding."""
     broker_symbols = {sym for sym, qty in broker_positions.items() if qty != 0}
     pending = broker_pending_symbols or set()
+    excluded = excluded_symbols or set()
     return {
         "only_local": sorted(local_open_symbols - broker_symbols - pending),
-        "only_broker": sorted(broker_symbols - local_open_symbols),
+        "only_broker": sorted(broker_symbols - local_open_symbols - excluded),
     }
 
 
@@ -78,7 +88,8 @@ def reconcile_with_broker() -> dict:
     # zero executions, and were flagged as ghosts the whole time). Check broker open orders
     # too before concluding a real desync.
     broker_pending = ib_client.broker_open_order_symbols()
-    result = compare_positions(broker_pos, local_open, broker_pending)
+    result = compare_positions(broker_pos, local_open, broker_pending,
+                               excluded_symbols={ib_exec.SGOV_SYMBOL})
     if result["only_local"] or result["only_broker"]:
         msg = (f"reconcile: broker/local position MISMATCH -- "
               f"only_local(ghost)={result['only_local']} "
