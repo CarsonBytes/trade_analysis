@@ -964,8 +964,20 @@ def unarchive(rowids: list[int]) -> int:
     return n
 
 
-def resolve_open(get_ohlc_fn) -> int:
-    """Resolve OPEN trades against fresh data. Returns count resolved."""
+def resolve_open(get_ohlc_fn, executed_ids: set[int] | None = None) -> int:
+    """Resolve OPEN trades against fresh data. Returns count resolved.
+
+    Runs independently of broker fills -- checks REAL market OHLC against the trade's
+    stored SL/TP/HORIZON regardless of whether it was ever actually funded (see
+    ib_exec.py's sync_closures(), which documents the same thing from the other side:
+    this can resolve a trade to WIN/LOSS/EXPIRED while its real bracket order is still
+    working/unfilled at the broker, or when no broker order was ever placed for it at
+    all -- e.g. a signal the portfolio cap held back the whole time). Before 2026-07-17
+    the exit_reason for both cases read identically ("stop-loss hit"), which made a
+    signal that never risked a dollar look indistinguishable from a real closed
+    position -- confirmed live: a CWB "loss" that was never funded, asked about because
+    nothing in the record said so. `executed_ids` (pass broker.executed_ids(), best-
+    effort -- omit or pass None to skip the check) tags which case this actually is."""
     resolved = 0
     for t in open_trades():
         out = _outcome_for(t, get_ohlc_fn)
@@ -976,6 +988,8 @@ def resolve_open(get_ohlc_fn) -> int:
                        half_spread=t.get("half_spread") or HALF_SPREAD)
         reason = {"WIN": "take-profit hit", "LOSS": "stop-loss hit",
                   "EXPIRED": "horizon expired"}.get(status, status)
+        if executed_ids is not None and t["id"] not in executed_ids:
+            reason += " (signal only -- never funded at the broker)"
         _update_resolution(t["id"], status, str(exit_time), exit_price, round(r, 3),
                            exit_reason=reason)
         log.info("RESOLVED %s %s %s  R=%+.2f  entry=%.5f exit=%.5f @ %s",

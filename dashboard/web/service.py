@@ -309,7 +309,12 @@ def refresh_cheap() -> None:
     # resolve any open paper trades against the fresh price action. Use DAILY
     # bars (covers the multi-week weekly horizon; M1 only spans ~34 days).
     try:
-        n = paper.resolve_open(lambda inst: get_ohlc(inst, period="1y", interval="1d"))
+        try:
+            _executed_ids = broker.executed_ids()
+        except Exception:                          # noqa: BLE001 -- best-effort tag, never block resolution
+            _executed_ids = None
+        n = paper.resolve_open(lambda inst: get_ohlc(inst, period="1y", interval="1d"),
+                               executed_ids=_executed_ids)
         STATE["paper_resolved"] = n
         if n:
             log.info("resolved %d paper trade(s) this refresh", n)
