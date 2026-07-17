@@ -647,6 +647,15 @@ def paper_panel() -> None:
                 if not s["trustworthy"]:
                     ui.label("n<30 — too few to trust").classes("text-xs text-orange italic")
 
+    # ADDED 2026-07-18: "funded" column on both tables below -- a signal that never got a
+    # broker order (portfolio cap held it back, etc.) still gets tracked and resolved against
+    # real price action for signal-quality evaluation (see paper.resolve_open()'s
+    # executed_ids-aware exit_reason), but a bare "LOSS  R -1.00" row looked identical whether
+    # real money was ever on the line or not -- confirmed a real user had to ask why a CWB
+    # "loss" happened, since nothing in this table said it was never funded. broker.executed_ids()
+    # is a local SQLite query, not a broker round-trip, so this is cheap to check per render.
+    _executed = _bk.executed_ids() if _bk.is_ib() else set()
+
     # open trades (selectable -> archive specific records)
     if open_t:
         with ui.row().classes("items-center gap-2 mt-2"):
@@ -656,6 +665,7 @@ def paper_panel() -> None:
         rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
                  "method": t["method"], "entry": round(t["entry"], 4),
                  "SL": round(t["sl"], 4), "TP": round(t["tp"], 4), "R:R": t["rr"],
+                 "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
                  "opened": _fmt_ts(t["ts"])} for t in open_t]
         open_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
                             columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
@@ -668,11 +678,16 @@ def paper_panel() -> None:
                       on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
         rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
                  "method": t["method"], "status": t["status"],
-                 "R": round(t["realized_r"], 2), "opened": _fmt_ts(t["ts"]),
+                 "R": round(t["realized_r"], 2),
+                 "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
+                 "opened": _fmt_ts(t["ts"]),
                  "closed": _fmt_ts(t["exit_ts"])} for t in closed[:20]]
         closed_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
                               columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
-            .classes("w-full").props("dense")
+            .classes("w-full").props("dense")\
+            .tooltip("'R' is what the signal-logic scored regardless of funding -- "
+                     "'○ signal only' rows never had a real broker order, see the "
+                     "Retrospective tab for broker-executed-only KPIs")
 
 
 
