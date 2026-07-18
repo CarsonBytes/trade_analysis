@@ -687,7 +687,13 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
     msg = (f"#{trade['id']} {trade['instrument']} resolved from BROKER (IB): "
           f"{status} R={r:+.2f} exit={exit_price}")
     from dashboard.core import notable_events
-    notable_events.record(f"Position closed: {msg}")
+    # 2026-07-18: a real (broker-funded) LOSS is exactly the event the reentry-gate
+    # research/implementation cares about validating -- elevate to "warning" so it
+    # actually pushes to Telegram (notify.py only pushes warning/error, INFO events stay
+    # local-changelog-only per the 2026-07-15 "don't buzz for routine stuff" change). A WIN
+    # stays "info" -- still routine, no reason to buzz the phone for it.
+    notable_events.record(f"Position closed: {msg}",
+                          level="warning" if status == "LOSS" else "info")
     return msg
 
 

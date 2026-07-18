@@ -259,12 +259,66 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
             pass
 
 
+def test_resolve_from_broker_elevates_loss_to_warning_level():
+    print("\n_resolve_from_broker(): a real (broker-funded) LOSS is recorded at 'warning' "
+          "level so it actually pushes to Telegram -- a WIN stays 'info' (2026-07-18: "
+          "notify.py only pushes warning/error, so an unflagged real loss would silently "
+          "never buzz the phone -- exactly the event the reentry-gate work needs surfaced):")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:   # ensures paper_trades table exists first
+            pass
+        loss_trade = {"id": 1, "instrument": "CWB", "direction": "long",
+                     "entry": 103.85, "sl": 100.0, "half_spread": 0.0}
+        win_trade = {"id": 2, "instrument": "SPY", "direction": "long",
+                    "entry": 500.0, "sl": 490.0, "half_spread": 0.0}
+
+        class _FakeIB:
+            def fills(self):
+                return [
+                    SimpleNamespace(contract=SimpleNamespace(conId=111),
+                                   execution=SimpleNamespace(avgPrice=95.0, price=95.0)),
+                    SimpleNamespace(contract=SimpleNamespace(conId=222),
+                                   execution=SimpleNamespace(avgPrice=510.0, price=510.0)),
+                ]
+
+        recorded: list[tuple[str, str]] = []
+        with mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch("dashboard.core.notable_events.record",
+                        side_effect=lambda msg, level="info": recorded.append((msg, level))):
+            loss_msg = ib_exec._resolve_from_broker(_FakeIB(), loss_trade, 111)
+            win_msg = ib_exec._resolve_from_broker(_FakeIB(), win_trade, 222)
+
+        check("resolved as a real LOSS", "LOSS" in loss_msg, True)
+        check("resolved as a real WIN", "WIN" in win_msg, True)
+        check("LOSS pushed at warning level", recorded[0][1], "warning")
+        check("WIN stays at info level (no extra phone buzz)", recorded[1][1], "info")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
     test_pending_entry_notional_usd()
     test_current_portfolio_room_usd()
     test_sync_closures_cancels_stale_order_when_paper_already_resolved()
+    test_resolve_from_broker_elevates_loss_to_warning_level()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")
