@@ -36,8 +36,17 @@ MOST RECENT closed trade matters (an older loss followed by a newer win clears i
 **Expected effect** (from the backtest, OOS @ current live config): CAGR 7.5%→9.7%, max DD
 -5.4%→-2.8%, CAGR/DD 1.40→3.49, expectancy +0.171→+0.290R, ~43% fewer trades (more selective).
 Real but MODERATE statistical confidence, not proven fact — corrected DSR was 88%, below the
-conventional ~95% bar (see ROUND 3 below). Deployed to both instances; watch the next real loss
-on each to confirm the gate actually fires as designed before fully trusting it.
+conventional ~95% bar (see ROUND 3 below).
+
+**Deployed and CONFIRMED WORKING live**, not just healthy-status-code deployed: restarted both
+`DashboardApp` (paper, :8080) and `DashboardAppLive` (live real-money U12991898, :8081) via
+`Stop/Start-ScheduledTask`, both returned HTTP 200 after warm-up (~4.7-4.9s response, no error
+spike vs baseline, no tracebacks in `logs/dashboard.log` around the restart window). Within the
+first placement cycle after restart, the LIVE instance's log shows the gate actually firing on
+a real signal: `funnel CWB: skip (re-entry gate: 101.4900 hasn't reclaimed 107.0763 (1.0R
+beyond the last loss's entry 103.8500))` — CWB had a prior loss on record, the gate correctly
+picked it up and blocked the re-entry exactly as designed. Not a synthetic test — the real
+mechanism, on the real account, on its very first cycle.
 
 ---
 
