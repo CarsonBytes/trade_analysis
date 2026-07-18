@@ -5,6 +5,59 @@ Last updated 2026-07-18.
 
 ---
 
+### 🚨 2026-07-18: FIXED a false -56.6% drawdown that was ACTIVELY HALTING the live real-money
+account's new entries, every ~15 minutes for many hours
+
+User asked to "watch for the next real loss on both accounts" and separately flagged "the
+telegram sent similar messages... verify if they are really true or meaningful." Investigating
+found the second question WAS the real issue: both instances' `changelog` tables showed
+repeated `DD-halt: current drawdown -X% <= -13.0% threshold` warnings (PAPER around -20%, LIVE
+as severe as **-58.1%**), each one pushing a Telegram alert, recurring roughly every 15-16
+minutes since at least 2026-07-17T20:14 -- i.e. the LIVE real-money account had been silently
+blocked from placing any new entries for most of a day.
+
+**Root cause**: `paper.current_drawdown_pct()` computes % drawdown as `(current - peak) / peak`
+using the DEPOSIT-ADJUSTED (P&L-only) series' own peak as the denominator -- correct once an
+account has substantial accumulated P&L, but unstable for a YOUNG account (real live fills only
+started 2026-07-13, 5 days before this) where accumulated P&L is still small relative to total
+deposited capital, by construction (this is just what early days of a ~4-7%/yr CAGR strategy
+looks like). The 2026-07-11 materiality floor caught the DEGENERATE near-zero-peak case but not
+this milder, fully-funded one. Confirmed against the real cached data: the live account had a
+genuine +1,432 HKD trading peak (deposit-adjusted 1,471.73, raw equity there 101,456.34), pulled
+back by a real 833 HKD -- **-0.82% of the account's actual size**, but the old formula divided
+by the tiny 1,471.73 P&L-only peak instead and read it as **-56.6%**. `DD_HALT_PCT=-13%` was
+calibrated against the BACKTEST's own maxdd, which is a % of TOTAL compounding equity
+(`research/backtest.py _metrics()`: `dd = eq/peak - 1`, never a P&L-only sub-series) -- so live
+was comparing an apples number against an oranges threshold the entire time.
+
+**Fix** (`dashboard/core/paper.py::current_drawdown_pct()`): track the REAL raw equity at the
+moment each deposit-adjusted peak occurs, divide by THAT instead of the tiny adjusted-peak
+value. Mathematically identical to the old formula whenever the peak precedes any deposit (no
+change for a pre-funding-only account) -- only changes results once real capital is actually in
+play, exactly where the old formula broke down. Verified against real cached data:
+**LIVE -56.61% -> -0.82%, PAPER -20%-ish range -> -1.66%.**
+
+One existing test's own expected value (-50.0%, `test_current_drawdown_pct`'s "grown_acct"
+case) turned out to be ITSELF an instance of this same bug baked into a fixture -- corrected to
+the true math (-0.98%) with an explanation, not just re-asserted. New regression test
+reproduces the exact live incident's numbers. Shared by both the DD-halt gate (`ib_exec.py`)
+and the dashboard's own "Drawdown from peak" UI stat (already deduplicated to call this same
+function as of 2026-07-13) -- one fix covers both. Full 15-file suite green. Deployed to both
+instances immediately (this was actively harming live trading), confirmed healthy, no new
+DD-halt entries since restart.
+
+**Also fixed same investigation**: real (broker-funded) LOSS closes were being recorded at
+`info` level, which `notify.py` filters out of Telegram pushes entirely -- a real loss would
+have silently never notified anyone. Elevated LOSS to `warning` (WIN stays `info`). See the
+commit just below this one for full detail.
+
+**Lesson for future sessions**: when a live safety gate (DD-halt, portfolio-cap, etc.) fires
+repeatedly on a real account, always sanity-check the ACTUAL underlying number against what the
+account is really worth before assuming the halt is protecting against a real loss -- it might
+be the monitoring math, not the trading.
+
+---
+
 ### 🔔 2026-07-18: a real LOSS now actually pushes to Telegram (it silently didn't before)
 
 User asked to "watch for the next real loss on both accounts" — to validate the new re-entry
