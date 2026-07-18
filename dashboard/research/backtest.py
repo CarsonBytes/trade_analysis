@@ -116,7 +116,8 @@ def _adx(df, n=14):
 def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
              resolver=None, sl_method: str = "ATR",
              vix_series: pd.Series | None = None,
-             reentry_gate: str | None = None, reentry_bars: int = 8) -> list[dict]:
+             reentry_gate: str | None = None, reentry_bars: int = 8,
+             reentry_buffer_r: float = 0.0) -> list[dict]:
     """All gate-passing setups for one instrument (no look-ahead).
     Returns dicts: entry_i, entry_date, exit_date, direction, r.
     `horizon` (bars) overrides paper.HORIZON_DAYS. `resolver` overrides the fixed
@@ -135,13 +136,20 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
     entering days later. None (default) = unchanged. 'reclaim': block until price closes back
     ABOVE the prior losing trade's own ENTRY price (a genuine new high, not just "still
     qualifies"). 'bars': block for `reentry_bars` bars after the loss, regardless of price.
-    'consec2': like 'bars', but only kicks in after 2 CONSECUTIVE losses on this instrument."""
+    'consec2': like 'bars', but only kicks in after 2 CONSECUTIVE losses on this instrument.
+    ROUND 2 (2026-07-18, extending round 1's two survivors -- 'reclaim prior entry' and '8wk
+    bars cooldown'): 'reclaim_buffer' requires closing beyond entry by `reentry_buffer_r` * the
+    losing trade's OWN risk (entry-sl distance), not just barely crossing it -- a "confirmed"
+    reclaim vs a marginal one. 'reclaim_or_bars' is 'reclaim', but capped at `reentry_bars` --
+    if price never reclaims (a real breakdown, not just chop), don't block a good NEW setup
+    forever off one old reference level."""
     H = horizon if horizon is not None else paper.HORIZON_DAYS
     resolve = resolver or _resolve_daily
     directions = _DIRECTIONS
     close = df["close"]; n = len(df); i = 160; out = []
     adx = _adx(df) if MIN_ADX is not None else None
     last_loss_entry: float | None = None      # entry price of the most recent LOSS
+    last_loss_risk: float | None = None       # |entry-sl| of the most recent LOSS
     last_loss_direction: str | None = None
     last_loss_exit_i: int | None = None       # bar index the loss closed at
     consec_losses = 0
@@ -165,16 +173,37 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                 (direction == "short" and rsi < paper.OVEREXT_LO)):
             i += 1; continue
         if reentry_gate and last_loss_direction == direction:
+            bars_since_loss = i - last_loss_exit_i
             if reentry_gate == "reclaim":
                 cleared = (close.iloc[i] > last_loss_entry if direction == "long"
                           else close.iloc[i] < last_loss_entry)
                 if not cleared:
                     i += 1; continue
             elif reentry_gate == "bars":
-                if (i - last_loss_exit_i) < reentry_bars:
+                if bars_since_loss < reentry_bars:
                     i += 1; continue
             elif reentry_gate == "consec2":
-                if consec_losses >= 2 and (i - last_loss_exit_i) < reentry_bars:
+                if consec_losses >= 2 and bars_since_loss < reentry_bars:
+                    i += 1; continue
+            elif reentry_gate == "reclaim_buffer":
+                buf = reentry_buffer_r * (last_loss_risk or 0.0)
+                target = last_loss_entry + buf if direction == "long" else last_loss_entry - buf
+                cleared = close.iloc[i] > target if direction == "long" else close.iloc[i] < target
+                if not cleared:
+                    i += 1; continue
+            elif reentry_gate == "reclaim_or_bars":
+                if bars_since_loss < reentry_bars:      # cap not yet reached -- reclaim still required
+                    cleared = (close.iloc[i] > last_loss_entry if direction == "long"
+                              else close.iloc[i] < last_loss_entry)
+                    if not cleared:
+                        i += 1; continue
+                # else: cap reached -- allow through regardless of price
+            elif reentry_gate == "reclaim_and_bars":
+                if bars_since_loss < reentry_bars:      # floor: always wait this long, no exceptions
+                    i += 1; continue
+                cleared = (close.iloc[i] > last_loss_entry if direction == "long"
+                          else close.iloc[i] < last_loss_entry)
+                if not cleared:                          # AND still require an actual reclaim
                     i += 1; continue
         obj = confidence_model.objective(score)        # s5 passes; included for parity
         if obj and obj[2] >= confidence_model.MIN_SAMPLES and obj[1] < paper.MIN_EDGE_R:
@@ -237,6 +266,7 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                 consec_losses = consec_losses + 1 if last_loss_direction == direction else 1
                 last_loss_entry, last_loss_direction = entry, direction
                 last_loss_exit_i = entry_i + used
+                last_loss_risk = abs(entry - sl)
             else:                                  # WIN/EXPIRED resets the streak
                 consec_losses = 0
                 last_loss_direction = None
@@ -1446,7 +1476,17 @@ def _reentry_test(data, span, years) -> None:
 
     baseline = today's live behaviour (no gate). Variants gate a same-direction re-entry
     after a LOSS on that instrument -- see _signals()'s reentry_gate docstring for what each
-    does. User explicitly asked this be tested BEFORE any live code changes."""
+    does. User explicitly asked this be tested BEFORE any live code changes.
+
+    ROUND 2 (2026-07-18): round 1 found TWO survivors ('reclaim prior entry' and '8wk bars
+    cooldown') and three failures ('4wk bars cooldown', both consec2 variants). This round:
+    (a) maps the bars-cooldown duration curve at 6/10/12wk to see whether 8wk is near a peak
+    or whether longer still helps: (b) drops consec2 entirely -- it structurally can't catch
+    the diagnosed ASHR case (it only gates the 3rd+ entry, not the 2nd, so it never fires on
+    a 2-loss whipsaw) and round 1 already showed it failing; (c) refines 'reclaim' with an
+    R-multiple confirmation buffer (0.5R/1.0R beyond the prior entry, not just marginally
+    across it) and a minimum-bars floor, plus (d) a 'reclaim or N-bars-cap' hybrid so a stale
+    loss reference can't block a good new setup forever if price never truly reclaims."""
     cut = min(min(df.index) for df in data.values()) + (span * 0.6)
     print(f"\nRE-ENTRY GATE TEST ({len(data)} instruments, current live config, "
           "IS/OOS/FULL @0.5%). Data fetched once.\n")
@@ -1461,20 +1501,35 @@ def _reentry_test(data, span, years) -> None:
         return {"n": len(real), "expR": ss["expectancy_R"], "cagr": m["cagr"],
                 "dd": m["maxdd"], "cd": cd, "win": ss["win_rate"]}
 
+    # (gate, reentry_bars, reentry_buffer_r)
     variants = {
-        "no gate (baseline)":     (None, 0),
-        "reclaim prior entry":    ("reclaim", 0),
-        "4wk bars cooldown":      ("bars", 4),
-        "8wk bars cooldown":      ("bars", 8),
-        "consec2 -> 4wk cooldown": ("consec2", 4),
-        "consec2 -> 8wk cooldown": ("consec2", 8),
+        "no gate (baseline)":       (None, 0, 0.0),
+        "reclaim prior entry":      ("reclaim", 0, 0.0),
+        "4wk bars cooldown":        ("bars", 4, 0.0),
+        "6wk bars cooldown":        ("bars", 6, 0.0),
+        "8wk bars cooldown":        ("bars", 8, 0.0),
+        "10wk bars cooldown":       ("bars", 10, 0.0),
+        "12wk bars cooldown":       ("bars", 12, 0.0),
+        "consec2 -> 4wk cooldown":  ("consec2", 4, 0.0),
+        "consec2 -> 8wk cooldown":  ("consec2", 8, 0.0),
+        "reclaim + 0.5R buffer":    ("reclaim_buffer", 0, 0.5),
+        "reclaim + 0.75R buffer":   ("reclaim_buffer", 0, 0.75),
+        "reclaim + 1.0R buffer":    ("reclaim_buffer", 0, 1.0),
+        "reclaim + 1.25R buffer":   ("reclaim_buffer", 0, 1.25),
+        "reclaim + 1.5R buffer":    ("reclaim_buffer", 0, 1.5),
+        "reclaim + 2.0R buffer":    ("reclaim_buffer", 0, 2.0),
+        "reclaim, 2wk floor":       ("reclaim_and_bars", 2, 0.0),
+        "reclaim, 4wk floor":       ("reclaim_and_bars", 4, 0.0),
+        "reclaim or 8wk cap":       ("reclaim_or_bars", 8, 0.0),
+        "reclaim or 12wk cap":      ("reclaim_or_bars", 12, 0.0),
     }
     print(f"  {'variant':<26}{'IS n':>5}{'IS win':>7}{'IS cd':>7}{'OOS n':>6}"
           f"{'OOS expR':>9}{'OOS win':>8}{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}{'FULL cd':>8}")
-    for label, (gate, bars_n) in variants.items():
+    for label, (gate, bars_n, buffer_r) in variants.items():
         cands = []
         for key, df in data.items():
-            cands += _signals(df, key, reentry_gate=gate, reentry_bars=bars_n)
+            cands += _signals(df, key, reentry_gate=gate, reentry_bars=bars_n,
+                              reentry_buffer_r=buffer_r)
         is_r = _row([c for c in cands if c["entry_date"] <= cut])
         oos_r = _row([c for c in cands if c["entry_date"] > cut])
         full_r = _row(cands)

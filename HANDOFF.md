@@ -5,8 +5,95 @@ Last updated 2026-07-18.
 
 ---
 
-### 🔬 2026-07-18: re-entry-gate backtest (ASHR whipsaw) — TWO candidates clear the adoption
-bar, NOT YET LIVE (user explicitly asked for backtest-before-live)
+### 🔬 2026-07-18: re-entry-gate backtest ROUND 2 — reclaim+1.0R buffer is the standout
+candidate (OOS CAGR/DD 3.49 vs baseline 1.40), 4 more variants clear the bar, STILL NOT LIVE
+
+Continuation of the entry directly below this one, same day, per explicit instruction to
+"keep researching more variants apart from the two that clear the bar." Extended `_signals()`
+with two new composable reentry-gate params: `reentry_buffer_r` (require price to close
+beyond the prior losing entry by an R-multiple of that trade's OWN risk, not just marginally
+across it) and modes `reclaim_buffer`, `reclaim_and_bars` (reclaim + a minimum-bars floor,
+both required), `reclaim_or_bars` (reclaim required, but capped at N bars so a stale loss
+reference can't block a good new setup forever). Ran the SAME live config
+(`BROKER=ib UNIVERSE=etf --pos-cap 0.25 --portfolio-cap 1.0 --reentry-test`), 15 variants:
+
+```
+variant                    IS n IS win  IS cd OOS n OOS expR OOS win OOS CAGR% OOS DD% OOS cd FULL cd
+no gate (baseline)          258    45%   0.92   431   +0.171     43%       7.5    -5.4   1.40    1.07  <- baseline
+reclaim prior entry         177    45%   1.30   315   +0.184     43%       7.6    -5.0   1.52    1.23
+4wk bars cooldown           216    48%   2.33   369   +0.190     43%       6.1    -4.9   1.25    1.50
+6wk bars cooldown           204    46%   1.69   342   +0.168     43%       5.0    -4.8   1.04    1.24
+8wk bars cooldown           194    45%   1.62   323   +0.200     44%       7.1    -4.8   1.49    1.40
+10wk bars cooldown          184    47%   2.25   305   +0.163     42%       3.8    -6.0   0.64    0.88
+12wk bars cooldown          178    48%   2.25   282   +0.146     41%       3.7    -6.0   0.62    0.89
+consec2 -> 4wk cooldown     240    47%   1.41   403   +0.143     41%       4.9    -6.0   0.82    1.02
+consec2 -> 8wk cooldown     226    47%   1.56   365   +0.184     44%       7.2    -5.3   1.37    1.35
+reclaim + 0.5R buffer       156    47%   2.38   281   +0.222     44%       6.6    -5.0   1.33    1.31
+reclaim + 0.75R buffer      147    48%   2.54   259   +0.247     44%       8.4    -4.3   1.97    1.62
+reclaim + 1.0R buffer       136    46%   2.07   245   +0.290     45%       9.7    -2.8   3.49    2.52
+reclaim + 1.25R buffer      128    49%   2.34   233   +0.259     45%       6.7    -3.6   1.88    1.70
+reclaim + 1.5R buffer       122    48%   1.80   221   +0.240     46%       5.0    -4.1   1.21    1.12
+reclaim + 2.0R buffer       116    48%   1.32   197   +0.223     44%       4.5    -3.9   1.15    0.98
+reclaim, 2wk floor          176    45%   1.34   310   +0.191     43%       8.2    -5.1   1.60    1.27
+reclaim, 4wk floor          167    46%   1.59   290   +0.211     44%       5.7    -5.0   1.14    1.10
+reclaim or 8wk cap          226    46%   1.23   387   +0.170     43%       8.1    -4.8   1.67    1.40
+reclaim or 12wk cap         220    45%   1.39   381   +0.168     42%       7.8    -5.4   1.45    1.26
+```
+
+Against the same RULE (beat baseline on OOS expR, OOS CAGR/DD, AND IS CAGR/DD):
+
+- **Bars-cooldown curve mapped (4/6/8/10/12wk): 8wk is a genuine peak, not noise.** 6wk fails
+  (OOS expR +0.168 < baseline), 10/12wk fail BADLY on both OOS expR and OOS cd (the cooldown
+  gets long enough to miss real re-entries, not just whipsaw ones) -- only 8wk passes all
+  three legs. Confirms round 1's 8wk result wasn't a lucky window; the curve is smooth and
+  peaks exactly where round 1 found it.
+- **consec2 confirmed structurally dead** (both variants still fail OOS expR) -- as expected,
+  since it only gates the 3rd+ entry and the diagnosed ASHR case was a 2nd-entry whipsaw. Not
+  tested further, per plan.
+- **`reclaim_or_bars` (hybrid cap) and `reclaim_and_bars` (4wk floor) both FAIL** -- the cap
+  variants barely move OOS expR (+0.170/+0.168, both ~= baseline), diluting the reclaim
+  signal's real edge by letting stale-reference trades back in too easily. The 2wk floor
+  variant, by contrast, PASSES (IS cd 1.34, OOS expR +0.191, OOS cd 1.60) -- a short floor
+  doesn't hurt, but a longer one (4wk) or a hard cap does.
+- **`reclaim_buffer` is the headline finding.** The buffer-R curve (0.5/0.75/1.0/1.25/1.5/2.0R)
+  is a real, smooth peak centered at 1.0R, not a single lucky point: 0.5R fails (OOS cd 1.33 <
+  1.40), 0.75R/1.0R/1.25R all pass, 1.5R/2.0R fail again as the filter gets too strict and
+  trade count drops too far (122/116 IS). **1.0R is the single best variant found across BOTH
+  rounds by a wide margin**: OOS expR +0.290 (vs baseline +0.171, +70%), OOS CAGR/DD 3.49 (vs
+  baseline 1.40, 2.5x), OOS max DD nearly halved (-2.8% vs -5.4%), IS CAGR/DD 2.07 (vs 0.92).
+  Win rate also rose (45% vs 43% OOS) alongside expectancy -- not just fewer-but-similar
+  trades (the RULE's own red flag for a false "improvement"). Trade count fell further than
+  the round-1 candidates (431->245 OOS, -43%), which is the real tradeoff: this is the most
+  selective gate of all six passing variants.
+
+**Six variants now clear the adoption bar total** (round 1 + round 2): reclaim prior entry,
+8wk bars cooldown, reclaim+0.75R buffer, reclaim+1.0R buffer (best), reclaim+1.25R buffer,
+reclaim 2wk floor. All still purely backtest findings -- **NOT YET IMPLEMENTED** in
+`dashboard/core/paper.py` or `ib_exec.py`. Next decision point is the user's: pick one
+candidate (reclaim+1.0R buffer is the strongest by every OOS metric) or keep narrowing.
+
+---
+
+### 🔧 2026-07-18: fixed a false "position MISMATCH" alarm for the SGOV cash-sweep holding
+
+Found unprompted during UI verification of the "funded" column work (below), investigated on
+request. `reconcile_with_broker()`/`compare_positions()` (`core/reconcile.py`) compares ALL
+non-zero broker positions against `ib_mirror`'s tracked strategy symbols -- but SGOV (the
+idle-cash shield under `CASH_SWEEP=1`) is intentionally never added to `ib_mirror` by design,
+so it permanently false-positived as an "only_broker (untracked)" mismatch whenever the sweep
+held shares. Confirmed live: fired a real alarm for exactly SGOV, which self-resolved 6
+minutes later on the sweep's own next cycle -- not a real desync, a missing exclusion.
+
+Fix: `compare_positions()` gained an `excluded_symbols` param (default empty set, fully
+backward compatible); `reconcile_with_broker()` passes `{ib_exec.SGOV_SYMBOL}`. 3 new tests in
+`test_reconcile.py` (exclusion works, doesn't hide a REAL ghost position elsewhere, omitting
+the arg is unchanged). Committed `60504d8`, pushed, redeployed both instances, confirmed
+healthy (paper 1.48s, live 1.53s response times).
+
+---
+
+### 🔬 2026-07-18: re-entry-gate backtest ROUND 1 (ASHR whipsaw) — TWO candidates clear the
+adoption bar, NOT YET LIVE (user explicitly asked for backtest-before-live)
 
 Real trigger: paper account's ASHR stopped out 3x in 8 days (2026-07-09, -14, -16), each
 re-entry within a day or two of the prior stop at nearly the same price (confirmed against
