@@ -81,6 +81,62 @@ the other.
 
 ---
 
+## Update 2026-07-18: re-entry gate — LIVE, backtest-validated, DSR-checked
+
+A real incident (ASHR stopped out 3x in 8 days, each re-entry within a day or two of the prior
+stop at nearly the same price — the live `COOLDOWN_MIN=60` gate is 60 *minutes*, a no-op for a
+weekly-bar strategy re-entering days later) triggered a 3-round backtest investigation
+(`dashboard/research/backtest.py --reentry-test`) before any live code was touched, per this
+project's own rule: **never change live trading logic without a backtest first.**
+
+**19 candidate gate variants tested** (bars-cooldown durations, price-reclaim conditions, an
+R-multiple confirmation buffer, floors, caps, and combinations), judged against the same
+adoption bar every other rule change here uses: must beat no-gate on OOS expectancy, OOS
+CAGR/DD (Calmar), **and** IS CAGR/DD together — not just one favorable slice.
+
+**Winner: "reclaim + 1.0R buffer"** — after a LOSS on an instrument, block a same-direction
+re-entry until price closes back beyond that losing trade's own entry by 1.0× its own
+entry-to-stop risk (not just marginally across it):
+
+| Metric (current live config, 22 ETFs, 0.5% risk) | Baseline (no gate) | reclaim + 1.0R buffer | Change |
+|---|---|---|---|
+| **FULL-period CAGR** (33y+ history) | **6.3%** | **7.0%** | +0.7pp |
+| **FULL-period max drawdown** | **-5.9%** | **-2.8%** | **more than halved** |
+| FULL CAGR/DD (Calmar) | 1.07 | 2.52 | +136% |
+| OOS CAGR | 7.5% | 9.7% | +29% |
+| OOS max drawdown | -5.4% | -2.8% | nearly halved |
+| OOS CAGR/DD (Calmar) | 1.40 | 3.49 | +150% |
+| OOS expectancy | +0.171R | +0.290R | +70% |
+| OOS win rate | 43% | 45% | +2pp |
+| OOS trade count | 431 | 245 | -43% (more selective) |
+
+**The honest full-period read**: over the entire 33-year history (not just the recent OOS
+slice), the gate's real contribution is **risk reduction, not return enhancement** — CAGR moves
+only modestly (6.3%→7.0%) while max drawdown more than halves (-5.9%→-2.8%). The larger OOS CAGR
+jump (7.5%→9.7%) is a recent-window effect; plan around the FULL-period anchor, consistent with
+how this project treats every other backtest result.
+
+**Multiple-testing-corrected DSR: 88%** (Deflated Sharpe Ratio, corrected for the 19 trials
+actually run, not the naive single-strategy figure) — the best of every candidate tested, real
+signal not noise, but **below this project's usual ~95% "solid confidence" bar**. Reported
+honestly rather than rounded up: this is the best-supported change available, not a proven fact.
+
+**Per-instrument breadth check**: 10/20 instruments improved, 8/20 worsened — broad enough to
+support a real portfolio-wide mechanism rather than overfitting to one name. Notable wrinkle:
+ASHR itself, the instrument whose whipsaw triggered this research, actually got *worse* under
+the gate. The edge comes from filtering low-quality re-entries broadly across the book, not
+literally from fixing the incident that inspired it.
+
+**Deployed 2026-07-18 to both instances** (paper DUK968178 + live real-money U12991898) and
+**confirmed actually firing**, not just health-check-green: the live instance's very first
+placement cycle after restart blocked a real CWB re-entry exactly as designed. Not yet folded
+into the reconciled/bootstrapped headline CAGR/Calmar figures above (that pipeline hasn't been
+re-run with the gate active) — treat this as the latest layer on top of the 2026-07-14 findings,
+not a replacement for them. Full round-by-round detail, all 19 variants, and the concentration
+breakdown are in `HANDOFF.md`.
+
+---
+
 ## What this system does well
 
 Judged against what actually broke and got fixed this project, not just what it claims:

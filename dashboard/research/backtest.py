@@ -1526,7 +1526,8 @@ def _reentry_test(data, span, years) -> None:
         "8wk cooldown + 1.0R buf":  ("reclaim_and_bars", 8, 1.0),
     }
     print(f"  {'variant':<26}{'IS n':>5}{'IS win':>7}{'IS cd':>7}{'OOS n':>6}"
-          f"{'OOS expR':>9}{'OOS win':>8}{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}{'FULL cd':>8}")
+          f"{'OOS expR':>9}{'OOS win':>8}{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}"
+          f"{'FULL CAGR%':>11}{'FULL DD%':>9}{'FULL cd':>8}")
     results: dict[str, dict] = {}
     for label, (gate, bars_n, buffer_r) in variants.items():
         cands = []
@@ -1546,8 +1547,10 @@ def _reentry_test(data, span, years) -> None:
         print(f"  {label:<26}{(is_r['n'] if is_r else 0):>5}"
               f"{(is_r['win']*100 if is_r else 0):>6.0f}%{(is_r['cd'] if is_r else 0):>7.2f}"
               f"{oos_r['n']:>6}{oos_r['expR']:>+9.3f}{oos_r['win']*100:>7.0f}%"
-              f"{oos_r['cagr']*100:>10.1f}{oos_r['dd']*100:>8.1f}"
-              f"{oos_r['cd']:>7.2f}{(full_r['cd'] if full_r else 0):>8.2f}{tag}")
+              f"{oos_r['cagr']*100:>10.1f}{oos_r['dd']*100:>8.1f}{oos_r['cd']:>7.2f}"
+              f"{(full_r['cagr']*100 if full_r else 0):>11.1f}"
+              f"{(full_r['dd']*100 if full_r else 0):>9.1f}"
+              f"{(full_r['cd'] if full_r else 0):>8.2f}{tag}")
     print()
     print("  RULE: adopt a re-entry gate ONLY if it beats no-gate on OOS expR, OOS CAGR/DD,")
     print("  AND IS CAGR/DD -- same bar as every other rule change tested here. A gate that")
