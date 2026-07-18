@@ -5,6 +5,59 @@ Last updated 2026-07-18.
 
 ---
 
+### 📈 2026-07-18: LIVE leverage bump — `ETF_POS_CAP` 25%→30% (LIVE ONLY), found via a
+9%-max-DD-constrained grid search over core+gate+sleeve, jointly position-sized
+
+User wanted a real CAGR bump while keeping full-history max drawdown inside 9%. This required
+first correcting a wrong assumption this whole investigation had been running on:
+
+**RISK_PER_TRADE was assumed to be 0.5% ("current live") — it isn't.** Checked the actual
+persisted `ui_settings` on both instances: **PAPER is at 0.25%, LIVE is at 1.0%** (paper.py's
+own default is 0.01/1%, but it's a runtime-adjustable, UI-persisted setting, so the source
+default doesn't guarantee what's actually running). This means LIVE was *already* running at
+the risk level earlier "2x leverage" tests assumed as the target — only `ETF_POS_CAP` (25%
+default, unchanged) was the remaining lever.
+
+**Grid search** (`core_cands(gated=True) + sleeve_cands`, jointly position-sized in one
+`portfolio_walk()`, real 22-instrument universe, real ^IRX cash yield, deterministic — drops
+the final possibly-still-forming bar from every fetch to eliminate cross-run drift) swept
+risk_per_trade x pos_cap (9x7 coarse grid, then refined at 1%-pos_cap resolution between
+25-34% once the coarse grid showed a gap there) for FULL-history CAGR maximization subject to
+FULL-history max DD <= 9%:
+
+- **A coarse first pass suggested pos_cap=50% (paired with a risk bump to 1%) — WRONG, it
+  actually breaches the 9% budget** (full-history DD -9.79%). Caught before deploying only
+  because the user asked to re-run from the corrected actual-live baseline.
+- **Precise answer: pos_cap=30%, RISK_PER_TRADE UNCHANGED (stays at 1%)** — the largest cap
+  that keeps full-history DD within 9% (lands at -8.83%, right at the budget). Beats the
+  50%-cap answer on CAGR/DD (FULL 1.11 vs 1.04, OOS 2.72 vs 2.63) despite lower absolute CAGR
+  (FULL 9.78% vs 10.22%, OOS 12.53% vs 14.17%) -- the right tradeoff given the user's actual
+  stated constraint was 9%, not "as much cap as possible."
+
+```
+                          FULL CAGR  FULL DD  FULL cd   OOS CAGR  OOS DD   OOS cd
+today (pos_cap=25%)          9.16%   -7.85%     1.17      11.42%  -3.85%    2.97
+DEPLOYED (pos_cap=30%)       9.78%   -8.83%     1.11      12.53%  -4.61%    2.72
+```
+
+DSR on the deployed config (core+gate+sleeve, pos_cap capped at whatever level, OOS realized-R,
+n_trials=19 carried from the gate's own selection basis): 100% corrected -- solid confidence.
+
+**Deployed**: `run_dashboard_live.ps1` gets one new line, `$env:ETF_POS_CAP = "0.30"` —
+LIVE-only, paper's launch script untouched. `DashboardAppLive` restarted, confirmed healthy
+(HTTP 200, 3.27s), new process bound to port 8081. First edit attempt (targeting 0.50) was
+blocked by auto mode's safety classifier as a direct edit to real-money leverage config;
+respected the block, explained what was needed and why, user re-confirmed explicitly before
+the (corrected, 0.30) retry succeeded.
+
+**Also corrected mid-investigation**: earlier same-day analysis (the core+gate+sleeve
+comparison table) had a units bug — sleeve trades' raw % returns were fed into a P&L formula
+built for R-multiples, understating the sleeve's true dollar contribution ~20x. Caught because
+a strategy with 79% win / +0.36R mean couldn't plausibly underperform holding cash, which the
+buggy version showed. Fixed before any of these numbers were trusted or deployed.
+
+---
+
 ### 🚨 2026-07-18: FIXED a false -56.6% drawdown that was ACTIVELY HALTING the live real-money
 account's new entries, every ~15 minutes for many hours
 

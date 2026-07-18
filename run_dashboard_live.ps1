@@ -57,6 +57,18 @@ $env:CASH_SWEEP      = "1"
 # the original 3).
 $env:PHASE2_NAV_USD  = "0"
 $env:SLEEVE_ENABLED  = "1"
+# Loosen the per-position notional cap (2026-07-18, user-requested CAGR bump within an
+# explicit 9%-max-drawdown budget). RISK_PER_TRADE stays at its current live 1% -- UNCHANGED --
+# only ETF_POS_CAP moves. Found via a grid search (core + reentry-gate + sleeve jointly
+# position-sized, real 22-instrument universe, real ^IRX cash yield, DSR-checked) over
+# risk x pos_cap: pos_cap=30% is the LARGEST cap value that keeps full-history max drawdown
+# within 9% (a coarser first pass suggested 50%, but that actually breaches the 9% budget at
+# -9.79% full-history DD -- 30% is the precise boundary, not a round-number guess). Result @
+# pos_cap=30%: full-history CAGR 9.16%->9.78%, full-history maxDD -7.85%->-8.83% (right at the
+# 9% budget, still comfortably inside the -13% DD_HALT_PCT halt); OOS CAGR 11.42%->12.53%, OOS
+# maxDD -3.85%->-4.61%. See HANDOFF.md for the full comparison table and grid. PAPER's launch
+# script is untouched -- this is LIVE-only.
+$env:ETF_POS_CAP     = "0.30"
 
 # Background monitor: (re)launch the LIVE IB Gateway via IBC whenever port 4001 is down --
 # mirrors dashboard.ps1's paper-gateway watchdog, pointed at the live IBC instance.
