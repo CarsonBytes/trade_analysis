@@ -201,8 +201,9 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
             elif reentry_gate == "reclaim_and_bars":
                 if bars_since_loss < reentry_bars:      # floor: always wait this long, no exceptions
                     i += 1; continue
-                cleared = (close.iloc[i] > last_loss_entry if direction == "long"
-                          else close.iloc[i] < last_loss_entry)
+                buf = reentry_buffer_r * (last_loss_risk or 0.0)   # 0.0 -> plain reclaim (back-compat)
+                target = last_loss_entry + buf if direction == "long" else last_loss_entry - buf
+                cleared = close.iloc[i] > target if direction == "long" else close.iloc[i] < target
                 if not cleared:                          # AND still require an actual reclaim
                     i += 1; continue
         obj = confidence_model.objective(score)        # s5 passes; included for parity
@@ -1522,19 +1523,25 @@ def _reentry_test(data, span, years) -> None:
         "reclaim, 4wk floor":       ("reclaim_and_bars", 4, 0.0),
         "reclaim or 8wk cap":       ("reclaim_or_bars", 8, 0.0),
         "reclaim or 12wk cap":      ("reclaim_or_bars", 12, 0.0),
+        "8wk cooldown + 1.0R buf":  ("reclaim_and_bars", 8, 1.0),
     }
     print(f"  {'variant':<26}{'IS n':>5}{'IS win':>7}{'IS cd':>7}{'OOS n':>6}"
           f"{'OOS expR':>9}{'OOS win':>8}{'OOS CAGR%':>10}{'OOS DD%':>8}{'OOS cd':>7}{'FULL cd':>8}")
+    results: dict[str, dict] = {}
     for label, (gate, bars_n, buffer_r) in variants.items():
         cands = []
         for key, df in data.items():
             cands += _signals(df, key, reentry_gate=gate, reentry_bars=bars_n,
                               reentry_buffer_r=buffer_r)
+        oos_cands = [c for c in cands if c["entry_date"] > cut]
         is_r = _row([c for c in cands if c["entry_date"] <= cut])
-        oos_r = _row([c for c in cands if c["entry_date"] > cut])
+        oos_r = _row(oos_cands)
         full_r = _row(cands)
         if oos_r is None:
             continue
+        _, oos_real = _portfolio(oos_cands, 0.005)   # realized-R series, OOS only -- for DSR below
+        results[label] = {"is": is_r, "oos": oos_r, "full": full_r,
+                          "oos_real": oos_real, "cands": oos_cands}
         tag = "  <- baseline" if label.startswith("no gate") else ""
         print(f"  {label:<26}{(is_r['n'] if is_r else 0):>5}"
               f"{(is_r['win']*100 if is_r else 0):>6.0f}%{(is_r['cd'] if is_r else 0):>7.2f}"
@@ -1547,6 +1554,61 @@ def _reentry_test(data, span, years) -> None:
     print("  only helps in one slice, or that wins on win-rate while losing on expR/CAGR")
     print("  (fewer, more selective trades can raise win% while cutting total edge), hasn't")
     print("  earned a live change.")
+
+    # --- ROUND 3 rigor checks (2026-07-18): the two things missing from rounds 1-2 --------
+    base = results["no gate (baseline)"]
+    passing = [label for label, r in results.items()
+              if not label.startswith("no gate")
+              and r["is"]["cd"] > base["is"]["cd"]
+              and r["oos"]["expR"] > base["oos"]["expR"]
+              and r["oos"]["cd"] > base["oos"]["cd"]]
+    n_trials = len(variants) - 1   # candidate gates tried this research effort, excl. baseline
+
+    print(f"\nMULTIPLE-TESTING CHECK -- {n_trials} candidate gates have now been tried across")
+    print("  both rounds; picking the single best of many trials inflates the apparent edge by")
+    print("  chance alone (the 'look-elsewhere effect'). DSR below is deflated for n_trials=")
+    print(f"  {n_trials} (not the naive single-strategy n_trials=1) on each PASSING candidate's")
+    print("  own OOS realized-R series:\n")
+    print(f"  {'variant':<26}{'OOS n':>6}{'naive DSR':>11}{'corrected DSR':>15}")
+    for label in passing:
+        real = results[label]["oos_real"]
+        naive = deflated_sharpe_ratio(pd.Series(real), n_trials=1) if real else 0
+        corrected = deflated_sharpe_ratio(pd.Series(real), n_trials=n_trials) if real else 0
+        print(f"  {label:<26}{len(real):>6}{naive:>10.0%}{corrected:>14.0%}")
+    print("\n  DSR is the probability the strategy's true Sharpe is > 0 given the number of")
+    print("  trials tried (Bailey/Lopez de Prado). A candidate whose corrected DSR collapses")
+    print("  vs its naive figure is a real warning the win could be luck-of-the-trial-draw.")
+
+    if passing:
+        best_label = max(passing, key=lambda l: results[l]["oos"]["cd"])
+        print(f"\nPER-INSTRUMENT CONCENTRATION CHECK -- '{best_label}' (best by OOS CAGR/DD) vs")
+        print("  baseline, OOS gate-passing signals (pre-portfolio-filter, so counts run a bit")
+        print("  higher than the portfolio table above -- this checks BREADTH, not exact P&L):")
+        print("  confirms the edge isn't just fixing one bad instrument (e.g. the ASHR whipsaw")
+        print("  that triggered this research) while doing nothing or harm everywhere else.\n")
+        from collections import defaultdict
+
+        def _per_key(cands):
+            agg: dict = defaultdict(lambda: [0, 0.0])
+            for c in cands:
+                agg[c["key"]][0] += 1
+                agg[c["key"]][1] += c["r"]
+            return agg
+
+        base_agg = _per_key(base["cands"])
+        best_agg = _per_key(results[best_label]["cands"])
+        keys = sorted(set(base_agg) | set(best_agg))
+        print(f"  {'key':<8}{'base n':>7}{'base sumR':>11}{'gated n':>9}{'gated sumR':>12}")
+        for k in keys:
+            bn, br = base_agg.get(k, [0, 0.0])
+            gn, gr = best_agg.get(k, [0, 0.0])
+            print(f"  {k:<8}{bn:>7}{br:>+11.2f}{gn:>9}{gr:>+12.2f}")
+        n_improved = sum(1 for k in keys if best_agg.get(k, [0, 0.0])[1] > base_agg.get(k, [0, 0.0])[1])
+        n_worsened = sum(1 for k in keys if best_agg.get(k, [0, 0.0])[1] < base_agg.get(k, [0, 0.0])[1])
+        print(f"\n  {n_improved}/{len(keys)} instruments improved sumR, {n_worsened}/{len(keys)} worsened")
+        print("  -- a broad-based improvement (most instruments flat-to-better) supports a real")
+        print("  mechanism; a win concentrated in 1-2 names would instead suggest overfitting to")
+        print("  the specific incident that triggered this research.")
 
 
 def _horizon_curve(data, span, years, horizons=range(1, 9)) -> None:

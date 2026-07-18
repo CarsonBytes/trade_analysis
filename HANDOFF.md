@@ -5,6 +5,67 @@ Last updated 2026-07-18.
 
 ---
 
+### 🔬 2026-07-18: re-entry-gate backtest ROUND 3 — multiple-testing-corrected DSR check tempers
+the "standout" framing; no candidate clears the conventional ~95% bar, best is 88%, STILL NOT LIVE
+
+User's instruction after seeing round 2 was "keep researching first" (not yet ready to decide).
+Round 3 adds the two checks rounds 1-2 were missing, both matching this project's established
+OOS/DSR research discipline:
+
+**1. Does combining the two independent winning mechanisms compound?** Tested "8wk bars
+cooldown + 1.0R buffer" together (new `reclaim_and_bars` gate mode extended to accept a buffer).
+Result: **no** — OOS cd 2.62, OOS expR +0.289, *worse* than the 1.0R buffer alone (OOS cd 3.49,
+OOS expR +0.290) on cd and a wash on expR, for fewer trades (230 vs 245 OOS). The buffer alone
+already captures the effect; stacking a time floor on top just over-filters. Still technically
+passes the RULE (IS cd 1.83>0.92, OOS expR/cd both beat baseline) but is dominated by the
+simpler single-mechanism variant — not worth the extra complexity.
+
+**2. Multiple-testing-corrected DSR** (`metrics.deflated_sharpe_ratio`, already used elsewhere in
+this file for the same purpose): 19 candidate gates have now been tried across all 3 rounds —
+picking the single best of 19 trials inflates the apparent edge by chance alone (the
+"look-elsewhere effect"). DSR deflated for n_trials=19 vs the naive n_trials=1, on each passing
+candidate's own OOS realized-R series:
+
+```
+variant                    OOS n  naive DSR  corrected DSR
+reclaim prior entry          315       99%           65%
+8wk bars cooldown            323      100%           73%
+reclaim + 0.75R buffer       259      100%           80%
+reclaim + 1.0R buffer        245      100%           88%
+reclaim + 1.25R buffer       233      100%           79%
+reclaim, 2wk floor           310       99%           67%
+8wk cooldown + 1.0R buf      230      100%           86%
+```
+
+**Honest read: every candidate's naive ~100% DSR was mostly an artifact of testing it in
+isolation (n_trials=1) — once corrected for the 19 trials actually run, NONE clears the
+conventional ~95% "solid confidence" bar.** "reclaim + 1.0R buffer" is still the best (88%,
+followed by the combo at 86%) — real signal, not noise, but moderate confidence rather than the
+"wide margin, standout" framing round 2 used. This is exactly the discipline check this kind of
+multi-variant sweep needs and rounds 1-2 didn't have.
+
+**3. Per-instrument concentration check** (does "reclaim + 1.0R buffer" broadly improve the book,
+or just fix the one incident that triggered this research?): OOS gate-passing signals, base vs
+gated sumR per instrument, 20 instruments with any signals — **10/20 improved, 8/20 worsened, 2
+unchanged (n=1 each, not meaningful).** Biggest winners: DIA (-1.12→+2.46), IWM (-1.55→+5.34),
+AMLP (-0.29→+3.35) — net-negative instruments turning net-positive. Broad enough to support a
+real mechanism rather than overfitting to one name. **Notable honest wrinkle: ASHR itself — the
+instrument whose 3x-in-8-days whipsaw triggered this whole research effort — got WORSE under the
+gate (+1.41→-0.91 sumR, n 30→13).** The gate's edge comes from broadly filtering low-quality
+same-direction re-entries across the book, not from literally fixing the ASHR case that inspired
+it — a nuance worth knowing before pitching this as "the ASHR fix."
+
+**Net assessment for the user's decision:** "reclaim + 1.0R buffer" remains the best-supported
+candidate (best on every OOS metric, best corrected DSR, no combo improves on it, broad-based
+gain) but the corrected-DSR check means "moderate real confidence," not "slam dunk." Reasonable
+paths from here: (a) implement it anyway — the evidence is net-positive and it's the best of
+everything tried; (b) implement it but treat the first N live occurrences as a validation period
+before fully trusting it; (c) keep researching (e.g. wider universe, longer walk-forward, a truly
+held-out final test set never touched during variant selection). Still **NOT IMPLEMENTED** in
+`paper.py`/`ib_exec.py` — purely backtest, decision is the user's.
+
+---
+
 ### 🔬 2026-07-18: re-entry-gate backtest ROUND 2 — reclaim+1.0R buffer is the standout
 candidate (OOS CAGR/DD 3.49 vs baseline 1.40), 4 more variants clear the bar, STILL NOT LIVE
 
