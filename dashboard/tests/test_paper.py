@@ -79,10 +79,28 @@ def test_current_drawdown_pct():
     grown_acct = [[100, 40.0, "HKD"], [200, 100040.0, "HKD"], [300, 102000.0, "HKD"],
                  [400, 101000.0, "HKD"]]      # deposit at t=150, then +2000 P&L, then -1000
     grown_flows = [[150, 100000.0, "HKD"]]
-    # deposit-adjusted: [40, 40, 2000, 1000] -- peak 2000, now 1000 -> -50%, and 2000 is
-    # well above 1% of current equity (~1010) -> material, must still be caught
-    approx("a real drawdown above the materiality floor still registers",
-          current_drawdown_pct(grown_acct, grown_flows), -50.0)
+    # deposit-adjusted: [40, 40, 2000, 1000] -- peak 2000 (raw equity there: 102000), now
+    # 1000. DENOMINATOR FIX (2026-07-18): this used to assert -50.0% ((1000-2000)/2000) --
+    # that was ITSELF an instance of the bug fixed today (dividing by the tiny P&L-only peak
+    # instead of the real account size at that peak). The $1000 real dollar pullback on a
+    # $102,000 real account is correctly -0.98% ((1000-2000)/102000), not -50%.
+    approx("a real drawdown above the materiality floor still registers -- as % of the "
+          "REAL account size at that peak, not the tiny P&L-only peak value",
+          current_drawdown_pct(grown_acct, grown_flows), -1000 / 102000 * 100)
+    # REGRESSION (2026-07-18): confirmed live on the real account, 5 days into live trading --
+    # a genuine, modest trading gain (peak deposit-adjusted 1,471.73 HKD, REAL raw equity
+    # there 101,456.34 HKD) pulled back by a real 833.20 HKD (about -0.82% of the account's
+    # actual size) -- but the OLD formula (divide by the tiny 1,471.73 P&L-only peak) read
+    # this as -56.6% and repeatedly triggered a false DD_HALT_PCT halt + Telegram alert on
+    # the LIVE real-money account. A young, fully-funded account with modest accumulated P&L
+    # (the normal state for most of a ~4-7%/yr CAGR strategy's early life) must NOT read a
+    # small real dollar pullback as a catastrophic percentage.
+    young_funded_acct = [[100, 40.0, "HKD"], [200, 101456.34, "HKD"], [300, 100623.14, "HKD"]]
+    young_flows = [[150, 99984.61, "HKD"]]   # ~real live deposit total
+    dd = current_drawdown_pct(young_funded_acct, young_flows)
+    check("a real ~1% pullback on a young funded account reads as ~1%, "
+          "not a false ~-57% halt-triggering reading",
+          -3.0 < dd < 0, True)
 
 
 def _isolated_db():

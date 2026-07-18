@@ -339,16 +339,36 @@ def current_drawdown_pct(hist: list, flows: list | None) -> float:
     reference) before trusting a percentage; below that there isn't enough realized trading
     P&L yet to judge -- same "not enough history" spirit as the len(hist)<2 guard above.
     Without this, DD_HALT_PCT could get permanently stuck halting a brand-new account over
-    a few-dollar wobble."""
+    a few-dollar wobble.
+
+    DENOMINATOR FIX (2026-07-18, found live reporting -56.6% on the real live account 5 days
+    after its first fills): the materiality floor above stops the DEGENERATE near-zero-peak
+    case, but a YOUNG, fully-funded, real account has the SAME instability in a milder form --
+    its accumulated deposit-adjusted P&L is still genuinely small relative to total capital
+    (that's just what "early in a ~4-7%/yr CAGR strategy" looks like), so dividing a real
+    dollar pullback by that tiny P&L-only peak inflates the percentage wildly even once past
+    the floor. Confirmed live: a real $107-equivalent (833 HKD) pullback from a genuine +1,432
+    HKD trading gain (peak deposit-adjusted 1,471.73, raw equity there 101,456.34) read as
+    -56.6% -- but as a fraction of the account's ACTUAL SIZE at that peak (101,456.34 HKD) it
+    was -0.82%, which is what DD_HALT_PCT (calibrated against the BACKTEST's maxdd, itself a
+    % of TOTAL compounding equity -- see research/backtest.py's _metrics(), `dd = (eq/peak-1)`
+    -- never a P&L-only sub-series) was actually meant to measure. Fix: track the REAL raw
+    equity at the moment each new deposit-adjusted peak occurs, and divide by THAT instead of
+    by the tiny adjusted-peak value itself -- mathematically identical to the old formula
+    whenever the peak precedes any deposit (raw == adjusted there), so no behavior change for
+    a no-deposit-yet account; only changes results once real capital is in play."""
     if len(hist) < 2:
         return 0.0
     adj = deposit_adjusted_series(hist, flows)
     floor = abs(hist[-1][1]) * 0.01
-    peak = adj[0]
+    peak_adj = adj[0]
+    peak_raw = hist[0][1]
     cur_dd = 0.0
-    for v in adj:
-        peak = max(peak, v)
-        cur_dd = (v - peak) / peak * 100.0 if peak > floor else 0.0
+    for v, (_ts, raw_v, _ccy) in zip(adj, hist):
+        if v > peak_adj:
+            peak_adj = v
+            peak_raw = raw_v
+        cur_dd = (v - peak_adj) / peak_raw * 100.0 if peak_raw > floor else 0.0
     return cur_dd
 
 
