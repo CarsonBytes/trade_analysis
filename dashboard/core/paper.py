@@ -135,6 +135,17 @@ VOL_FILTER = False         # RETIRED 2026-06-16: superseded by the objective gat
 HALF_SPREAD = 0.00005      # per-side cost as fraction of price (~0.5 bp)
 COOLDOWN_MIN = 60          # don't re-enter the same instrument within N minutes
                            # of its last close (prevents churning one instrument)
+REENTRY_BUFFER_R = 1.0     # 2026-07-18: backtest-validated re-entry gate (HANDOFF.md) -- after
+                           # a LOSS on an instrument, block a SAME-DIRECTION re-entry until
+                           # price closes beyond that losing trade's own ENTRY by this many R
+                           # (its own entry-to-stop risk). Real trigger: ASHR stopped out 3x in
+                           # 8 days (2026-07-09,-14,-16), each re-entry within a day or two of
+                           # the prior stop at nearly the same price -- COOLDOWN_MIN=60 is 60
+                           # *minutes*, a no-op for a weekly-bar strategy re-entering days
+                           # later. Best of 19 gate variants tested across 3 backtest rounds:
+                           # OOS expR +0.290 vs baseline +0.171, OOS CAGR/DD 3.49 vs 1.40, OOS
+                           # max DD -2.8% vs -5.4%. Mirrors research/backtest.py's _signals()
+                           # 'reclaim_buffer' gate mode exactly -- keep both in sync.
 
 # STABLE location at the dashboard/ package root -- NOT relative to this file's
 # subpackage. paper.py lives in dashboard/core/, so parents[1] == dashboard/.
@@ -486,6 +497,44 @@ def _recent_close(instrument: str, minutes: int = COOLDOWN_MIN) -> bool:
     return False
 
 
+def _reentry_blocked(instrument: str, direction: str, current_price: float) -> str | None:
+    """Backtest-validated re-entry gate (2026-07-18, see REENTRY_BUFFER_R docstring above):
+    after a LOSS on this instrument, block a SAME-DIRECTION re-entry until price closes back
+    beyond that losing trade's own ENTRY by REENTRY_BUFFER_R x its own entry-to-stop risk.
+    Looks only at the MOST RECENTLY CLOSED trade on this instrument (any method) -- a WIN or
+    EXPIRED resets the gate entirely, matching research/backtest.py's _signals() state machine
+    exactly (a losing streak doesn't compound the buffer; only the latest loss matters).
+
+    Returns a skip-reason string if blocked, None if clear (no prior trade, last trade wasn't
+    a LOSS, last loss was the opposite direction, or price has already reclaimed the buffer)."""
+    with _LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT direction, entry, sl, status, exit_ts FROM paper_trades WHERE instrument=? "
+            "AND status!='OPEN' AND exit_ts!=''", (instrument,)).fetchall()
+    if not rows:
+        return None
+
+    def _exit_key(r):
+        try:
+            return _as_utc(r[4])
+        except Exception:
+            return pd.Timestamp.min.tz_localize("UTC")
+
+    last_direction, last_entry, last_sl, last_status, _ = max(rows, key=_exit_key)
+    if last_status != "LOSS" or last_direction != direction:
+        return None
+    risk = abs(last_entry - last_sl)
+    if risk <= 0:
+        return None
+    target = last_entry + REENTRY_BUFFER_R * risk if direction == "long" \
+        else last_entry - REENTRY_BUFFER_R * risk
+    cleared = current_price > target if direction == "long" else current_price < target
+    if cleared:
+        return None
+    return (f"re-entry gate: {current_price:.4f} hasn't reclaimed {target:.4f} "
+           f"({REENTRY_BUFFER_R}R beyond the last loss's entry {last_entry:.4f})")
+
+
 def _update_resolution(trade_id: int, status: str, exit_ts: str,
                        exit_price: float, realized_r: float,
                        exit_reason: str = "") -> None:
@@ -610,6 +659,11 @@ def place_from_state(state: dict) -> list[str]:
         if _recent_close(key):
             logs.append(f"{key}: skip (cooldown — closed within {COOLDOWN_MIN}m)")
             _reject([f"cooldown < {COOLDOWN_MIN}m"], score, llm_sig, direction)
+            continue
+        reentry_reason = _reentry_blocked(key, direction, entry_px)
+        if reentry_reason:
+            logs.append(f"{key}: skip ({reentry_reason})")
+            _reject([reentry_reason], score, llm_sig, direction)
             continue
         buckets = _risk_buckets(key, direction)
         if DECORRELATE:
@@ -737,9 +791,13 @@ def gate_report(state: dict) -> list[dict]:
         already_open = ""
         decorr = ""
         cooldown = ""
+        reentry = ""
         if direction:
             if _recent_close(key):
                 cooldown = f"cooldown < {COOLDOWN_MIN}m"
+            live_px = (state.get("live", {}).get(key) or {}).get("price")
+            if live_px is not None:
+                reentry = _reentry_blocked(key, direction, live_px) or ""
             for b in _risk_buckets(key, direction):
                 holders = open_by_bucket.get(b, set()) - {key}
                 if holders:
@@ -753,6 +811,8 @@ def gate_report(state: dict) -> list[dict]:
         blocked = list(reasons)
         if cooldown:
             blocked.append(cooldown)
+        if reentry:
+            blocked.append(reentry)
         if decorr:
             blocked.append(f"de-correlation: {decorr}")
         if already_open:

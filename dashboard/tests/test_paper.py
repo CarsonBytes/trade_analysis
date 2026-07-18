@@ -181,12 +181,107 @@ def test_resolve_open_skips_check_when_executed_ids_omitted():
         _restore_db(old, path)
 
 
+# ADDED 2026-07-18: the backtest-validated re-entry gate (REENTRY_BUFFER_R, HANDOFF.md) --
+# after a LOSS, block a same-direction re-entry until price closes beyond that trade's own
+# entry by 1.0R (its own entry-to-stop risk). Real trigger: ASHR stopped out 3x in 8 days,
+# each re-entry within a day or two at nearly the same price -- COOLDOWN_MIN=60 (minutes) never
+# caught this. Best of 19 gate variants tested across 3 backtest rounds in research/backtest.py.
+def _closed_trade(instrument, direction, entry, sl, status, exit_ts):
+    from dashboard.core import paper
+    t = paper.Trade(
+        ts="2026-07-01T10:00:00+00:00", instrument=instrument, direction=direction,
+        method="ATR rr3.0", entry=entry, sl=sl, tp=entry + 3 * abs(entry - sl), rr=3.0,
+        size_units=10.0, horizon_end="2026-08-01T10:00:00+00:00", confidence=0.6,
+        rationale="test",
+    )
+    paper._insert(t)
+    trade_id = paper.open_trades()[0]["id"]
+    paper._update_resolution(trade_id, status, exit_ts, entry, -1.0 if status == "LOSS" else 1.0)
+    return trade_id
+
+
+def test_reentry_blocked_gates_until_buffer_reclaimed():
+    print("_reentry_blocked(): after a LOSS, same-direction re-entry blocked until price "
+          "closes beyond the losing trade's entry by REENTRY_BUFFER_R x its own risk:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        _closed_trade("ASHR", "long", entry=35.0, sl=34.0, status="LOSS",
+                      exit_ts="2026-07-16T00:00:00+00:00")   # risk=1.0 -> target=36.0 (1.0R)
+        check("price still below target -> blocked",
+              paper._reentry_blocked("ASHR", "long", 35.5) is not None, True)
+        check("price exactly at target -> still blocked (needs to CLOSE beyond, not just touch)",
+              paper._reentry_blocked("ASHR", "long", 36.0) is not None, True)
+        check("price beyond target -> clear",
+              paper._reentry_blocked("ASHR", "long", 36.5), None)
+    finally:
+        _restore_db(old, path)
+
+
+def test_reentry_blocked_ignores_opposite_direction():
+    print("\n_reentry_blocked(): a LOSS on the long side never blocks a SHORT re-entry:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        _closed_trade("ASHR", "long", entry=35.0, sl=34.0, status="LOSS",
+                      exit_ts="2026-07-16T00:00:00+00:00")
+        check("opposite direction unaffected, any price",
+              paper._reentry_blocked("ASHR", "short", 35.2), None)
+    finally:
+        _restore_db(old, path)
+
+
+def test_reentry_blocked_win_does_not_gate():
+    print("\n_reentry_blocked(): a WIN (or EXPIRED) resets the gate entirely -- matches "
+          "research/backtest.py's _signals() state machine (only the LATEST loss matters):")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        _closed_trade("ASHR", "long", entry=35.0, sl=34.0, status="WIN",
+                      exit_ts="2026-07-16T00:00:00+00:00")
+        check("a WIN never blocks re-entry, any price",
+              paper._reentry_blocked("ASHR", "long", 35.1), None)
+    finally:
+        _restore_db(old, path)
+
+
+def test_reentry_blocked_no_prior_trade():
+    print("\n_reentry_blocked(): an instrument with no closed trades at all -> never blocked:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        check("no history -> clear", paper._reentry_blocked("SPY", "long", 500.0), None)
+    finally:
+        _restore_db(old, path)
+
+
+def test_reentry_blocked_uses_most_recent_trade_only():
+    print("\n_reentry_blocked(): only the MOST RECENTLY CLOSED trade matters -- an older LOSS "
+          "followed by a newer WIN clears the gate, not the other way around:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        _closed_trade("ASHR", "long", entry=35.0, sl=34.0, status="LOSS",
+                      exit_ts="2026-07-09T00:00:00+00:00")   # older
+        _closed_trade("ASHR", "long", entry=35.5, sl=34.5, status="WIN",
+                      exit_ts="2026-07-16T00:00:00+00:00")   # newer -- resets the gate
+        check("newer WIN supersedes the older LOSS -> clear",
+              paper._reentry_blocked("ASHR", "long", 35.1), None)
+    finally:
+        _restore_db(old, path)
+
+
 if __name__ == "__main__":
     test_deposit_adjusted_series()
     test_current_drawdown_pct()
     test_resolve_open_tags_unfunded_trades()
     test_resolve_open_leaves_funded_trades_unqualified()
     test_resolve_open_skips_check_when_executed_ids_omitted()
+    test_reentry_blocked_gates_until_buffer_reclaimed()
+    test_reentry_blocked_ignores_opposite_direction()
+    test_reentry_blocked_win_does_not_gate()
+    test_reentry_blocked_no_prior_trade()
+    test_reentry_blocked_uses_most_recent_trade_only()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

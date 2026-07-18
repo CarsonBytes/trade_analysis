@@ -5,6 +5,42 @@ Last updated 2026-07-18.
 
 ---
 
+### 🚀 2026-07-18: re-entry-gate LIVE — reclaim+1.0R buffer implemented in paper.py/gate_report()
+
+User's decision after 3 backtest rounds (below) and seeing the multiple-testing-corrected DSR
+picture: "implement it now." Implemented exactly the backtest-validated mechanism, no
+variations:
+
+**`dashboard/core/paper.py`**: new `REENTRY_BUFFER_R = 1.0` constant (next to `COOLDOWN_MIN`)
+and `_reentry_blocked(instrument, direction, current_price) -> str | None` — reads the MOST
+RECENTLY CLOSED trade on that instrument (any method, picked by parsing `exit_ts` with the
+existing `_as_utc()` helper rather than trusting SQL string ordering); if it was a LOSS in the
+SAME direction, blocks until `current_price` closes beyond that trade's own `entry` by
+`REENTRY_BUFFER_R x abs(entry - sl)`. A WIN or EXPIRED on the most recent trade clears the gate
+entirely — matches `research/backtest.py`'s `_signals()` `reclaim_buffer` state machine exactly
+(only the LATEST loss matters, not a running streak).
+
+Wired into both the places `_recent_close()` (the old, practically-inert 60-*minute* cooldown)
+already was: **`place_from_state()`** (real gating — a blocked re-entry never even becomes a
+`paper_trades` row, so `ib_exec.py` needs no separate change: its mirroring loop only ever
+places broker orders for rows `place_from_state()` already inserted) and **`gate_report()`**
+(the "Signals & Gates" UI diagnostic, using the live price already in `state["live"]`, same
+source `place_from_state()` uses for entry).
+
+5 new tests in `test_paper.py` (isolated-db pattern): blocks until buffer reclaimed (including
+an exact-boundary case — touching the target isn't enough, must CLOSE beyond it), never blocks
+the opposite direction, a WIN resets the gate, no prior trade = never blocked, and only the
+MOST RECENT closed trade matters (an older loss followed by a newer win clears it). Full
+15-file suite green.
+
+**Expected effect** (from the backtest, OOS @ current live config): CAGR 7.5%→9.7%, max DD
+-5.4%→-2.8%, CAGR/DD 1.40→3.49, expectancy +0.171→+0.290R, ~43% fewer trades (more selective).
+Real but MODERATE statistical confidence, not proven fact — corrected DSR was 88%, below the
+conventional ~95% bar (see ROUND 3 below). Deployed to both instances; watch the next real loss
+on each to confirm the gate actually fires as designed before fully trusting it.
+
+---
+
 ### 🔬 2026-07-18: re-entry-gate backtest ROUND 3 — multiple-testing-corrected DSR check tempers
 the "standout" framing; no candidate clears the conventional ~95% bar, best is 88%, STILL NOT LIVE
 
