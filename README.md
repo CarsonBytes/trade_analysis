@@ -100,21 +100,33 @@ entry-to-stop risk (not just marginally across it):
 
 | Metric (current live config, 22 ETFs, 0.5% risk) | Baseline (no gate) | reclaim + 1.0R buffer | Change |
 |---|---|---|---|
-| **FULL-period CAGR** (33y+ history) | **6.3%** | **7.0%** | +0.7pp |
+| **FULL-period CAGR** (5y window, 2021-07 to 2026-07) | **6.3%** | **7.0%** | +0.7pp |
 | **FULL-period max drawdown** | **-5.9%** | **-2.8%** | **more than halved** |
 | FULL CAGR/DD (Calmar) | 1.07 | 2.52 | +136% |
-| OOS CAGR | 7.5% | 9.7% | +29% |
+| OOS CAGR (last ~2y of that window) | 7.5% | 9.7% | +29% |
 | OOS max drawdown | -5.4% | -2.8% | nearly halved |
 | OOS CAGR/DD (Calmar) | 1.40 | 3.49 | +150% |
 | OOS expectancy | +0.171R | +0.290R | +70% |
 | OOS win rate | 43% | 45% | +2pp |
 | OOS trade count | 431 | 245 | -43% (more selective) |
 
-**The honest full-period read**: over the entire 33-year history (not just the recent OOS
-slice), the gate's real contribution is **risk reduction, not return enhancement** — CAGR moves
+**Correction (2026-07-18, caught during a later review):** this table was first published
+mislabeled as "33y+ history" — `--reentry-test` does not pass `--longweekly`, so it actually
+ran on `get_ohlc`'s default 5-year daily window (2021-07-19 to 2026-07-17), confirmed directly
+against the fetched data. This is a materially different, weaker claim than the core strategy's
+own 33-year research elsewhere in this README: a 5-year window covers far fewer market regimes,
+so both the "FULL" and "OOS" rows above are recent-market slices, not independent long-history
+validation. The IS/OOS split and DSR correction still guard against overfitting to any ONE
+sub-slice of these 5 years, but not against this whole window being an unusually
+trend-friendly stretch relative to multi-decade history. **Re-running the same 19-variant sweep
+on the full 33-year weekly history (`--longweekly`) is a real open task, not yet done.**
+
+**The honest 5-year-window read**: over the full fetched window (not just its recent-40% OOS
+slice), the gate's contribution is **risk reduction more than return enhancement** — CAGR moves
 only modestly (6.3%→7.0%) while max drawdown more than halves (-5.9%→-2.8%). The larger OOS CAGR
-jump (7.5%→9.7%) is a recent-window effect; plan around the FULL-period anchor, consistent with
-how this project treats every other backtest result.
+jump (7.5%→9.7%) is a smaller, more recent sub-slice and the more optimistic number; weight the
+FULL-window figures more heavily, consistent with how this project treats every other backtest
+result — and treat both as provisional until validated against the full 33-year history.
 
 **Multiple-testing-corrected DSR: 88%** (Deflated Sharpe Ratio, corrected for the 19 trials
 actually run, not the naive single-strategy figure) — the best of every candidate tested, real
