@@ -5,6 +5,22 @@ Last updated 2026-07-18.
 
 ---
 
+### 🔔 2026-07-18: a real LOSS now actually pushes to Telegram (it silently didn't before)
+
+User asked to "watch for the next real loss on both accounts" — to validate the new re-entry
+gate (above) against a genuine future occurrence. Checking the alerting path (`core/notify.py`)
+found `ib_exec._resolve_from_broker()` already called `notable_events.record()` on every real
+broker-funded position close, but at the default `level="info"` — and `notify.py` only pushes
+`warning`/`error` to Telegram (per the 2026-07-15 "don't buzz for routine stuff" change). A real
+LOSS was silently invisible outside the dashboard's own changelog; nothing would have notified
+anyone. Fixed: LOSS now records at `level="warning"` (actually pushes), WIN stays `info` (still
+routine, no change). Both instances already tag messages `[PAPER]`/`[LIVE]` via
+`DASH_FIXED_MODE`, so a single Telegram chat can distinguish which account triggered it. New
+test in `test_ib_exec.py` verifies the level split. Deployed to both instances, confirmed
+healthy, no new errors.
+
+---
+
 ### 🚀 2026-07-18: re-entry-gate LIVE — reclaim+1.0R buffer implemented in paper.py/gate_report()
 
 User's decision after 3 backtest rounds (below) and seeing the multiple-testing-corrected DSR
