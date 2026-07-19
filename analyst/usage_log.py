@@ -27,12 +27,17 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
     try:
         in_price, out_price = _PRICING.get(model, _DEFAULT_PRICING)
         cost_usd = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
-        # ADDED 2026-07-16: explicit project/call_type/environment columns (see
-        # db/migrations/002_add_project_call_type_environment.sql in the study-platform
-        # repo, the shared table's owner) -- `purpose` is kept for the transition period
-        # (older dashboard/report code + any project not yet updated still reads it), but
-        # is no longer the source of truth for grouping.
-        environment = "live" if os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes") else "paper"
+        # REVERTED 2026-07-18: the project/call_type/environment/provider columns added
+        # 2026-07-16 (citing a study-repo migration) were never actually run against the
+        # live Supabase table -- verified directly: real columns are just id, user_id,
+        # purpose, model, prompt_tokens, completion_tokens, cost_usd, latency_ms,
+        # created_at. Every write since 2026-07-16 has 400'd and been swallowed by this
+        # except-clause, leaving shared_calls_ok() reading a permanently-empty ledger
+        # ("0 calls today, always safe") for 2 days straight -- silently defeating the
+        # whole point of the shared-quota guard (see store.py::can_call()) and letting
+        # paper+live+events+study each burn their own local 200 allowance against the
+        # one real shared key, unseen. Back to `purpose`-only, which is all
+        # _project_of() ever needed anyway.
         httpx.post(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers={
@@ -43,10 +48,6 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
             },
             json={
                 "purpose": f"quant:{kind}",
-                "project": "quant",
-                "call_type": kind,
-                "environment": environment,
-                "provider": provider,
                 "model": model,
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
