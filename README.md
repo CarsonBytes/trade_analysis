@@ -266,7 +266,7 @@ The project uses [uv](https://docs.astral.sh/uv/) with a `.venv`. Dependencies a
 # 1. Install uv (one-time)
 python -m pip install uv
 # its Scripts dir may not be on PATH — add it for the session (or permanently):
-$env:Path += ";C:\Users\ls\AppData\Local\Python\pythoncore-3.14-64\Scripts"
+$env:Path += ";C:\Users\ls\AppData\Local\Python\pythoncore-3.13-64\Scripts"
 
 # 2. This machine runs AVG, which intercepts HTTPS. Tell uv to trust the Windows
 #    cert store, or package downloads fail with "invalid peer certificate".
@@ -274,10 +274,16 @@ $env:UV_SYSTEM_CERTS = "true"          # permanent:  setx UV_SYSTEM_CERTS true
 
 # 3. Create the environment + install everything
 cd C:\Users\ls\Desktop\Claude\quant    # (or D:\quant)
-uv venv --python 3.14
+uv venv --python 3.13
 uv sync                                 # core
 # uv sync --extra mt5                    # also install MetaTrader5 (live prices)
 ```
+
+(2026-07-18: corrected from an earlier "3.14" that never matched reality — the actual `.venv`
+has always run on **3.13.2**, confirmed directly against `.venv/pyvenv.cfg`; `pyproject.toml`
+only requires `>=3.11`, no upper pin. pandas 3.0.3 / numpy 2.4.6 / ib_async 2.1.0 all import
+clean on this exact version, and the system has been trading live on it for weeks with no
+evidence of version-related instability.)
 
 Run anything with `uv run` (no manual activation), or activate once with `.venv\Scripts\Activate.ps1`.
 
