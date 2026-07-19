@@ -5,6 +5,44 @@ Last updated 2026-07-18.
 
 ---
 
+### 🔧 2026-07-18: auto-cancel stale unfunded signals before they'd fund at a distorted risk
+
+Discovered while reviewing the 10 live open positions (user asked "revise live account
+opening signals"): only 4 of 10 were actually broker-funded (CPER/DBC/VNQ/AMLP, all healthy);
+the other 6 were signal-only, never filled. Two of those (SPY, DIA) had drifted ~63% of the
+way to their own stale stop-loss while sitting unfunded -- and `_place_etf_bracket()` fills
+entry at a FRESH market order but keeps the STALE stop/target computed at signal time, so
+funding either late (which today's `ETF_POS_CAP` increase was about to enable, by opening new
+portfolio room) would have entered at a badly distorted, unintended risk profile. Manually
+cancelled both as an immediate fix.
+
+**Backtested a general fix before implementing it** (per this project's own rule): simulated
+delayed funding (1/2/3-week queue delays, matching the real SPY timeline) across all
+historical core-gate signals -- entered late at the drifted price with the SAME stale
+stop/target, exactly matching `_place_etf_bracket()`'s real mechanics. Cancelling once drifted
+R <= -0.5 (using the signal's own entry/stop) improved aggregate meanR **+26-30% in every
+delay window tested** (1wk: +0.482R→+0.611R, 2wk: +0.631R→+0.818R, 3wk: +0.705R→+0.889R). The
+cancelled cohort is net negative (~83% would have gone on to lose) even counting the ~17% that
+would have recovered.
+
+**Implemented**: new `STALE_SIGNAL_CANCEL_R = -0.5` + `_stale_signal_check()` in `ib_exec.py`,
+wired into `mirror_new()`'s ETF branch -- checked before every funding attempt, using
+`providers.get_live_price()` (fails open on a data gap, never blocks a real entry over missing
+data). ETF core signals only, not the sleeve (not separately validated for its faster/tighter
+exit profile). 4 new tests, full 15-file suite green. Deployed to **both** instances (this is
+a general code fix, not instance-specific config) — restarted, confirmed healthy, confirmed
+the remaining queued signals (IWM/CWB/QQQ/EEM) correctly left untouched (haven't drifted past
+threshold) while SPY/DIA stay cancelled.
+
+**Separately stress-tested the sleeve's cost model** (same review): does the sleeve stay
+positive-EV under extreme black-swan slippage (VIX>40 entries, 51 of 278 historical trades --
+not rare, includes real 2008/2020 entries up to VIX 82.7)? Even at 500bps (5%) round-trip cost
+applied only to those entries -- an extremely pessimistic assumption for SPY/QQQ/XLK
+specifically -- the sleeve stays positive (win 73%, meanR +0.184, CAGR 1.07%), degrading
+gracefully rather than flipping to destructive losses.
+
+---
+
 ### 🔬 2026-07-18: post-deployment rigor pass on core+gate+sleeve — Sharpe/Sortino, an
 independent SPY benchmark, and a TRUE held-out validation (not just DSR)
 
