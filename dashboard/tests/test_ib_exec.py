@@ -312,6 +312,123 @@ def test_resolve_from_broker_elevates_loss_to_warning_level():
             pass
 
 
+# ADDED 2026-07-18: a queued (not-yet-funded) ETF signal can sit behind PORTFOLIO_CAP for
+# days -- but _place_etf_bracket() funds at a FRESH market price while keeping the STALE
+# stop/target from signal time, so a signal that's drifted far enough against itself before
+# ever being funded would enter with a badly distorted, unintended risk profile (confirmed
+# live: SPY/DIA had drifted ~63% of the way to their own stale stops while still unfunded).
+# Backtested first (delayed-funding simulation, research/backtest.py): cancelling at
+# drifted R <= STALE_SIGNAL_CANCEL_R (-0.5) improved aggregate meanR +26-30% across every
+# queue-delay window tested, correctly identifying a net-negative cohort.
+def test_stale_signal_check_cancels_when_drifted_past_threshold():
+    print("_stale_signal_check(): a long signal that's drifted past -0.5R against its own "
+          "entry/stop (using a live price near the stale stop) gets flagged for cancellation:")
+    from dashboard.execution import ib_exec
+    # entry=100, sl=95 -> risk_dist=5. -0.5R = 97.5. Price at 96 is well past that (-0.8R).
+    # XAUUSD used as the test instrument -- it's in BY_KEY unconditionally (a default-universe
+    # key), unlike ETF keys (SPY etc.) which only populate BY_KEY when UNIVERSE=etf is set at
+    # dashboard.instruments' IMPORT time -- too late to fix from inside a test function.
+    t = {"instrument": "XAUUSD", "direction": "long", "entry": 100.0, "sl": 95.0}
+    with mock.patch("dashboard.data.providers.get_live_price", return_value=(96.0, "test", None)):
+        reason, price, drifted_r = ib_exec._stale_signal_check(t)
+    check("cancel reason is set", reason is not None, True)
+    check("mentions the actual drifted R", ("-0.80R" in reason) if reason else False, True)
+    check("returns the live price used", price, 96.0)
+    check("returns the computed drifted R", round(drifted_r, 2), -0.80)
+
+
+def test_stale_signal_check_leaves_fresh_signals_alone():
+    print("\n_stale_signal_check(): a signal still within threshold (or moving favorably) "
+          "is left alone -- no cancellation:")
+    from dashboard.execution import ib_exec
+    t = {"instrument": "XAUUSD", "direction": "long", "entry": 100.0, "sl": 95.0}
+    # only -0.2R drifted -- comfortably inside the -0.5R threshold
+    with mock.patch("dashboard.data.providers.get_live_price", return_value=(99.0, "test", None)):
+        reason, price, drifted_r = ib_exec._stale_signal_check(t)
+    check("no cancellation for mild drift", reason, None)
+    check("still returns price/drifted_r for the caller", (price, round(drifted_r, 2)), (99.0, -0.20))
+    # a SHORT signal that's moved favorably (price fell) must not cancel either
+    t_short = {"instrument": "XAUUSD", "direction": "short", "entry": 100.0, "sl": 105.0}
+    with mock.patch("dashboard.data.providers.get_live_price", return_value=(98.0, "test", None)):
+        reason_s, _, drifted_r_s = ib_exec._stale_signal_check(t_short)
+    check("short signal moving favorably -> no cancellation", reason_s, None)
+    check("favorable drift is positive R", drifted_r_s > 0, True)
+
+
+def test_stale_signal_check_fails_open_on_no_live_price():
+    print("\n_stale_signal_check(): no live price available (data gap) -> fails OPEN, never "
+          "blocks a real entry over missing data:")
+    from dashboard.execution import ib_exec
+    t = {"instrument": "XAUUSD", "direction": "long", "entry": 100.0, "sl": 95.0}
+    with mock.patch("dashboard.data.providers.get_live_price", return_value=(None, "none", None)):
+        reason, price, drifted_r = ib_exec._stale_signal_check(t)
+    check("no price -> no cancellation (fail open)", reason, None)
+    check("no price -> price is None", price, None)
+
+
+def test_mirror_new_cancels_stale_signal_instead_of_funding():
+    print("\nmirror_new(): a stale unfunded ETF signal gets CANCELLED in the paper journal "
+          "and _place_etf_bracket() is NEVER called for it (end-to-end, IB mocked):")
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-13T04:00:00','SPY','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
+
+        place_calls = []
+
+        def _fake_place_etf_bracket(ib, t, equity, acct=None, deployed=None):
+            place_calls.append(t["id"])
+            return f"{t['instrument']}: should NOT have been called"
+
+        # BY_KEY only contains ETF entries when UNIVERSE=etf was set at dashboard.instruments'
+        # IMPORT time (too late to fix here) -- ETF_TRADED_BY_KEY is unconditionally populated
+        # so the ETF branch is reached fine, but _stale_signal_check()'s BY_KEY.get("SPY")
+        # lookup needs a stand-in; get_live_price is mocked below anyway so it doesn't care
+        # what instrument object it's called with.
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.dict("dashboard.instruments.BY_KEY", {"SPY": object()}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "_place_etf_bracket", side_effect=_fake_place_etf_bracket), \
+             mock.patch("dashboard.data.providers.get_live_price",
+                        return_value=(90.0, "test", None)):    # -2.0R drift, well past threshold
+            logs = ib_exec.mirror_new()
+
+        check("_place_etf_bracket was never called for the stale signal",
+              len(place_calls), 0)
+        check("mirror_new() logged the cancellation",
+              any("stale signal auto-cancelled" in l for l in logs), True)
+        with ib_exec._conn() as c:
+            status, exit_reason = c.execute(
+                "SELECT status, exit_reason FROM paper_trades WHERE id=1").fetchone()
+        check("paper_trades row marked CANCELLED", status, "CANCELLED")
+        check("exit_reason explains why", "stale signal auto-cancelled" in exit_reason, True)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
@@ -319,6 +436,10 @@ if __name__ == "__main__":
     test_current_portfolio_room_usd()
     test_sync_closures_cancels_stale_order_when_paper_already_resolved()
     test_resolve_from_broker_elevates_loss_to_warning_level()
+    test_stale_signal_check_cancels_when_drifted_past_threshold()
+    test_stale_signal_check_leaves_fresh_signals_alone()
+    test_stale_signal_check_fails_open_on_no_live_price()
+    test_mirror_new_cancels_stale_signal_instead_of_funding()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

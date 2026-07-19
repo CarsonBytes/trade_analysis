@@ -54,6 +54,24 @@ DD_HALT_PCT = -13.0            # 2026-07-11: the ADOPTED PLAN's own text ("halt 
                                # so there's nothing to sweep/optimize here -- it's a discipline
                                # gate, not an alpha lever. 0 disables (matches ETF_POS_CAP/
                                # PORTFOLIO_CAP's own convention).
+STALE_SIGNAL_CANCEL_R = -0.5   # 2026-07-18: a signal-only OPEN trade can sit queued for days
+                               # behind PORTFOLIO_CAP before room opens up -- but
+                               # _place_etf_bracket() funds at a FRESH market price while
+                               # keeping the STALE stop/target computed at signal time, so a
+                               # signal that's drifted this far against itself before ever
+                               # being funded would enter with a far worse, unintended risk
+                               # profile than the signal was designed for (confirmed live: SPY
+                               # and DIA had drifted ~63% of the way to their own stale stops
+                               # while still unfunded, right as a pos_cap increase was about to
+                               # open new room for them). Backtested first
+                               # (research/backtest.py, delayed-funding simulation across
+                               # 1-3wk queue delays): cancelling at this threshold improved
+                               # aggregate meanR +26-30% in every window tested -- the cancelled
+                               # cohort is net negative (~83% would have gone on to lose) even
+                               # though it does give up some (~17%) that would have recovered.
+                               # ETF core signals only (ATR rr3.0), not the sleeve -- not
+                               # separately validated for the sleeve's own tighter/faster
+                               # exit profile.
 
 
 # ---- pure sizing logic (no I/O -- unit-testable in isolation) ---------------
@@ -206,6 +224,18 @@ def mirror_new() -> list[str]:
             if spec is not None:
                 msg = _place_bracket(ib, t, spec, equity, acct)         # futures (no portfolio-cap yet)
             elif t["instrument"] in ETF_TRADED_BY_KEY:
+                cancel_reason, price, drifted_r = _stale_signal_check(t)
+                if cancel_reason:
+                    paper._update_resolution(
+                        t["id"], "CANCELLED",
+                        dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                        price, round(drifted_r, 3), exit_reason=cancel_reason)
+                    msg = f"{t['instrument']}: {cancel_reason}"
+                    log.warning("ib_exec: %s", msg)
+                    from dashboard.core import notable_events
+                    notable_events.record(msg)
+                    logs.append(msg)
+                    continue
                 msg = _place_etf_bracket(ib, t, equity, acct, deployed)  # ETF (shares)
             else:
                 continue
@@ -357,6 +387,34 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
     return (f"{t['instrument']}: paper bracket placed {action} {qty}x "
             f"{getattr(contract, 'localSymbol', chosen.symbol)} "
             f"SL {t['sl']} TP {t['tp']}")
+
+
+def _stale_signal_check(t: dict) -> tuple[str | None, float | None, float | None]:
+    """Checks whether a queued (not-yet-funded) ETF core signal has drifted past
+    STALE_SIGNAL_CANCEL_R against its own entry/stop -- see that constant's docstring for
+    the full backtest justification. Returns (cancel_reason, live_price, drifted_r);
+    cancel_reason is None if the signal is still fresh enough to fund as originally
+    intended, or if a live price isn't available (fails open -- never blocks a real entry
+    over a data gap). live_price/drifted_r are returned alongside the reason so the caller
+    doesn't need a second live-price fetch to record the cancellation."""
+    from dashboard.instruments import BY_KEY
+    from dashboard.data import providers
+    inst = BY_KEY.get(t["instrument"])
+    if inst is None:
+        return None, None, None
+    price, _src, _spread = providers.get_live_price(inst)
+    if price is None:
+        return None, None, None
+    risk_dist = abs(float(t["entry"]) - float(t["sl"]))
+    if risk_dist <= 0:
+        return None, price, None
+    drifted_r = ((price - float(t["entry"])) / risk_dist if t["direction"] == "long"
+                else (float(t["entry"]) - price) / risk_dist)
+    if drifted_r <= STALE_SIGNAL_CANCEL_R:
+        reason = (f"stale signal auto-cancelled: drifted {drifted_r:+.2f}R against its own "
+                 f"entry/stop before ever being funded (threshold {STALE_SIGNAL_CANCEL_R}R)")
+        return reason, price, drifted_r
+    return None, price, drifted_r
 
 
 def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
