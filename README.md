@@ -41,7 +41,12 @@ the full project; the honest conclusions:
   per instance) so a new sleeve doesn't front-load risk. Core+sleeve@10% weight: full-history
   **CAGR 10.08% / DD -7.73% / Calmar 1.305**; OOS (recent decade) **CAGR 13.08% / Calmar
   1.693**. Core/sleeve correlation measured directly (not assumed): -0.026 overall, +0.011 on
-  sleeve-exit days — genuinely different risk driver, confirmed empirically.
+  sleeve-exit days — genuinely different risk driver, confirmed empirically. **Black-swan
+  slippage stress-tested** (2026-07-18): VIX>40 entries aren't rare (51 of 278 historical
+  sleeve trades, including real 2008/2020 fills up to VIX 82.7) — even at 500bps round-trip
+  cost applied only to those entries (an extreme assumption for SPY/QQQ/XLK specifically), the
+  sleeve stays positive-EV (meanR +0.184R, CAGR 1.07%), degrading gracefully rather than
+  flipping to destructive losses.
 - **Stress-tested against real historical crises**, using the CURRENT exact config (not a
   blended multi-year average that can hide the worst days): **2008 GFC +9.69%** (worst
   intra-window DD -3.11%), **2020 COVID -0.81%** (-3.20%), **2022 rate-hike drawdown +3.61%**
@@ -180,7 +185,12 @@ Judged against what actually broke and got fixed this project, not just what it 
   because point estimates on 30 years of markets data are less precise than they look.
 - **Real safety layers, not just backtested ones.** `PORTFOLIO_CAP` and `DD_HALT_PCT` are
   live-only guards with no backtest equivalent, added after real operational incidents (a
-  127%-deployed live account, confirmed directly) — not theoretical protections.
+  127%-deployed live account, confirmed directly) — not theoretical protections. Newest:
+  a queued signal that drifts significantly against itself before ever getting funded
+  (`_place_etf_bracket()` fills at a fresh market price but keeps the stale stop/target from
+  signal time) now auto-cancels instead of entering at a distorted risk — backtested first
+  (delayed-funding simulation across 1-3wk queue-delay windows, +26-30% meanR improvement in
+  every window) before shipping, per this project's own rule.
 - **Fails safe, not silently.** The paper/live guard refuses to trade a live account unless
   `IB_ALLOW_LIVE=1` is explicitly set AND the connected account exactly matches the configured
   one; a mismatch refuses to trade rather than guessing. The tick loop survives any single
@@ -193,9 +203,9 @@ Judged against what actually broke and got fixed this project, not just what it 
   explicit rationale, an invalidation level, and (as of 2026-07-14) a `macro_linkage` field
   forcing the model to state whether a macro theme it identified actually applies to that
   specific instrument, or say so if it doesn't — auditable, not hoped-for.
-- **A real, if imperfect, test suite.** 10 files of regression tests covering the sizing math,
-  the DD-halt gate, the reconciliation logic, and every bug found this session — new tests
-  written alongside every fix, not just claimed fixed.
+- **A real, if imperfect, test suite.** 15 files of regression tests covering the sizing math,
+  the DD-halt gate, the reconciliation logic, and every bug found across this project's
+  history — new tests written alongside every fix, not just claimed fixed.
 
 **What it doesn't do well, in the same honest spirit:**
 - It's operationally complex — IBKR Gateway + two dashboards + a Cloudflare tunnel + watchdogs
