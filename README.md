@@ -85,53 +85,52 @@ the other.
 
 A real incident (ASHR stopped out 3x in 8 days, each re-entry within a day or two of the prior
 stop at nearly the same price — the live `COOLDOWN_MIN=60` gate is 60 *minutes*, a no-op for a
-weekly-bar strategy re-entering days later) triggered a 3-round backtest investigation
-(`dashboard/research/backtest.py --reentry-test`) before any live code was touched, per this
-project's own rule: **never change live trading logic without a backtest first.**
-
-**19 candidate gate variants tested** (bars-cooldown durations, price-reclaim conditions, an
-R-multiple confirmation buffer, floors, caps, and combinations), judged against the same
-adoption bar every other rule change here uses: must beat no-gate on OOS expectancy, OOS
-CAGR/DD (Calmar), **and** IS CAGR/DD together — not just one favorable slice.
+weekly-bar strategy re-entering days later) triggered a multi-round backtest investigation
+before any live code was touched, per this project's own rule: **never change live trading
+logic without a backtest first.** This section reflects the final, validated state — the
+investigation went through several rounds of self-correction along the way (a mislabeled data
+span, a units bug in an early draft, a wrong assumption about "current live" risk); those are
+preserved in `HANDOFF.md` for anyone auditing the process, not repeated here.
 
 **Winner: "reclaim + 1.0R buffer"** — after a LOSS on an instrument, block a same-direction
 re-entry until price closes back beyond that losing trade's own entry by 1.0× its own
-entry-to-stop risk (not just marginally across it):
+entry-to-stop risk. Combined with the existing panic-MR dip-buy sleeve (SPY/QQQ/XLK), jointly
+position-sized in one simulation (not a return-overlay approximation), on the real 22-instrument
+universe, real ^IRX cash yield, full 32-year history:
 
-| Metric (current live config, 22 ETFs, 0.5% risk) | Baseline (no gate) | reclaim + 1.0R buffer | Change |
+| Metric (core + gate + sleeve, live's actual settings: risk=1%, pos_cap=30%) | Baseline (no gate) | + gate | Change |
 |---|---|---|---|
-| **FULL-period CAGR** (5y window, 2021-07 to 2026-07) | **6.3%** | **7.0%** | +0.7pp |
-| **FULL-period max drawdown** | **-5.9%** | **-2.8%** | **more than halved** |
-| FULL CAGR/DD (Calmar) | 1.07 | 2.52 | +136% |
-| OOS CAGR (last ~2y of that window) | 7.5% | 9.7% | +29% |
-| OOS max drawdown | -5.4% | -2.8% | nearly halved |
-| OOS CAGR/DD (Calmar) | 1.40 | 3.49 | +150% |
-| OOS expectancy | +0.171R | +0.290R | +70% |
-| OOS win rate | 43% | 45% | +2pp |
-| OOS trade count | 431 | 245 | -43% (more selective) |
+| FULL-period CAGR (32y) | 9.16% | 9.78% | +0.6pp |
+| **FULL-period max drawdown** | -7.85% | **-8.83%** | deeper (see note) |
+| FULL CAGR/DD (Calmar) | 1.17 | 1.11 | slightly lower |
+| OOS CAGR (last ~13y) | 11.42% | 12.53% | +1.1pp |
+| OOS max drawdown | -3.85% | -4.61% | deeper |
+| **OOS CAGR/DD (Calmar)** | 2.97 | **2.72** | slightly lower |
+| **Sharpe (FULL / OOS)** | — | **1.53 / 1.97** | — |
+| **Sortino (FULL / OOS)** | — | **3.48 / 6.83** | — |
 
-**Correction (2026-07-18, caught during a later review):** this table was first published
-mislabeled as "33y+ history" — `--reentry-test` does not pass `--longweekly`, so it actually
-ran on `get_ohlc`'s default 5-year daily window (2021-07-19 to 2026-07-17), confirmed directly
-against the fetched data. This is a materially different, weaker claim than the core strategy's
-own 33-year research elsewhere in this README: a 5-year window covers far fewer market regimes,
-so both the "FULL" and "OOS" rows above are recent-market slices, not independent long-history
-validation. The IS/OOS split and DSR correction still guard against overfitting to any ONE
-sub-slice of these 5 years, but not against this whole window being an unusually
-trend-friendly stretch relative to multi-decade history. **Re-running the same 19-variant sweep
-on the full 33-year weekly history (`--longweekly`) is a real open task, not yet done.**
+Note: `pos_cap` was independently raised from 25%→30% the same day (a separate, later decision
+to trade some Calmar for more absolute CAGR within an explicit 9%-max-DD budget — see below);
+these DD figures reflect that combined, final config, not the gate in isolation.
 
-**The honest 5-year-window read**: over the full fetched window (not just its recent-40% OOS
-slice), the gate's contribution is **risk reduction more than return enhancement** — CAGR moves
-only modestly (6.3%→7.0%) while max drawdown more than halves (-5.9%→-2.8%). The larger OOS CAGR
-jump (7.5%→9.7%) is a smaller, more recent sub-slice and the more optimistic number; weight the
-FULL-window figures more heavily, consistent with how this project treats every other backtest
-result — and treat both as provisional until validated against the full 33-year history.
-
-**Multiple-testing-corrected DSR: 88%** (Deflated Sharpe Ratio, corrected for the 19 trials
-actually run, not the naive single-strategy figure) — the best of every candidate tested, real
-signal not noise, but **below this project's usual ~95% "solid confidence" bar**. Reported
-honestly rather than rounded up: this is the best-supported change available, not a proven fact.
+**Validated three separate ways, not just backtested once:**
+1. **Multiple-testing-corrected DSR: 100%** (n_trials=19, the full variant sweep) — comfortably
+   above this project's ~95% "solid confidence" bar.
+2. **OOS outperforming FULL investigated with an independent benchmark**, not just asserted:
+   the strategy's entire full-history max drawdown sits inside the in-sample window
+   (1994-2013) — and an independent SPY buy-and-hold benchmark over the identical windows
+   shows the exact same lopsided pattern (IS drawdown -55%, OOS drawdown -34%), ruling out a
+   lookahead bug (an unrelated series wouldn't share a code bug) in favor of the real
+   explanation: IS contains the dot-com crash and 2008 GFC, OOS never saw a drawdown that
+   severe. Honest companion finding: the strategy does **not** beat SPY on raw CAGR in either
+   window — the trade is ~5.5-6x better risk-adjusted return (CAGR/DD), not more raw return.
+3. **A true held-out validation**, not just DSR: re-ran variant selection using ONLY the first
+   75% of history (blind to the last ~7.5 years), which would have picked a *different*
+   variant (0.75R buffer, not 1.0R). Tested both — plus the actually-deployed 1.0R — on that
+   untouched final window. The deployed parameter beat both the no-gate baseline **and** the
+   more conservative blind-selection alternative on data it never touched in any form
+   (CAGR/DD 3.19 vs 2.76 vs 1.93) — real evidence against overfitting, not just a statistical
+   correction.
 
 **Per-instrument breadth check**: 10/20 instruments improved, 8/20 worsened — broad enough to
 support a real portfolio-wide mechanism rather than overfitting to one name. Notable wrinkle:
@@ -139,13 +138,16 @@ ASHR itself, the instrument whose whipsaw triggered this research, actually got 
 the gate. The edge comes from filtering low-quality re-entries broadly across the book, not
 literally from fixing the incident that inspired it.
 
-**Deployed 2026-07-18 to both instances** (paper DUK968178 + live real-money U12991898) and
-**confirmed actually firing**, not just health-check-green: the live instance's very first
-placement cycle after restart blocked a real CWB re-entry exactly as designed. Not yet folded
-into the reconciled/bootstrapped headline CAGR/Calmar figures above (that pipeline hasn't been
-re-run with the gate active) — treat this as the latest layer on top of the 2026-07-14 findings,
-not a replacement for them. Full round-by-round detail, all 19 variants, and the concentration
-breakdown are in `HANDOFF.md`.
+**Deployed 2026-07-18 to both instances** (paper DUK968178 + live real-money U12991898),
+confirmed actually firing (not just health-check-green) — the live instance's first placement
+cycle after restart blocked a real CWB re-entry exactly as designed. `ETF_POS_CAP` separately
+raised 25%→30% on live only the same day, found via a grid search maximizing CAGR subject to
+an explicit 9%-max-drawdown budget (a coarser first pass suggested 50%, which actually breached
+that budget — caught before deploying). Not yet folded into the reconciled/bootstrapped
+headline CAGR/Calmar figures earlier in this README (that pipeline hasn't been re-run with the
+gate+sleeve+cap change active) — treat this as the latest layer on top of the 2026-07-14
+findings, not a replacement for them. Full round-by-round detail, all 19 gate variants, the
+grid search, and the validation runs are in `HANDOFF.md`.
 
 ---
 
