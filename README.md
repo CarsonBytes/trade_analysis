@@ -127,10 +127,25 @@ these DD figures reflect that combined, final config, not the gate in isolation.
 3. **A true held-out validation**, not just DSR: re-ran variant selection using ONLY the first
    75% of history (blind to the last ~7.5 years), which would have picked a *different*
    variant (0.75R buffer, not 1.0R). Tested both — plus the actually-deployed 1.0R — on that
-   untouched final window. The deployed parameter beat both the no-gate baseline **and** the
-   more conservative blind-selection alternative on data it never touched in any form
-   (CAGR/DD 3.19 vs 2.76 vs 1.93) — real evidence against overfitting, not just a statistical
-   correction.
+   untouched final window (2018-11-27 to 2026-06-29, ~7.5y, never touched by any selection
+   step):
+
+   | Config on the untouched holdout | CAGR | Max DD | CAGR/DD | Sharpe |
+   |---|---|---|---|---|
+   | baseline + sleeve (no gate) | 17.24% | -8.93% | 1.93 | 2.12 |
+   | blind-selected (0.75R) + sleeve | 14.47% | -5.23% | 2.76 | 2.12 |
+   | **DEPLOYED (1.0R) + sleeve** | **14.69%** | **-4.61%** | **3.19** | **2.16** |
+
+   The deployed parameter beat both the no-gate baseline **and** the more conservative
+   blind-selection alternative on data it never touched in any form — real evidence against
+   overfitting, not just a statistical correction.
+
+**This is the current best-known validated configuration** (core trend + reclaim-1.0R-buffer
+gate + panic-MR sleeve, risk=1%, pos_cap=30%) — as of 2026-07-18: OOS CAGR/DD 2.72 (deployed
+full config) / 3.19 (gate+sleeve alone on the true holdout), Sharpe up to 2.16, DSR 100%.
+**This entry gets updated in place whenever a future finding beats it** — check the date above
+against `HANDOFF.md`'s latest entry if this README hasn't been touched in a while; the more
+detailed, chronological research log lives there.
 
 **Per-instrument breadth check**: 10/20 instruments improved, 8/20 worsened — broad enough to
 support a real portfolio-wide mechanism rather than overfitting to one name. Notable wrinkle:
