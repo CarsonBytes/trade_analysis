@@ -278,8 +278,9 @@ python -m pip install uv
 # its Scripts dir may not be on PATH — add it for the session (or permanently):
 $env:Path += ";C:\Users\ls\AppData\Local\Python\pythoncore-3.13-64\Scripts"
 
-# 2. This machine runs AVG, which intercepts HTTPS. Tell uv to trust the Windows
-#    cert store, or package downloads fail with "invalid peer certificate".
+# 2. IF a local antivirus/security product intercepts HTTPS (re-signs certs with its own
+#    root), package downloads fail with "invalid peer certificate". Tell uv to trust the
+#    Windows cert store as a fix (not needed on every machine -- see the note below):
 $env:UV_SYSTEM_CERTS = "true"          # permanent:  setx UV_SYSTEM_CERTS true
 
 # 3. Create the environment + install everything
@@ -410,7 +411,16 @@ See [SETUP.md](SETUP.md) for the full environment workflow, and the sub-READMEs 
 
 ## Notes for this machine
 
-- **AVG TLS interception:** all HTTPS is re-signed by AVG's local root. Handled
-  automatically — `truststore` for Python and a Windows-cert bundle (`winca.pem`)
-  for yfinance/libcurl. For `uv` itself, set `UV_SYSTEM_CERTS=true`.
+- **TLS interception (corrected 2026-07-19):** this section previously claimed "this
+  machine runs AVG, which intercepts HTTPS" — verified and that's wrong. AVG is not and
+  has never been installed here (checked directly: no AVG process, no AVG entry in either
+  uninstall registry hive, no AVG certificate in the Local Machine or Current User root
+  store). The real security products registered with Windows Security Center are **360
+  Total Security (360安全卫士) and Windows Defender**, and neither has installed a
+  TLS-interception root certificate either — no `winca.pem` bundle exists on disk,
+  `UV_SYSTEM_CERTS` isn't currently set, and package installs work without either
+  workaround. If a "invalid peer certificate" error ever shows up on this machine, it's
+  not AVG — re-diagnose from scratch rather than assuming this stale cause. Left the `uv
+  sync` step's `UV_SYSTEM_CERTS` fallback in place above since it's a harmless, standard
+  fix for this class of problem in general, just not one currently needed here.
 - `.venv/`, `winca.pem`, `analyst/.env`, and `dashboard/dashboard.db` are git-ignored.
