@@ -73,6 +73,56 @@ STALE_SIGNAL_CANCEL_R = -0.5   # 2026-07-18: a signal-only OPEN trade can sit qu
                                # separately validated for the sleeve's own tighter/faster
                                # exit profile.
 
+# IBKR Fixed-plan commission schedule for this account -- pulled directly from real fills via
+# reqExecutions (2026-07-20), NOT the general "well-established" figure assumed and later found
+# wrong in the 2026-07-12 HANDOFF note: real IWM 6sh/$1769.82 notional -> $1.00 commission, real
+# EEM 1sh/$63.98 notional -> $0.6413 -- matches Fixed ($0.005/share, $1.00/order min, capped at
+# 1% of trade value), not Tiered ($0.0035/share, $0.35 min) as previously assumed (~1.8-2.9x
+# understated at the floor). The 1% cap, not the $1 floor, binds for any notional under $100 --
+# exactly the PORTFOLIO_CAP-compressed "crumb" regime this constant exists to catch.
+COMM_PER_SHARE = 0.005
+COMM_MIN = 1.00
+COMM_MAX_PCT = 0.01
+MIN_VIABLE_COMMISSION_PCT = 0.10   # 2026-07-20: PORTFOLIO_CAP's "scale down, never skip"
+                                    # philosophy can compress a signal to 1-2 shares when the
+                                    # account is already near-fully deployed -- funding it still
+                                    # mechanically works, but the FIXED commission floor doesn't
+                                    # shrink with it, so a severely-compressed fill can burn a
+                                    # large fraction of its own (now tiny) risk budget on fees
+                                    # alone before the trade has any chance to work (confirmed
+                                    # live: today's EEM fund at 1sh, realized risk $3.35, real
+                                    # round-trip commission ~$1.30 -- 39% of the position's risk).
+                                    # Backtested first (real 22-ETF universe, core+gate, real
+                                    # commission schedule above, PORTFOLIO_CAP-aware chronological
+                                    # walk): a 10% floor is net-positive at today's live equity
+                                    # (~$12.9k) over the last 3yrs (+~1-3% cumulative vs no floor)
+                                    # and roughly neutral once equity has compounded much larger
+                                    # (the crumb regime stops binding as positions grow) -- see
+                                    # HANDOFF for the full threshold sweep. 0 disables (matches
+                                    # ETF_POS_CAP/PORTFOLIO_CAP's own convention).
+
+
+def commission_estimate_usd(qty: int, price: float) -> float:
+    """One-sided IBKR commission estimate for `qty` shares at `price`, using this account's
+    real confirmed Fixed-plan schedule (see MIN_VIABLE_COMMISSION_PCT comment)."""
+    if qty <= 0 or price <= 0:
+        return 0.0
+    notional = qty * price
+    fee = max(COMM_PER_SHARE * qty, COMM_MIN)
+    return min(fee, COMM_MAX_PCT * notional)
+
+
+def is_commission_viable(qty: int, price: float, realized_risk: float) -> tuple[bool, float]:
+    """False iff the ESTIMATED round-trip commission (2x the one-sided estimate -- the exit
+    leg's commission isn't known until it fills, but is normally close for a fixed qty) would
+    exceed MIN_VIABLE_COMMISSION_PCT of this position's own realized dollar risk. Returns
+    (viable, commission_pct) -- commission_pct is returned even when viable, for logging."""
+    if MIN_VIABLE_COMMISSION_PCT <= 0 or realized_risk <= 0:
+        return True, 0.0
+    round_trip = 2 * commission_estimate_usd(qty, price)
+    commission_pct = round_trip / realized_risk
+    return commission_pct <= MIN_VIABLE_COMMISSION_PCT, commission_pct
+
 
 # ---- pure sizing logic (no I/O -- unit-testable in isolation) ---------------
 
@@ -451,6 +501,16 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
         qty = cap_qty_to_portfolio_room(qty, price, equity_usd, portfolio_cap, deployed[0])
     if qty < 1:
         return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
+    realized_risk = qty * stop_per_share
+    viable, commission_pct = is_commission_viable(qty, price, realized_risk)
+    if not viable:
+        log.warning("ib_exec: %s: commission-not-viable SKIP, %d sh realized risk $%.2f, "
+                    "est round-trip commission %.1f%% of that risk (cap %.0f%%)",
+                    t["instrument"], qty, realized_risk, commission_pct * 100,
+                    MIN_VIABLE_COMMISSION_PCT * 100)
+        return (f"{t['instrument']}: {qty}sh at ${realized_risk:.2f} risk would cost "
+                f"~{commission_pct:.0%} of that in commission (cap {MIN_VIABLE_COMMISSION_PCT:.0%}), "
+                "SKIP -- retry next cycle")
     action = "BUY" if t["direction"] == "long" else "SELL"
     risk_money = equity_usd * paper.RISK_PER_TRADE
     if deployed is not None:
@@ -519,6 +579,16 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
         qty = cap_qty_to_portfolio_room(qty, price, equity_usd, portfolio_cap, deployed[0])
     if qty < 1:
         return f"{t['instrument']}: <1 share at the risk/cap budget, SKIP"
+    realized_risk = qty * stop_per_share
+    viable, commission_pct = is_commission_viable(qty, price, realized_risk)
+    if not viable:
+        log.warning("ib_exec: sleeve #%s %s: commission-not-viable SKIP, %d sh realized risk "
+                    "$%.2f, est round-trip commission %.1f%% of that risk (cap %.0f%%)",
+                    t.get("id"), t["instrument"], qty, realized_risk, commission_pct * 100,
+                    MIN_VIABLE_COMMISSION_PCT * 100)
+        return (f"{t['instrument']}: {qty}sh at ${realized_risk:.2f} risk would cost "
+                f"~{commission_pct:.0%} of that in commission (cap {MIN_VIABLE_COMMISSION_PCT:.0%}), "
+                "SKIP -- retry next cycle")
     # SPREAD-WIDENING GUARD (2026-07-09): the sleeve's whole thesis is entering during a VIX
     # panic, exactly when ETF bid-ask spreads can blow out 5-10x -- filling a bracket's MARKET
     # parent order into a wide spread means paying the worst possible price right when the

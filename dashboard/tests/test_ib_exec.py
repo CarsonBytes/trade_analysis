@@ -15,7 +15,8 @@ import os
 import tempfile
 from unittest import mock
 
-from dashboard.execution.ib_exec import cap_qty_to_portfolio_room
+from dashboard.execution.ib_exec import (cap_qty_to_portfolio_room, commission_estimate_usd,
+                                         is_commission_viable)
 
 _fails = []
 
@@ -429,6 +430,74 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
             pass
 
 
+# ADDED 2026-07-20: PORTFOLIO_CAP's "scale down, never skip" can compress a signal to 1-2
+# shares when the account is near-fully deployed -- the position still funds, but its
+# realized dollar risk shrinks with it while IBKR's per-order commission floor does NOT,
+# so a severely-compressed fill can burn a large fraction of its own risk budget on fees
+# alone. Real commission schedule confirmed via reqExecutions against the live account
+# (Fixed plan: $0.005/share, $1.00/order min, capped at 1% of trade value -- NOT the
+# Tiered schedule originally assumed, which understated real commission ~1.8-2.9x).
+# Backtested first (real 22-ETF universe, PORTFOLIO_CAP-aware chronological walk): a 10%
+# commission/risk floor is net-positive at today's live equity (+~1-3% cumulative over the
+# last 3yrs) and roughly neutral once equity has compounded much larger. See HANDOFF.
+def test_commission_estimate_usd():
+    print("commission_estimate_usd(): matches this account's REAL confirmed IBKR fills "
+          "(pulled via reqExecutions 2026-07-20):")
+    # real fill: IWM 6sh @ $294.97 -> real commission $1.00 (the $1 floor -- per-share
+    # calc 0.005*6=$0.03 is far below it, and the 1% cap ($17.70) doesn't bind here)
+    check("IWM 6sh @ $294.97 -> $1.00 floor",
+          round(commission_estimate_usd(6, 294.97), 4), 1.00)
+    # real fill: EEM 1sh @ $63.98 -> real commission $0.6413 (the 1% cap, not the $1 floor,
+    # binds below ~$100 notional -- 1%*63.98=$0.6398, matches the real fill to a cent)
+    check("EEM 1sh @ $63.98 -> 1% cap binds, not the $1 floor",
+          round(commission_estimate_usd(1, 63.98), 4), 0.6398)
+    check("qty=0 -> $0", commission_estimate_usd(0, 100.0), 0.0)
+    check("price<=0 -> $0 (guard)", commission_estimate_usd(10, 0.0), 0.0)
+
+
+def test_is_commission_viable():
+    print("\nis_commission_viable():")
+    # EEM crumb case: qty=1 @ $63.98, realized_risk=$3.35 (stop_per_share ~3.35) -- round-trip
+    # commission ~$1.28 is ~38% of that risk, well past the 10% default cap -> NOT viable.
+    viable, pct = is_commission_viable(1, 63.98, 3.35)
+    check("EEM-style crumb (qty=1, tiny risk) -> NOT viable", viable, False)
+    check("commission_pct is ~38% (2*0.6398/3.35)", round(pct, 2), 0.38)
+    # IWM normal case: qty=6 @ $294.97, realized_risk=$47.64 -- round-trip $2.00 is only ~4.2%
+    # of that risk -> comfortably viable, matching how normal-sized trades pass through untouched.
+    viable2, pct2 = is_commission_viable(6, 294.97, 47.64)
+    check("IWM-style normal size -> viable", viable2, True)
+    check("commission_pct is ~4.2%", round(pct2, 3), 0.042)
+    # guard: realized_risk<=0 -> always viable (never divide by zero / never wrongly block)
+    viable3, pct3 = is_commission_viable(5, 100.0, 0.0)
+    check("zero risk -> viable (guard)", viable3, True)
+    check("zero risk -> commission_pct 0.0", pct3, 0.0)
+    # disabled (matches ETF_POS_CAP/PORTFOLIO_CAP's own 0-disables convention)
+    from dashboard.execution import ib_exec
+    with mock.patch.object(ib_exec, "MIN_VIABLE_COMMISSION_PCT", 0):
+        viable4, pct4 = ib_exec.is_commission_viable(1, 63.98, 3.35)
+    check("MIN_VIABLE_COMMISSION_PCT=0 -> disabled, always viable", viable4, True)
+
+
+def test_place_etf_bracket_skips_commission_not_viable_crumb():
+    print("\n_place_etf_bracket(): a PORTFOLIO_CAP-compressed crumb (today's real EEM "
+          "scenario: $12.9k equity, ~$64 of room left, EEM~$64/share -> 1sh) is SKIPPED "
+          "before any order is sent, and does NOT reserve portfolio-cap room:")
+    from dashboard.execution import ib_exec
+
+    t = {"id": 27, "instrument": "EEM", "direction": "long",
+        "entry": 63.98, "sl": 60.63, "tp": 74.87}
+    deployed = [12900.0 - 64.0]     # only ~$64 of room left before the 100% portfolio cap
+    with mock.patch.object(ib_exec.paper, "RISK_PER_TRADE", 0.01), \
+         mock.patch.dict(os.environ, {"ETF_POS_CAP": "0.30", "PORTFOLIO_CAP": "1.0"}), \
+         mock.patch.object(ib_exec.ib_client, "stock_contract", return_value=object()), \
+         mock.patch.object(ib_exec.ib_client, "call") as fake_call:
+        msg = ib_exec._place_etf_bracket(ib=object(), t=t, equity_usd=12900.0, deployed=deployed)
+
+    check("no order was sent", fake_call.called, False)
+    check("message explains the commission-not-viable skip", "commission" in (msg or ""), True)
+    check("deployed room was NOT reserved for a skipped order", deployed[0], 12900.0 - 64.0)
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
@@ -440,6 +509,9 @@ if __name__ == "__main__":
     test_stale_signal_check_leaves_fresh_signals_alone()
     test_stale_signal_check_fails_open_on_no_live_price()
     test_mirror_new_cancels_stale_signal_instead_of_funding()
+    test_commission_estimate_usd()
+    test_is_commission_viable()
+    test_place_etf_bracket_skips_commission_not_viable_crumb()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")
