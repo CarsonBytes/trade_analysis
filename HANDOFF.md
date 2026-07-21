@@ -1,7 +1,60 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-18.
+Last updated 2026-07-21.
+
+---
+
+### 🚨 2026-07-21: live-side deploys were silently unreachable for 3 days -- orphaned process squatting on the port
+
+**The bug:** `Stop-ScheduledTask "DashboardAppLive"` kills the top-level PowerShell wrapper
+(`run_dashboard_live.ps1`), but a NiceGUI/uvicorn child `python -m dashboard.app` process it
+spawns can become ORPHANED (parent already gone) and keep running independently, silently
+squatting on `DASH_PORT` (8081) forever. A python.exe from **2026-07-18 22:31** survived
+**five separate** Stop/Start-ScheduledTask restart cycles run on 2026-07-21 -- every restart
+that day spawned a genuinely new process, but it quietly failed to bind the already-occupied
+port and sat retrying in the background, while the stale 07-18 process kept answering every
+request (including `curl` health checks -- 200 OK the whole time, because the ORPHAN was
+answering, not the new code).
+
+**Real-world impact:** every live-side code fix committed and "deployed" during that window
+was silently unreachable on the actual running process: the commission-viability floor
+(`MIN_VIABLE_COMMISSION_PCT`), the ghost-entry auto-cancel (`GHOST_ENTRY_GRACE_MIN`), and the
+reconcile-cleared changelog follow-up all tested green and were genuinely committed/pushed,
+but none of them were reachable via quant-live.carsonng.com until this was found. Paper's
+instance was NOT affected this specific day (its restarts happened to land cleanly), but nothing
+about the failure mode is paper-specific.
+
+**How it was found:** a user reported the dashboard still showing a stale "reconcile: position
+mismatch" banner after refreshing, even though the underlying CWB ghost-entry issue had already
+been fixed and verified via direct broker checks. Standard debugging (checking the changelog,
+re-running the reconcile check by hand) showed the DATA was correct -- the bug was that
+`service.STATE["reconcile"]` (the banner's actual source, separate from the changelog) only
+gets recomputed once per fresh IB connection, so on a long-lived connection it could go stale
+indefinitely. Investigating why that reconnect-driven refresh wasn't happening either led to
+comparing the LIVE process's own PID/creation-time against the port it was supposedly serving --
+mismatch, confirming an orphan from 3 days earlier, not today's process.
+
+**Fix (two parts):**
+1. `dashboard/web/service.py`: reconciliation (`STATE["reconcile"]`) now also re-runs
+   periodically (`RECONCILE_PERIODIC_SEC`=600s), not just on a fresh connection, via a new pure
+   `reconcile_due()` helper -- keeps the System Health banner honestly current on its own even
+   on a stable connection.
+2. `run_dashboard_live.ps1` + `C:\Scripts\dashboard.ps1` (paper, outside this repo): a
+   **self-healing port guard** at the top of each script -- rather than trust the STOP path
+   (which is exactly what failed 5 times), unconditionally kill whatever process already holds
+   `DASH_PORT` before proceeding on every START. Self-heals regardless of how the previous
+   instance ended (clean stop, crash, or an orphan like this one). Logs to
+   `logs/restart-guard.log` for visibility. Tested end-to-end: a real restart cycle right after
+   deploying this caught and killed a FRESH recurrence of the same orphan pattern before either
+   port was rebound.
+
+**Lesson for future sessions:** `curl` returning 200 / a scheduled task showing "Running" does
+NOT prove a restart actually replaced the running code. Verify a deploy actually landed by
+checking the PID and creation-time of the process actually bound to the target port, not just
+an HTTP status code -- this is now cheap: `Get-NetTCPConnection -LocalPort <port> -State
+Listen` then `Get-CimInstance Win32_Process -Filter "ProcessId=<pid>"` and compare
+`CreationDate` against when the restart command actually ran.
 
 ---
 
