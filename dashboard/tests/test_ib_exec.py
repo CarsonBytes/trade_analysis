@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import datetime as dt
 from unittest import mock
 
 from dashboard.execution.ib_exec import (cap_qty_to_portfolio_room, commission_estimate_usd,
@@ -249,6 +250,122 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
         with ib_exec._conn() as c:
             status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
         check("ib_mirror row marked CLOSED to match", status, "CLOSED")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# ADDED 2026-07-21: sync_closures() previously had no terminal outcome for a bracket ENTRY
+# that was rejected/cancelled at the broker before ever filling -- only for exits (a real
+# position that later closed). Confirmed live: CWB's 2026-07-20 order vanished from the
+# broker (no fill, no position, no working order) but stayed marked OPEN in both
+# paper_trades and ib_mirror indefinitely -- only caught by reconcile_with_broker(), which
+# only runs once per fresh IB connection, not every cycle.
+def test_sync_closures_auto_cancels_dead_entry_past_grace_period():
+    print("\nsync_closures(): a bracket entry that never filled at the broker (no position, "
+          "no working order, no closing fill -- CWB's real 2026-07-20 case) gets "
+          "auto-cancelled once GHOST_ENTRY_GRACE_MIN has passed, instead of staying OPEN "
+          "forever:")
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        old_ts = (dt.datetime.now(dt.timezone.utc)
+                 - dt.timedelta(minutes=ib_exec.GHOST_ENTRY_GRACE_MIN + 15)).isoformat(timespec="seconds")
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,?,'CWB','long','ATR rr3.0',101.79,98.52,111.60,3.0,2,'OPEN')", (old_ts,))
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,333,'CWB',2.0,129.0,'',?,'OPEN','etf')", (old_ts,))
+
+        class _FakeIB:
+            def positions(self):
+                return []
+            def fills(self):
+                return []
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            logs = ib_exec.sync_closures()
+
+        check("logged the auto-cancellation", any("auto-cancelled" in l for l in logs), True)
+        with ib_exec._conn() as c:
+            pstatus = c.execute("SELECT status FROM paper_trades WHERE id=1").fetchone()[0]
+            mstatus, note = c.execute(
+                "SELECT status, note FROM ib_mirror WHERE paper_id=1").fetchone()
+        check("paper_trades marked CANCELLED", pstatus, "CANCELLED")
+        check("ib_mirror marked CLOSED", mstatus, "CLOSED")
+        check("ib_mirror note explains why", "ghost" in note, True)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_sync_closures_leaves_recent_dead_entry_candidate_within_grace_period():
+    print("\nsync_closures(): the SAME dead-entry pattern, but still within "
+          "GHOST_ENTRY_GRACE_MIN -- left alone, re-checked next cycle (never wrongly "
+          "cancels a real order still mid-flight):")
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        recent_ts = (dt.datetime.now(dt.timezone.utc)
+                    - dt.timedelta(minutes=2)).isoformat(timespec="seconds")
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,?,'CWB','long','ATR rr3.0',101.79,98.52,111.60,3.0,2,'OPEN')", (recent_ts,))
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,333,'CWB',2.0,129.0,'',?,'OPEN','etf')", (recent_ts,))
+
+        class _FakeIB:
+            def positions(self):
+                return []
+            def fills(self):
+                return []
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            logs = ib_exec.sync_closures()
+
+        check("NOT auto-cancelled yet (within grace period)",
+              any("auto-cancelled" in l for l in logs), False)
+        with ib_exec._conn() as c:
+            pstatus = c.execute("SELECT status FROM paper_trades WHERE id=1").fetchone()[0]
+            mstatus = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
+        check("paper_trades still OPEN", pstatus, "OPEN")
+        check("ib_mirror still OPEN", mstatus, "OPEN")
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)
@@ -504,6 +621,8 @@ if __name__ == "__main__":
     test_pending_entry_notional_usd()
     test_current_portfolio_room_usd()
     test_sync_closures_cancels_stale_order_when_paper_already_resolved()
+    test_sync_closures_auto_cancels_dead_entry_past_grace_period()
+    test_sync_closures_leaves_recent_dead_entry_candidate_within_grace_period()
     test_resolve_from_broker_elevates_loss_to_warning_level()
     test_stale_signal_check_cancels_when_drifted_past_threshold()
     test_stale_signal_check_leaves_fresh_signals_alone()

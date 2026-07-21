@@ -102,6 +102,31 @@ MIN_VIABLE_COMMISSION_PCT = 0.10   # 2026-07-20: PORTFOLIO_CAP's "scale down, ne
                                     # ETF_POS_CAP/PORTFOLIO_CAP's own convention).
 
 
+GHOST_ENTRY_GRACE_MIN = 30   # 2026-07-21: sync_closures() previously had NO terminal outcome
+                              # for "the ENTRY itself was rejected/cancelled at the broker
+                              # before ever filling" -- only for exits (a real position that
+                              # later closed). A dead entry (no position, no working order,
+                              # paper still OPEN, _resolve_from_broker() finds no closing fill
+                              # because there was no opening fill either) fell through to
+                              # "leave OPEN, re-check next cycle" FOREVER, with no way out.
+                              # Confirmed live: CWB's 2026-07-20 bracket order (part of the
+                              # same IWM/CWB/EEM cycle the commission-viability fix responds
+                              # to) vanished from the broker -- no fill, no position, no
+                              # working order -- yet stayed marked OPEN in both paper_trades
+                              # and ib_mirror indefinitely; only caught by reconcile_with_broker
+                              # (core/reconcile.py), which only runs once per FRESH IB
+                              # connection, not every cycle -- this instance only got flagged
+                              # because a restart happened to force a reconnect. 30min is
+                              # comfortably longer than any normal fill/sync delay -- a genuinely
+                              # still-pending order (e.g. placed outside market hours) is already
+                              # excluded by the working_conids check above this branch, so
+                              # reaching here at all means IB has already made a final (silent)
+                              # decision on the order; this just gives that decision time to
+                              # propagate before concluding it's terminal, matching the
+                              # "uncertain -> retry, don't commit" philosophy already used
+                              # elsewhere in this function.
+
+
 def commission_estimate_usd(qty: int, price: float) -> float:
     """One-sided IBKR commission estimate for `qty` shares at `price`, using this account's
     real confirmed Fixed-plan schedule (see MIN_VIABLE_COMMISSION_PCT comment)."""
@@ -708,7 +733,7 @@ def sync_closures() -> list[str]:
     journal = {t["id"]: t for t in paper.all_trades()}
     with paper._LOCK, _conn() as c:
         rows = c.execute("SELECT paper_id, con_id, local_symbol, qty, expiry, "
-                         "status FROM ib_mirror").fetchall()
+                         "status, ts FROM ib_mirror").fetchall()
     # async order request runs on the loop thread via _run (the sync reqAllOpenOrders
     # wrapper would try to start the already-running loop -> RuntimeError). Wrap in a
     # coroutine since the *Async method returns a Future, not a bare coroutine.
@@ -720,7 +745,7 @@ def sync_closures() -> list[str]:
                       ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
     positions = ib_client.call(lambda: {p.contract.conId: p
                                         for p in ib_client.filter_by_account(ib.positions() or [], acct)})
-    for paper_id, con_id, local_symbol, qty, expiry, mstatus in rows:
+    for paper_id, con_id, local_symbol, qty, expiry, mstatus, mts in rows:
         pt = journal.get(paper_id)
         if pt is None or mstatus == "CLOSED":
             continue
@@ -777,7 +802,38 @@ def sync_closures() -> list[str]:
                         c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
                                   (paper_id,))
                     logs.append(msg); log.info("ib_exec: %s", msg)
-                # else: no confirming fill yet -- leave ib_mirror OPEN, re-check next cycle.
+                else:
+                    # No confirming closing fill -- but this can also mean the ENTRY itself
+                    # was rejected/cancelled at the broker before ever filling, not just "a
+                    # real position that hasn't resolved yet" (see GHOST_ENTRY_GRACE_MIN).
+                    # Give it a generous grace period before concluding it's a dead entry --
+                    # a genuinely still-pending order is already excluded by the
+                    # working_conids branch above, so reaching here at all means IB has
+                    # already made a final, silent decision on this order.
+                    try:
+                        placed_at = dt.datetime.fromisoformat(mts) if mts else None
+                    except ValueError:
+                        placed_at = None
+                    elapsed_min = ((dt.datetime.now(dt.timezone.utc) - placed_at).total_seconds() / 60
+                                  if placed_at else 0.0)
+                    if elapsed_min >= GHOST_ENTRY_GRACE_MIN:
+                        paper._update_resolution(
+                            paper_id, "CANCELLED",
+                            dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                            0.0, 0.0,
+                            exit_reason=(f"entry never filled at the broker ({elapsed_min:.0f}"
+                                        "min since placement, no position, no working order) "
+                                        "-- broker-side rejection/cancellation, not a real trade"))
+                        with paper._LOCK, _conn() as c:
+                            c.execute("UPDATE ib_mirror SET status='CLOSED', note=? WHERE paper_id=?",
+                                      ("entry never filled -- ghost, auto-cancelled", paper_id))
+                        ghost_msg = (f"{local_symbol}: auto-cancelled -- entry never filled at "
+                                    f"the broker after {elapsed_min:.0f}min (no position, no "
+                                    "working order)")
+                        logs.append(ghost_msg); log.warning("ib_exec: %s", ghost_msg)
+                        from dashboard.core import notable_events
+                        notable_events.record(ghost_msg, level="warning")
+                    # else: still within grace period -- leave ib_mirror OPEN, re-check next cycle.
             else:
                 # paper already resolved (e.g. via the deterministic tick path); nothing left
                 # to resolve, safe to mark the mirror row closed now.
