@@ -36,6 +36,34 @@ $env:IB_ALLOW_LIVE   = "1"             # THE real-money switch (paper instance n
 $env:DASH_PORT       = "8081"          # LIVE UI on its own local port
 $env:PAPER_URL       = "https://quant.carsonng.com"
 $env:LIVE_URL        = "https://quant-live.carsonng.com"
+
+# SELF-HEALING PORT GUARD (2026-07-21): Stop-ScheduledTask only kills THIS script's own
+# top-level process -- a NiceGUI/uvicorn child spawned by `python -m dashboard.app` below can
+# become ORPHANED (its parent already gone) and keep running independently, silently
+# squatting on DASH_PORT forever. Confirmed live: a python.exe from 2026-07-18 survived FIVE
+# separate Stop/Start-ScheduledTask restart cycles on 2026-07-21 -- the orphan kept answering
+# every request on port 8081 the whole time, while each "new" instance quietly failed to bind
+# the already-occupied port and retried in the background. Every live-side code fix deployed
+# during that window was silently unreachable until this was found (via the mismatched PID
+# creation-time) and manually killed. Rather than trust the STOP path (which is exactly what
+# just failed), guarantee a clean slate on every START instead: unconditionally kill whatever
+# already holds DASH_PORT before proceeding. This self-heals regardless of HOW the previous
+# instance ended (a clean scheduled-task stop, a crash, an orphan like this one) -- "kill on
+# start" doesn't depend on trusting any particular stop mechanism ever working correctly.
+$portNum = [int]$env:DASH_PORT
+$staleConns = Get-NetTCPConnection -LocalPort $portNum -State Listen -ErrorAction SilentlyContinue
+if ($staleConns) {
+    foreach ($stalePid in ($staleConns.OwningProcess | Select-Object -Unique)) {
+        try {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$stalePid" -ErrorAction Stop
+            Add-Content -Path 'D:\quant\logs\restart-guard.log' -Value (
+                "$(Get-Date -Format o) [live] killing stale process already on port $portNum -- " +
+                "PID $stalePid, started $($p.CreationDate), cmd: $($p.CommandLine)")
+        } catch { }
+        Stop-Process -Id $stalePid -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+}
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
 $env:CASH_USD        = "1"
 $env:CASH_SWEEP      = "1"
