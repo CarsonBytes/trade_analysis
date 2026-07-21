@@ -90,7 +90,10 @@ def reconcile_with_broker() -> dict:
     broker_pending = ib_client.broker_open_order_symbols()
     result = compare_positions(broker_pos, local_open, broker_pending,
                                excluded_symbols={ib_exec.SGOV_SYMBOL})
-    if result["only_local"] or result["only_broker"]:
+    from dashboard.core import store
+    had_mismatch, _ts = store.cache_get("reconcile_had_mismatch")
+    is_mismatch = bool(result["only_local"] or result["only_broker"])
+    if is_mismatch:
         msg = (f"reconcile: broker/local position MISMATCH -- "
               f"only_local(ghost)={result['only_local']} "
               f"only_broker(untracked)={result['only_broker']}")
@@ -99,4 +102,18 @@ def reconcile_with_broker() -> dict:
         notable_events.record(msg, level="warning")
     else:
         log.info("reconcile: broker/local positions match (%d open)", len(local_open))
+        # RESOLVED 2026-07-21: this check only runs once per FRESH connection, and the
+        # "Recent notable events" panel (app.py) just lists the last 20 changelog rows with
+        # no resolved/unresolved distinction -- a real mismatch (CWB's ghost entry) stayed
+        # visible there for hours after being fixed, with nothing to tell a viewer it was
+        # no longer active (a user saw the stale warning and asked whether it was still a
+        # live problem). If the PREVIOUS check found a real desync, record the follow-up
+        # too (warning level, so it also reaches Telegram as a definitive "all clear",
+        # matching how the original alarm was pushed) so the changelog shows resolution,
+        # not just a dangling alarm that looks unresolved forever.
+        if had_mismatch:
+            clear_msg = "reconcile: mismatch CLEARED -- broker/local positions now match"
+            from dashboard.core import notable_events
+            notable_events.record(clear_msg, level="warning")
+    store.cache_set("reconcile_had_mismatch", is_mismatch)
     return result

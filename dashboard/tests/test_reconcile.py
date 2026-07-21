@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from unittest import mock
 
 from dashboard.core.reconcile import compare_positions
 
@@ -136,6 +137,82 @@ def test_mirrored_open_symbols_isolated_db():
             pass
 
 
+# ADDED 2026-07-21: reconcile_with_broker() only runs once per FRESH connection, and the
+# "Recent notable events" panel just lists the last 20 changelog rows with no resolved/
+# unresolved distinction -- a real mismatch (CWB's ghost entry) stayed visible there for
+# hours after being fixed, with nothing to tell a viewer it was no longer active.
+def test_reconcile_with_broker_records_cleared_after_previous_mismatch():
+    print("\nreconcile_with_broker(): after a PREVIOUS mismatch, the next clean check "
+          "records a 'mismatch CLEARED' follow-up (warning level, so it also reaches "
+          "Telegram) -- so the history shows resolution, not just a dangling alarm:")
+    from dashboard.core import reconcile, store
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        recorded = []
+        with mock.patch.object(ib_exec, "mirrored_open_symbols", return_value=set()), \
+             mock.patch("dashboard.data.ib_client.broker_positions", return_value={}), \
+             mock.patch("dashboard.data.ib_client.broker_open_order_symbols", return_value=set()), \
+             mock.patch("dashboard.core.notable_events.record",
+                        side_effect=lambda msg, level="info": recorded.append((msg, level))):
+            store.cache_set("reconcile_had_mismatch", True)   # simulate a PRIOR mismatch
+            result = reconcile.reconcile_with_broker()
+
+        check("current check itself is clean", result, {"only_local": [], "only_broker": []})
+        check("exactly one event recorded (the follow-up)", len(recorded), 1)
+        check("follow-up message says CLEARED", "CLEARED" in recorded[0][0], True)
+        check("follow-up pushed at warning level (reaches Telegram)", recorded[0][1], "warning")
+        had, _ = store.cache_get("reconcile_had_mismatch")
+        check("cached state updated to False (clean)", had, False)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_reconcile_with_broker_no_followup_when_already_clean():
+    print("\nreconcile_with_broker(): a clean check with NO prior mismatch records nothing "
+          "extra -- avoids spamming an 'all good' event on every routine reconnect:")
+    from dashboard.core import reconcile
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        recorded = []
+        with mock.patch.object(ib_exec, "mirrored_open_symbols", return_value=set()), \
+             mock.patch("dashboard.data.ib_client.broker_positions", return_value={}), \
+             mock.patch("dashboard.data.ib_client.broker_open_order_symbols", return_value=set()), \
+             mock.patch("dashboard.core.notable_events.record",
+                        side_effect=lambda msg, level="info": recorded.append((msg, level))):
+            result = reconcile.reconcile_with_broker()   # no prior cache entry -> defaults clean
+
+        check("clean result", result, {"only_local": [], "only_broker": []})
+        check("no event recorded", len(recorded), 0)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     for t in (test_compare_positions_clean_match, test_compare_positions_ghost_trade,
               test_compare_positions_untracked_broker_position,
@@ -147,7 +224,9 @@ if __name__ == "__main__":
               test_compare_positions_excludes_cash_sweep_holding,
               test_compare_positions_excluded_does_not_hide_a_real_ghost,
               test_compare_positions_no_excluded_arg_unchanged,
-              test_mirrored_open_symbols_isolated_db):
+              test_mirrored_open_symbols_isolated_db,
+              test_reconcile_with_broker_records_cleared_after_previous_mismatch,
+              test_reconcile_with_broker_no_followup_when_already_clean):
         t()
     print()
     if _fails:
