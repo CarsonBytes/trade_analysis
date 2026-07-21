@@ -4,8 +4,10 @@ self-heal and the account-summary confirm-then-accept guard. Run:
 """
 from __future__ import annotations
 
+import datetime as dt
+
 from dashboard.web.service import (heal_series, is_nl_implausible, pending_confirms,
-                                   is_equity_jump_implausible)
+                                   is_equity_jump_implausible, reconcile_due)
 
 _fails = []
 
@@ -116,12 +118,33 @@ def test_is_equity_jump_implausible():
           is_equity_jump_implausible(13_000.0, 10_040.0, None), False)
 
 
+# ADDED 2026-07-21: broker reconciliation (STATE["reconcile"], the System Health banner's
+# "reconcile:" line) used to run ONLY on a fresh IB connection -- once a real mismatch (CWB's
+# ghost entry) was found, STATE["reconcile"] never got refreshed again on a stable, never-
+# reconnecting connection, so the banner showed "mismatch found" indefinitely, surviving any
+# number of browser refreshes, even though the underlying issue was long since fixed.
+def test_reconcile_due():
+    print("reconcile_due():")
+    now = dt.datetime(2026, 7, 21, 12, 0, 0)
+    check("never run before (None) -> due immediately", reconcile_due(None, now), True)
+    check("just ran (0s ago) -> not due yet",
+          reconcile_due(now, now, periodic_sec=600), False)
+    check("ran 599s ago -> not due yet (just under the period)",
+          reconcile_due(now - dt.timedelta(seconds=599), now, periodic_sec=600), False)
+    check("ran exactly 600s ago -> due (boundary)",
+          reconcile_due(now - dt.timedelta(seconds=600), now, periodic_sec=600), True)
+    check("ran 20min ago -> due", reconcile_due(now - dt.timedelta(minutes=20), now,
+                                                periodic_sec=600), True)
+    check("default periodic_sec matches RECONCILE_PERIODIC_SEC (600s)",
+          reconcile_due(now - dt.timedelta(seconds=601), now), True)
+
+
 if __name__ == "__main__":
     for t in (test_heal_series_bracketed_zero_spike, test_heal_series_real_sustained_jump_kept,
               test_heal_series_unresolved_anomaly_left_alone,
               test_heal_series_normal_fluctuations_untouched,
               test_heal_series_empty_and_singleton, test_is_nl_implausible,
-              test_pending_confirms, test_is_equity_jump_implausible):
+              test_pending_confirms, test_is_equity_jump_implausible, test_reconcile_due):
         t()
     print()
     if _fails:

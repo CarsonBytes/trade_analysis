@@ -51,6 +51,27 @@ STATE: dict = {
 }
 
 
+RECONCILE_PERIODIC_SEC = 600   # 2026-07-21: broker reconciliation (STATE["reconcile"], the
+                                # System Health banner's "reconcile:" line) used to run ONLY
+                                # on a fresh IB connection -- fine for CATCHING a mismatch
+                                # quickly (a fresh connect is exactly when one is likely), but
+                                # nothing ever re-ran it on a long-lived connection, so a
+                                # since-fixed mismatch could show "mismatch found" forever,
+                                # surviving any number of browser refreshes. 10min keeps the
+                                # banner honestly current without adding meaningful IB API
+                                # load (a plain positions/open-orders diff, not a data fetch).
+
+
+def reconcile_due(last_ts: dt.datetime | None, now: dt.datetime,
+                  periodic_sec: float = RECONCILE_PERIODIC_SEC) -> bool:
+    """Should broker reconciliation run now, independent of the fresh-connection trigger
+    (checked separately via ib_client.reconcile_needed())? True if it's never run yet, or
+    periodic_sec has elapsed since the last run."""
+    if last_ts is None:
+        return True
+    return (now - last_ts).total_seconds() >= periodic_sec
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now()
 
@@ -179,15 +200,23 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["broker_conn"] = None
         log.debug("broker.connection error: %s", e)
-    # broker reconciliation: once per FRESH connection (login/reconnect, not every cycle --
-    # see ib_client.reconcile_needed()), diff broker-reported positions against local OPEN
-    # trade records and surface any mismatch (the "ghost mirror" bug class).
+    # broker reconciliation: on every FRESH connection (login/reconnect -- see
+    # ib_client.reconcile_needed()) PLUS periodically (RECONCILE_PERIODIC_SEC) even on a
+    # long-lived, never-reconnecting connection. FIXED 2026-07-21: this used to run ONLY on
+    # a fresh connection -- once STATE["reconcile"] recorded a real mismatch (CWB's ghost
+    # entry), it stayed showing "mismatch found" in the System Health banner INDEFINITELY
+    # (surviving any number of browser refreshes, since a page reload just re-renders
+    # whatever STATE currently holds) until the app happened to get ANOTHER fresh IB
+    # connection -- which, on a stable connection, could be a very long time. The underlying
+    # ghost had already been fixed; the UI just had no way to notice without a lucky/forced
+    # reconnect. A periodic re-check keeps this reflecting TRUE current state on its own.
     if broker.is_ib():
         try:
             from dashboard.data import ib_client
-            if ib_client.reconcile_needed():
+            if ib_client.reconcile_needed() or reconcile_due(STATE.get("_reconcile_last_ts"), _now()):
                 from dashboard.core import reconcile
                 STATE["reconcile"] = reconcile.reconcile_with_broker()
+                STATE["_reconcile_last_ts"] = _now()
                 ib_client.mark_reconciled()
         except Exception as e:
             log.debug("reconcile error: %s", e)
