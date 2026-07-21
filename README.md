@@ -221,6 +221,47 @@ Judged against what actually broke and got fixed this project, not just what it 
 
 ---
 
+## Product management & project quality
+
+The strategy is one axis this project is judged on; how it's *run* is another. Concrete
+evidence from this project's real history, not a self-assessment:
+
+- **Backtest-before-deploy is a standing rule, not an occasional practice.** Every change to
+  live trading logic — the re-entry gate, the `ETF_POS_CAP` leverage bump, the ghost-entry
+  auto-cancel, the commission-viability floor — was backtested with explicit numbers *first*,
+  including reversing course mid-investigation when a coarse first pass would have breached the
+  user's own stated risk budget (a 50% position cap that looked fine on a rough grid actually
+  broke the 9%-max-drawdown constraint at finer resolution — caught before it ever reached real
+  money).
+- **Incidents get root-caused, not just restarted.** 2026-07-21: a live deploy silently didn't
+  take effect — `curl` returned 200, the scheduled task showed "Running," but a process orphaned
+  since 2026-07-18 was still answering every request. Rather than accept the green health check,
+  traced it to a PID/creation-time mismatch, fixed the actual mechanism (a self-healing port
+  guard that doesn't depend on the stop path working), tested the fix by triggering the same
+  failure again on purpose, and wrote down the general lesson (verify a deploy by checking what
+  process is bound to the port, not by trusting an HTTP status) — see `HANDOFF.md`.
+- **Every fix ships with a regression test, not just a claim.** 15 test files today, grown one
+  incident at a time — the ghost-entry auto-cancel, the commission floor, and the reconcile
+  staleness fix each landed with new isolated-DB or pure-function tests in the same commit as
+  the fix, and the full suite runs before every commit, not just the changed file.
+- **Claims get checked against ground truth, not accepted or dismissed on authority.** Multiple
+  external critiques of this project (methodology questions, a security-tooling claim, a Python
+  version claim) were independently verified rather than taken at face value — sometimes
+  confirming the critique and changing the system, sometimes refuting it with direct evidence
+  (the actual `.venv` runs Python 3.13.2, not the 3.14 a stale setup doc claimed; no AVG
+  antivirus has ever been installed on this machine, contrary to an old README note).
+- **Statistical honesty applied as a process, not just a headline number.** Every search
+  process — universe selection, exit-method sweeps, parameter sweeps, the re-entry-gate
+  variants — gets the SAME deflated-Sharpe multiple-comparisons correction, combined across all
+  trials (100% DSR at 82 combined trials), not just the winning configuration in isolation.
+- **Documentation kept honest and current, not written once and left stale.** `HANDOFF.md` is a
+  dated, chronological incident log (what broke, why, what was tried, what was adopted or
+  rejected); this README's "current best config" section is a standing commitment to update in
+  place whenever a new finding beats it, not a one-time snapshot — and the "what it doesn't do
+  well" list above is maintained with the same rigor as the "does well" one.
+
+---
+
 ## How this compares to other investment approaches
 
 All figures below are checked against real market data (not invented), after-tax where noted,
