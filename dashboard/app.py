@@ -153,6 +153,18 @@ SIG_COLOR = {"BUY": "positive", "SELL": "negative", "WAIT": "grey", "WATCH": "gr
 BACKTEST_SIGNAL_FREQ_YR = 38
 BACKTEST_SIGNAL_FREQ_WK = 0.7
 
+# FIXED 2026-07-23: this used to be hardcoded -10.5% directly in portfolio_panel() (3 places)
+# -- a leftover from the OLD 0.5%-risk-era plan figures, never updated when the deployed
+# config moved to risk=1%/pos_cap=30%/gate+sleeve. That's a real accuracy bug, not just
+# staleness: showing a stale (too-generous) reference line means a live drawdown could sit
+# "under the line" on the chart while already exceeding what the CURRENT strategy's own
+# backtest has ever produced, understating how bad "worse than backtest" actually looks.
+# Current figure: deployed config's FULL 32-year-history max drawdown (core + reclaim-1.0R-
+# buffer gate + panic-MR sleeve, risk=1%, pos_cap=30%) -- see README.md's "Update 2026-07-18"
+# section / HANDOFF.md for the full table. Re-measure and update this if the deployed config
+# changes again (a new gate variant, a pos_cap/risk change, a new universe member, etc.).
+BACKTEST_MAX_DD_PCT = -8.83
+
 
 # ---- refreshable panels ----------------------------------------------------
 
@@ -645,8 +657,13 @@ def paper_panel() -> None:
     methods = sorted({t["method"] for t in closed})
     with ui.row().classes("w-full flex-wrap gap-3"):
         if not closed:
+            # FIXED 2026-07-23: this said "5-day horizon" -- wrong on two counts.
+            # HORIZON_DAYS=5 is a BAR count (weekly bars), not calendar days; the actual
+            # calendar-day figure is HORIZON_CAL=35 (5 weekly bars), already referenced
+            # correctly elsewhere in the codebase (e.g. the pending-card ETA text). This one
+            # line never got updated and understated how long a trade can sit unresolved by 7x.
             ui.label("No resolved trades yet. They settle as price hits SL/TP or the "
-                     "5-day horizon passes.").classes("text-sm text-grey")
+                     f"{paper.HORIZON_CAL}-day horizon passes.").classes("text-sm text-grey")
         for m in methods:
             rs = [t["realized_r"] for t in closed if t["method"] == m]
             s = paper.stats(rs)
@@ -1052,7 +1069,7 @@ def portfolio_panel() -> None:
         ui.label("Builds as snapshots accrue (~one point / 10 min).")\
             .classes("text-sm text-grey mt-1")
 
-    # DRAWDOWN MONITOR — current % below the running peak (watch the -10.5% line)
+    # DRAWDOWN MONITOR — current % below the running peak (watch the BACKTEST_MAX_DD_PCT line)
     # Uses the DEPOSIT-ADJUSTED series unconditionally (not tied to the chart_view toggle
     # above): a deposit must never look like a new all-time high that resets the peak and
     # hides a real, ongoing trading drawdown -- this has to be correct regardless of what
@@ -1082,12 +1099,14 @@ def portfolio_panel() -> None:
             if _cutoff is None or h[0] >= _cutoff:
                 dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
                 dys.append(round(cur_dd, 2))
-        ddcol = "#16a34a" if cur_dd > -5 else "#d97706" if cur_dd > -10.5 else "#dc2626"
+        ddcol = ("#16a34a" if cur_dd > -5 else
+                 "#d97706" if cur_dd > BACKTEST_MAX_DD_PCT else "#dc2626")
         with ui.row().classes("items-baseline gap-2 mt-2"):
             ui.label("Drawdown from peak").classes("text-sm font-bold")
             ui.label(f"now {cur_dd:+.1f}%").classes(
                 "text-sm font-bold " + ("text-green" if cur_dd > -5
-                                        else "text-orange" if cur_dd > -10.5 else "text-red"))\
+                                        else "text-orange" if cur_dd > BACKTEST_MAX_DD_PCT
+                                        else "text-red"))\
                 .tooltip("Always the TRUE current drawdown from the all-time peak, "
                          "regardless of the period selected above -- deposit-adjusted, so a "
                          "cash-in never masquerades as a new peak")
@@ -1098,7 +1117,8 @@ def portfolio_panel() -> None:
             "series": [{"type": "line", "data": dys, "smooth": True, "areaStyle": {},
                         "lineStyle": {"width": 2}, "itemStyle": {"color": ddcol},
                         "markLine": {"silent": True, "symbol": "none", "data": [
-                            {"yAxis": -10.5, "label": {"formatter": "backtest max DD -10.5%"},
+                            {"yAxis": BACKTEST_MAX_DD_PCT,
+                             "label": {"formatter": f"backtest max DD {BACKTEST_MAX_DD_PCT:.2f}%"},
                              "lineStyle": {"color": "#dc2626", "type": "dashed"}}]}}],
             "grid": {"left": 55, "right": 20, "top": 20, "bottom": 45},
         }).classes("w-full h-44").tooltip(
@@ -2047,14 +2067,34 @@ def main_page() -> None:
                 _eq_usd = (float(_nl) / 7.8) if _nl else None      # HKD->USD peg (display only)
                 _ph = _pp.account_phase(_eq_usd)
                 _sleeve_on = _sl.sleeve_enabled() and _pp.sleeve_active(_eq_usd)
-                if _ph == 1:
+                # FIXED 2026-07-23: PHASE2_NAV_USD was set to 0 on both launchers (removing
+                # the sleeve's equity gate entirely, see run_dashboard_live.ps1) -- with a $0
+                # threshold, account_phase() -> equity_usd >= 0 is true for any real balance,
+                # so Phase 1 became UNREACHABLE (confirmed: every render this whole period has
+                # shown "Phase 2 ...", never "Phase 1"). The badge kept branching on a phase
+                # distinction that no longer exists, and its tooltip hardcoded "(~500K HKD)" --
+                # the OLD threshold, directly contradicting the "$0" the same sentence computed
+                # dynamically two words earlier. Both fixed: when the gate is actually disabled
+                # (threshold <= 0), drop the phase language entirely and show just the one
+                # distinction that's still real (sleeve active vs not); the tooltip's HKD figure
+                # is now computed from PHASE2_NAV_USD, not hardcoded, so it can't drift from
+                # whatever the threshold actually is if it's ever set nonzero again.
+                _gate_active = _pp.PHASE2_NAV_USD > 0
+                if _gate_active and _ph == 1:
                     _txt, _color = "Phase 1 · core-only", "blue"
                 elif _sleeve_on:
-                    _txt, _color = "Phase 2 · sleeve ACTIVE", "purple"
+                    _txt, _color = (("Phase 2 · sleeve ACTIVE" if _gate_active
+                                     else "Sleeve ACTIVE"), "purple")
                 else:
-                    _txt, _color = "Phase 2 threshold · sleeve NOT enabled", "grey"
+                    _txt, _color = ((("Phase 2 threshold · sleeve NOT enabled") if _gate_active
+                                     else "Sleeve NOT enabled"), "grey")
+                _threshold_txt = (
+                    f"equity threshold ~US${_pp.PHASE2_NAV_USD:,.0f} "
+                    f"(~HKD {_pp.PHASE2_NAV_USD * 7.8:,.0f}); "
+                    if _gate_active else
+                    "no equity threshold currently (gate removed, PHASE2_NAV_USD=0); ")
                 ui.badge(_txt, color=_color).classes("text-sm px-3 py-1")\
-                    .tooltip(f"equity threshold ~US${_pp.PHASE2_NAV_USD:,.0f} (~500K HKD); "
+                    .tooltip(_threshold_txt +
                              "sleeve also needs SLEEVE_ENABLED=1 on this instance's launcher "
                              "to actually place orders (set on both paper and live launchers)")
             except Exception:                                      # never break the header
