@@ -5,6 +5,33 @@ Last updated 2026-07-24.
 
 ---
 
+### 🔧 2026-07-24: shared LLM usage counter drifted stale -- reset it on HKT, not UTC
+
+`analyst/usage_log.py::fetch_shared_usage_today()` queries the shared Supabase `llm_calls`
+ledger (the one quant, event-radar, and the study platform all write to, sharing one
+200/day chatanywhere.tech key) for "today"'s cross-project usage. Its own code comment
+claimed it "mirrors event-radar's fetch_shared_usage_today() ... exactly, same UTC-day
+boundary" -- but event-radar's OWN implementation was itself fixed to an HKT day boundary
+back on 2026-07-21 (the key's real reset is HK-based, not UTC), and this copy was never
+updated to match. Result: quant read a stale "today" count for the 8h window between UTC
+midnight and HKT midnight (08:00-16:00 UTC) every day, out of sync with the very thing it
+claimed to mirror.
+
+**Fix:** ported event-radar's `hkt_today_start_utc()` helper verbatim (`HKT =
+dt.timezone(dt.timedelta(hours=8))`, no zoneinfo/tzdata needed since HKT has no DST) into
+`analyst/usage_log.py`, and pointed `fetch_shared_usage_today()`'s `today_start` at it
+instead of the old `dt.datetime.utcnow().date()` boundary. Quant's own LOCAL per-instance
+counter (`dashboard/core/store.py::_today()`) needed no change -- it already uses the OS's
+local date, and this machine's clock is set to HKT.
+
+Added 3 tests to `dashboard/tests/test_usage_log.py` (boundary is exactly HKT midnight,
+boundary is always 16:00 UTC + within the last 24h, and the actual Supabase query uses the
+HKT boundary). Full 15-file suite passes. Committed `52ff811`, pushed, both instances
+restarted and verified (fresh PIDs, correct per-instance IB-gateway connections, HTTP 200,
+clean reconcile, no errors).
+
+---
+
 ### 🚨 2026-07-24: live dashboard hung unresponsive for 7+ min with a runaway warning-log loop -- a second orphan-process variant
 
 **What happened:** mid-deploy of a routine UI change, the live dashboard (port 8081) stopped
