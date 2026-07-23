@@ -230,8 +230,15 @@ def clock_row() -> None:
     parts = [f"Local {loc:%H:%M:%S} (UTC{loc_off:+.0f})", f"UTC {now_utc:%H:%M:%S}"]
     from dashboard.execution import broker as _bk
     off = service.STATE.get("mt5_offset_sec", 0) or 0
+    # FIXED 2026-07-24: this used to ALWAYS append a third "Broker UTC (IBKR)" entry for the
+    # IB path -- but it never showed an actual time, just that static label, since IB
+    # timestamps ARE UTC (no offset). A third always-visible clock that's 100% redundant with
+    # the UTC one right next to it (both this project's deployed instances use BROKER=ib) --
+    # dropped the visible entry, folded the same fact into a tooltip on the UTC clock instead.
+    # The MT5 branch is unchanged -- that one shows a genuinely DIFFERENT broker time.
+    _utc_tip = None
     if _bk.is_ib():
-        parts.append("Broker UTC (IBKR)")          # IB timestamps are UTC, no offset
+        _utc_tip = "IBKR broker timestamps are UTC too -- no separate offset to show"
     elif service.STATE.get("mt5_available") and off:
         bkt = now_utc + dt.timedelta(seconds=off)
         parts.append(f"Broker {bkt:%H:%M:%S} (UTC{off/3600:+.0f})")
@@ -239,8 +246,10 @@ def clock_row() -> None:
         parts.append("Broker — (MT5 offset not detected)")
     with ui.row().classes("items-center gap-4"):
         for i, p in enumerate(parts):
-            ui.label(p).classes("text-xs font-mono "
-                                + ("text-green-8" if i == 2 and off else "text-grey-7"))
+            lbl = ui.label(p).classes("text-xs font-mono "
+                                      + ("text-green-8" if i == 2 and off else "text-grey-7"))
+            if i == 1 and _utc_tip:
+                lbl.tooltip(_utc_tip)
 
 
 @ui.refreshable
@@ -927,30 +936,43 @@ def portfolio_panel() -> None:
                   "Un-parked cash kept available for the strategy. Negative just means the "
                   "open positions' combined size is funded partly on margin (normal with "
                   "several concurrent positions) — it is NOT a loss.")
+        # 2026-07-24: "Interest accrued" and "Projected interest (1mo)" used to be 2 separate
+        # _stat() blocks -- same underlying concept (interest), split in two. Merged into one
+        # "Interest" stat, same pattern as the Cash breakdown merge last round.
         accrued = acct.get("AccruedCash")
+        _interest_bits = []
+        _interest_neg = False
         if accrued is not None:
-            _stat("Interest accrued", _money(accrued),
-                  "text-green" if accrued >= 0 else "text-red",
-                  "IB interest accrued on CASH balances since the last monthly payout "
-                  "(running total, resets monthly). NOT from SGOV — SGOV pays separate monthly "
-                  "distributions. Negative = net margin interest owed.")
+            _interest_bits.append(f"accrued {_money(accrued)}")
+            _interest_neg = _interest_neg or accrued < 0
         # projected interest next month: SGOV @ ^IRX + USD-cash buffer @ IB credit/debit rate.
         # Borrow and lend rates are NOT symmetric -- a positive cash buffer earns the ~benchmark
         # credit rate (ib_rate), but a NEGATIVE buffer is a margin debit charged ~5-6% (see the
         # "USD cash" tooltip below), a materially higher rate. Using ib_rate for both understated
         # the true cost of the (normal, expected) small margin debit that comes from sizing
         # multiple concurrent ETF positions independently -- fixed 2026-07-09.
+        sgov_mo = cash_mo = cash_rate = None
         if sgov_rate is not None:
             sgov_mo = sgov_base * sgov_rate / 100.0 / 12.0
             cash_val = cash or 0.0
             cash_rate = (ib_rate or 0.0) if cash_val >= 0 else MARGIN_DEBIT_RATE
             cash_mo = cash_val * cash_rate / 100.0 / 12.0
             proj = sgov_mo + cash_mo
-            _stat("Projected interest (1mo)", _money(proj),
-                  "text-green" if proj >= 0 else "text-red",
-                  f"Estimated next month: SGOV {_money(sgov_mo)} @ {sgov_rate:.1f}% + "
-                  f"USD cash {_money(cash_mo)} @ {cash_rate:.1f}% "
-                  f"({'margin debit rate, approx' if cash_val < 0 else 'live ^IRX-derived rate'})")
+            _interest_bits.append(f"next mo. ~{_money(proj)}")
+            _interest_neg = _interest_neg or proj < 0
+        if _interest_bits:
+            with ui.column().classes("items-start gap-0"):
+                ui.label("Interest").classes("text-xs text-grey-6 uppercase")
+                _tip = ("IB interest accrued on CASH balances since the last monthly payout "
+                        "(running total, resets monthly). NOT from SGOV — SGOV pays separate "
+                        "monthly distributions.")
+                if sgov_mo is not None:
+                    _tip += (f" Next month projected from SGOV {_money(sgov_mo)} @ "
+                            f"{sgov_rate:.1f}% + USD cash {_money(cash_mo)} @ {cash_rate:.1f}% "
+                            f"({'margin debit rate, approx' if cash_mo < 0 else 'live ^IRX-derived rate'}).")
+                ui.label("  ·  ".join(_interest_bits)).classes(
+                    "text-xl font-bold " + ("text-red" if _interest_neg else "text-green"))\
+                    .tooltip(_tip)
 
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         # 2026-07-23: SGOV/HKD/USD cash used to be 3 separate _stat() blocks, each with its
@@ -1025,18 +1047,25 @@ def portfolio_panel() -> None:
         portfolio_panel.refresh()
     with ui.row().classes("items-center justify-between w-full mt-2"):
         ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold")
-        with ui.row().classes("items-center gap-2"):
-            ui.label("View:").classes("text-xs text-grey-6")
-            ui.toggle(["P&L (ex-deposits)", "Account value"], value=SETTINGS["chart_view"],
-                     on_change=_set_chart_view).props("dense")\
-                .tooltip("P&L (ex-deposits) nets out deposits/withdrawals so the line reads as "
-                         "pure trading performance; Account value shows the raw balance "
-                         "(deposits appear as jumps)")
-            ui.label("Scale:").classes("text-xs text-grey-6")
-            ui.toggle(["Truncated", "Zero-baseline"], value=SETTINGS["chart_scale"],
-                     on_change=_set_chart_scale).props("dense")\
-                .tooltip("Truncated = zoomed to the data range (shows fine detail); "
-                         "Zero-baseline = y-axis starts at 0 (shows true relative scale)")
+        # 2026-07-24: View + Scale used to sit inline as 2 more labeled toggle groups right
+        # next to Period (3 labeled controls crowding one chart heading). Period is the one
+        # actually changed often; View/Scale are rarer, more advanced choices -- moved behind
+        # a small gear-icon menu, Period stays inline where it's reached for.
+        with ui.button(icon="tune").props("flat dense round size=sm")\
+                .tooltip("chart display options (view, scale)"):
+            with ui.menu():
+                with ui.column().classes("p-3 gap-2"):
+                    ui.label("View").classes("text-xs text-grey-6 uppercase")
+                    ui.toggle(["P&L (ex-deposits)", "Account value"], value=SETTINGS["chart_view"],
+                             on_change=_set_chart_view).props("dense")\
+                        .tooltip("P&L (ex-deposits) nets out deposits/withdrawals so the line "
+                                 "reads as pure trading performance; Account value shows the "
+                                 "raw balance (deposits appear as jumps)")
+                    ui.label("Scale").classes("text-xs text-grey-6 uppercase mt-1")
+                    ui.toggle(["Truncated", "Zero-baseline"], value=SETTINGS["chart_scale"],
+                             on_change=_set_chart_scale).props("dense")\
+                        .tooltip("Truncated = zoomed to the data range (shows fine detail); "
+                                 "Zero-baseline = y-axis starts at 0 (shows true relative scale)")
     _win_idx = [i for i, h in enumerate(hist) if _cutoff is None or h[0] >= _cutoff]
     _whist = [hist[i] for i in _win_idx]
     if len(hist) >= 2:
@@ -1283,7 +1312,6 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             _ccy = _acct.get("_ccy", "")
             _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
             pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
-            ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
             # ADDED 2026-07-14: after this session's CWB/ASHR confusion (local records
             # showing a status the broker no longer agreed with), show WHEN this position
             # was last actually cross-checked against the broker, not just trust the display
@@ -1291,11 +1319,19 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             # call that populates `pos` here) runs as part of the same refresh_cheap() cycle
             # that sets this timestamp, so it's already exactly "how fresh is this position
             # data," no new tracking needed.
-            _last_cheap = service.STATE.get("last_cheap")
-            if _last_cheap:
-                _age_min = (dt.datetime.now() - _last_cheap).total_seconds() / 60
-                _age_txt = f"{_age_min:.0f}m ago" if _age_min >= 1 else "just now"
-                ui.label(f"verified vs broker: {_age_txt}").classes("text-xs text-grey-5")
+            # SHORTENED 2026-07-24: this used to be its own always-visible "verified vs
+            # broker: Xm ago" text line under every open card -- with 7-10 cards, that's a
+            # full extra line repeated 7-10 times for something that's normally just "just
+            # now" and rarely worth a second look. Now a small checkmark icon inline with the
+            # unrealized figure; the same freshness detail is one hover away in its tooltip.
+            with ui.row().classes("items-center gap-1"):
+                ui.label(f"unrealized: {ur:+.2f} R{pnl}").classes("text-sm font-bold")
+                _last_cheap = service.STATE.get("last_cheap")
+                if _last_cheap:
+                    _age_min = (dt.datetime.now() - _last_cheap).total_seconds() / 60
+                    _age_txt = f"{_age_min:.0f}m ago" if _age_min >= 1 else "just now"
+                    ui.icon("verified", size="xs").classes("text-green-6")\
+                        .tooltip(f"verified vs broker: {_age_txt}")
         else:
             # (reason, status) now computed ONCE per pending trade by active_panel() --
             # see its 2026-07-13 grouping note -- and passed straight through here, not
@@ -1308,9 +1344,13 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
         src = f"{_bk.name()} fill" if pos else "logged, unconfirmed"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
-        tag = f" · #{t['id']}" + (f" ticket {pos['ticket']}" if pos
-                                  else (" (order placed, unfilled)" if t["id"] in _bk.executed_ids()
-                                        else f" (not on {_bk.name()})"))
+        # SHORTENED 2026-07-24: dropped the internal paper-journal "#{id}" from this line --
+        # it's an internal DB reference a live user never needs; the broker ticket (when
+        # there is one) is the externally-meaningful number that actually matches IBKR's own
+        # display, so that's the one kept.
+        tag = (f" · ticket {pos['ticket']}" if pos
+              else (" (order placed, unfilled)" if t["id"] in _bk.executed_ids()
+                    else f" (not on {_bk.name()})"))
         ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
             .classes("text-xs text-grey-6")
         ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
