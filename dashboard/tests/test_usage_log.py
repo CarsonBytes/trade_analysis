@@ -4,6 +4,7 @@ Run:  uv run python -m dashboard.tests.test_usage_log
 """
 from __future__ import annotations
 
+import datetime as dt
 from unittest import mock
 
 _fails = []
@@ -31,6 +32,49 @@ def _reset_cache():
     from analyst import usage_log
     usage_log._shared_usage_cache["ts"] = 0.0
     usage_log._shared_usage_cache["data"] = None
+
+
+def test_hkt_boundary_is_exactly_midnight_in_hkt():
+    print("_hkt_today_start_utc(): returns the instant of the most recent HKT midnight:")
+    from analyst.usage_log import HKT, _hkt_today_start_utc
+    boundary = _hkt_today_start_utc()
+    check("naive (no tzinfo), to compare against naive utcnow()-stamped rows",
+          boundary.tzinfo, None)
+    as_hkt = boundary.replace(tzinfo=dt.timezone.utc).astimezone(HKT)
+    check("is midnight when reinterpreted in HKT",
+          (as_hkt.hour, as_hkt.minute, as_hkt.second, as_hkt.microsecond), (0, 0, 0, 0))
+
+
+def test_hkt_boundary_is_16_00_utc_and_within_the_last_24h():
+    print("\n_hkt_today_start_utc(): HKT has no DST, so HKT midnight is always 16:00 UTC "
+          "(of the same or previous UTC calendar day):")
+    from analyst.usage_log import _hkt_today_start_utc
+    boundary = _hkt_today_start_utc()
+    check("boundary hour is 16 (UTC)", boundary.hour, 16)
+    now = dt.datetime.utcnow()
+    check("boundary is not in the future", boundary <= now, True)
+    check("boundary is within the last 24h", now - boundary < dt.timedelta(hours=24), True)
+
+
+def test_fetch_uses_hkt_boundary():
+    print("\nfetch_shared_usage_today(): queries the ledger using the HKT day boundary, "
+          "not a UTC one (this is the 2026-07-24 fix -- was drifted stale vs event-radar's "
+          "own already-HKT-fixed implementation):")
+    from analyst import usage_log
+    _reset_cache()
+    captured = {}
+
+    def _fake_get(*a, **k):
+        captured["params"] = k.get("params", {})
+        return _FakeResp([])
+
+    with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
+         mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
+         mock.patch("httpx.get", side_effect=_fake_get):
+        usage_log.fetch_shared_usage_today()
+    expected = usage_log._hkt_today_start_utc().isoformat() + "Z"
+    check("created_at filter uses the HKT-midnight boundary",
+          captured["params"]["created_at"], f"gte.{expected}")
 
 
 def test_project_of_prefixes():
@@ -160,6 +204,9 @@ def test_shared_calls_ok_fails_closed_when_unreachable():
 
 
 if __name__ == "__main__":
+    test_hkt_boundary_is_exactly_midnight_in_hkt()
+    test_hkt_boundary_is_16_00_utc_and_within_the_last_24h()
+    test_fetch_uses_hkt_boundary()
     test_project_of_prefixes()
     test_fetch_returns_zeros_when_not_configured()
     test_fetch_aggregates_by_project()

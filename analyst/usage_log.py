@@ -13,6 +13,25 @@ import httpx
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+# FIXED 2026-07-24: fetch_shared_usage_today() used a UTC day boundary, deliberately
+# "mirroring event-radar's fetch_shared_usage_today() exactly" per that function's own
+# comment -- but event-radar's OWN version was itself fixed to HKT on 2026-07-21 (the shared
+# chatanywhere.tech key's daily quota resets on HKT's day boundary, its owner being HK-based,
+# not UTC's), and this copy was never updated to match. Since this drifted OUT of sync with
+# the thing it explicitly says it mirrors, quant + event-radar would disagree on "today"'s
+# shared usage for the 8h window between UTC midnight and HKT midnight (08:00-16:00 UTC) --
+# exactly the kind of inconsistency the shared-quota guard exists to prevent. Ported
+# event-radar's hkt_today_start_utc() verbatim (backend/app/llm_logging.py) rather than
+# reinventing it slightly differently a second time.
+HKT = dt.timezone(dt.timedelta(hours=8))
+
+
+def _hkt_today_start_utc() -> dt.datetime:
+    """Naive-UTC instant of the most recent HKT midnight. HKT has no DST, always UTC+8, so
+    no zoneinfo/tzdata dependency is needed."""
+    hkt_midnight = dt.datetime.now(HKT).replace(hour=0, minute=0, second=0, microsecond=0)
+    return hkt_midnight.astimezone(dt.timezone.utc).replace(tzinfo=None)
+
 # Per-MTok pricing (USD), input/output -- rough reference only, mirrors
 # event-radar's llm_logging.py. Routed through a third-party proxy, so this
 # won't match official OpenAI billing exactly.
@@ -66,8 +85,9 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
 # separate counters!) + event-radar + the study platform together. This is exactly why the
 # 2026-07-14 rate-limit incident happened: the local counter said "under budget" while the
 # real, shared quota was already exhausted by other callers. Mirrors event-radar's
-# fetch_shared_usage_today() (backend/app/llm_logging.py) exactly -- same UTC-day boundary,
-# same aggregation shape -- so all three projects can display/reason about the identical number.
+# fetch_shared_usage_today() (backend/app/llm_logging.py) exactly -- same HKT-day boundary
+# (fixed 2026-07-24, see note above), same aggregation shape -- so all three projects can
+# display/reason about the identical number.
 _shared_usage_cache: dict = {"ts": 0.0, "data": None}
 _SHARED_USAGE_CACHE_SEC = 60.0   # a dashboard-render-triggered fetch must never hit Supabase
                                  # on every request (see quant's own account_summary() TTL
@@ -86,7 +106,7 @@ def _project_of(purpose: str) -> str:
 
 
 def fetch_shared_usage_today() -> dict:
-    """Cross-project usage for today (UTC), from the shared Supabase ledger. Best-effort:
+    """Cross-project usage for today (HKT), from the shared Supabase ledger. Best-effort:
     returns zeros (with "ok": False) if Supabase isn't configured/unreachable, so a caller
     that needs to tell "genuinely 0 calls" apart from "couldn't check" can (see
     shared_calls_ok(), used by the board-scan budget guard). Cached for _SHARED_USAGE_CACHE_SEC."""
@@ -97,7 +117,7 @@ def fetch_shared_usage_today() -> dict:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return empty
 
-    today_start = dt.datetime.combine(dt.datetime.utcnow().date(), dt.time.min).isoformat() + "Z"
+    today_start = _hkt_today_start_utc().isoformat() + "Z"
     try:
         resp = httpx.get(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
