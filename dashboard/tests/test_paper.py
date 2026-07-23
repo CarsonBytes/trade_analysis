@@ -9,7 +9,7 @@ import os
 import tempfile
 from unittest import mock
 
-from dashboard.core.paper import deposit_adjusted_series, current_drawdown_pct
+from dashboard.core.paper import deposit_adjusted_series, current_drawdown_pct, drawdown_series
 
 _fails = []
 
@@ -101,6 +101,51 @@ def test_current_drawdown_pct():
     check("a real ~1% pullback on a young funded account reads as ~1%, "
           "not a false ~-57% halt-triggering reading",
           -3.0 < dd < 0, True)
+
+
+# ADDED 2026-07-23: this is the function whose ABSENCE caused a real regression -- app.py's
+# drawdown chart had its OWN duplicate copy of the peak-tracking loop (needed a full series
+# for plotting, current_drawdown_pct() only ever returned the current scalar), and when the
+# 2026-07-18 denominator fix landed in current_drawdown_pct(), the chart's duplicate never
+# got it -- confirmed live 2026-07-23: chart showed -7.82%, the real function said -0.18%,
+# same account, same moment. Extracting the full walk into its OWN tested function (with
+# current_drawdown_pct() now a thin wrapper around it) means there is no second copy of this
+# logic left anywhere in the codebase to fall out of sync again.
+def test_drawdown_series():
+    print("drawdown_series:")
+    check("empty history -> []", drawdown_series([], None), [])
+    check("single point -> [0.0]",
+          drawdown_series([[100, 10000.0, "HKD"]], None), [0.0])
+    check("length always matches hist",
+          len(drawdown_series([[100, 100.0, "HKD"], [200, 120.0, "HKD"],
+                               [300, 108.0, "HKD"]], None)), 3)
+    # the exact live incident shape (2026-07-23): a real, modest trading gain, then a tiny
+    # real dip -- every INTERMEDIATE point must divide by the real raw equity at whatever the
+    # peak was AT THAT POINT, not just get it right for the final value.
+    young_funded_acct = [[100, 40.0, "HKD"], [200, 101456.34, "HKD"], [300, 100623.14, "HKD"]]
+    young_flows = [[150, 99984.61, "HKD"]]
+    series = drawdown_series(young_funded_acct, young_flows)
+    check("series length matches hist", len(series), 3)
+    check("last value of the full series matches current_drawdown_pct()'s own return "
+          "(the property the bug violated -- two implementations, one fixed, one not)",
+          round(series[-1], 6), round(current_drawdown_pct(young_funded_acct, young_flows), 6))
+    check("no point in the series reads as a false ~-57%-style halt-triggering drawdown",
+          all(-3.0 < v <= 0.0 for v in series), True)
+    # consistency check across EVERY existing current_drawdown_pct() test case: the last
+    # element of drawdown_series() must equal current_drawdown_pct()'s return, always --
+    # this is now true by construction (current_drawdown_pct is a wrapper), but asserting it
+    # directly documents the contract a future refactor must preserve.
+    for hist, flows in (
+        ([[100, 100.0, "HKD"], [200, 120.0, "HKD"], [300, 108.0, "HKD"]], None),
+        ([[100, 10000.0, "HKD"], [200, 9000.0, "HKD"], [300, 19000.0, "HKD"]],
+         [[250, 10000.0, "HKD"]]),
+        ([[100, 40.0, "HKD"], [200, 100040.0, "HKD"], [300, 102000.0, "HKD"],
+          [400, 101000.0, "HKD"]], [[150, 100000.0, "HKD"]]),
+    ):
+        s = drawdown_series(hist, flows)
+        c = current_drawdown_pct(hist, flows)
+        approx(f"last(drawdown_series)==current_drawdown_pct for a {len(hist)}-point series",
+              s[-1], c)
 
 
 def _isolated_db():
@@ -292,6 +337,7 @@ def test_reentry_blocked_uses_most_recent_trade_only():
 if __name__ == "__main__":
     test_deposit_adjusted_series()
     test_current_drawdown_pct()
+    test_drawdown_series()
     test_resolve_open_tags_unfunded_trades()
     test_resolve_open_leaves_funded_trades_unqualified()
     test_resolve_open_skips_check_when_executed_ids_omitted()

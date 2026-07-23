@@ -1076,29 +1076,24 @@ def portfolio_panel() -> None:
     # the user happens to have the equity chart's view set to.
     if len(hist) >= 2:
         # FIXED 2026-07-13: this duplicated paper.current_drawdown_pct()'s peak-tracking
-        # logic (both walk _adj_full computing a running peak + % drawdown) but WITHOUT its
-        # 2026-07-11 materiality floor -- confirmed live: paper.current_drawdown_pct() itself
-        # correctly returned 0.0 for this exact account at this exact moment (its floor
-        # correctly saw _adj_full's peak, ~40, sitting below 1% of current raw equity,
-        # ~$1,000, and refused to trust a percentage against it), while THIS block's `if
-        # _peak else 0.0` only guards against exactly-zero, not "too small to be a
-        # meaningful reference" -- so it happily computed (4.06 - 40.0) / 40.0 * 100 =
-        # -89.8% and displayed it as the real "Drawdown from peak" stat, on an account whose
-        # actual trading P&L that day was -HKD 34 (-0.03%). The real DD_HALT_PCT gate in
-        # ib_exec.mirror_new() was NEVER at risk -- it calls paper.current_drawdown_pct()
-        # directly, which already had the floor -- this was a DISPLAY-ONLY bug, but a scary
-        # one. Same floor formula as paper.current_drawdown_pct(), applied here too so the
-        # chart and the headline number can't diverge from it again.
-        floor = abs(hist[-1][1]) * 0.01
-        _peak = _adj_full[0]
-        dxs, dys, cur_dd = [], [], 0.0
+        # logic instead of calling it, and drifted out of sync as a result -- it got the
+        # 2026-07-11 materiality floor added by hand here, but when a SEPARATE, LATER fix
+        # (the 2026-07-18 denominator fix: divide by the real raw equity at the peak, not
+        # the tiny deposit-adjusted P&L-only peak value) landed in paper.py, this duplicate
+        # never got it. Confirmed live 2026-07-23: this block displayed -7.82% while
+        # paper.current_drawdown_pct() (used by the real DD_HALT_PCT gate) correctly said
+        # -0.18% for the SAME account at the SAME moment -- the exact bug class the
+        # 2026-07-13 fix was meant to prevent, just re-introduced by the duplication itself
+        # rather than by a missing floor this time. FIXED PROPERLY this time: call the one
+        # shared implementation (paper.drawdown_series(), extracted alongside this fix) so
+        # there is no second copy left to fall out of sync again.
+        dd_full = paper.drawdown_series(hist, flows)
+        cur_dd = dd_full[-1] if dd_full else 0.0
+        dxs, dys = [], []
         for i, h in enumerate(hist):          # ALWAYS the full series -- true peak, never windowed
-            _av = _adj_full[i]
-            _peak = max(_peak, _av)
-            cur_dd = (_av - _peak) / _peak * 100.0 if _peak > floor else 0.0
             if _cutoff is None or h[0] >= _cutoff:
                 dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
-                dys.append(round(cur_dd, 2))
+                dys.append(round(dd_full[i], 2))
         ddcol = ("#16a34a" if cur_dd > -5 else
                  "#d97706" if cur_dd > BACKTEST_MAX_DD_PCT else "#dc2626")
         with ui.row().classes("items-baseline gap-2 mt-2"):

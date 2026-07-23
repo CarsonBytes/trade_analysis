@@ -356,20 +356,44 @@ def current_drawdown_pct(hist: list, flows: list | None) -> float:
     equity at the moment each new deposit-adjusted peak occurs, and divide by THAT instead of
     by the tiny adjusted-peak value itself -- mathematically identical to the old formula
     whenever the peak precedes any deposit (raw == adjusted there), so no behavior change for
-    a no-deposit-yet account; only changes results once real capital is in play."""
+    a no-deposit-yet account; only changes results once real capital is in play.
+
+    Thin wrapper around drawdown_series() -- see that function for why this got extracted
+    (2026-07-23: this fix landed HERE but app.py's drawdown chart had its OWN duplicate copy
+    of this exact loop that never got it, so the chart kept showing the OLD, wrong -7.82%-
+    style numbers for 5 days after this function was already correct)."""
+    series = drawdown_series(hist, flows)
+    return series[-1] if series else 0.0
+
+
+def drawdown_series(hist: list, flows: list | None) -> list[float]:
+    """Per-point % drawdown from the all-time (deposit-adjusted) peak, aligned 1:1 with
+    `hist` (same length and order) -- e.g. -13.5 at index i means 13.5% below the peak as of
+    hist[i]. The FULL walk that current_drawdown_pct() (above) takes the last value of.
+
+    EXTRACTED 2026-07-23 after finding the exact bug this shared-logic design was supposed to
+    prevent: app.py's "Drawdown from peak" chart had its OWN separate copy of this
+    peak-tracking loop (to get a full series for plotting, not just the current scalar) --
+    when the 2026-07-18 denominator fix (divide by peak_raw, not peak_adj -- see
+    current_drawdown_pct()'s docstring) landed in THIS function, the chart's duplicate never
+    got it, so it kept dividing by the tiny deposit-adjusted P&L-only peak. Confirmed live
+    2026-07-23: chart displayed -7.82%, actual (this function) -0.18% -- the exact same bug
+    class, just re-introduced by duplication instead of never having been fixed. Both
+    current_drawdown_pct() and the dashboard chart now call this ONE implementation, so a
+    future fix here can't be forgotten in a second copy again."""
     if len(hist) < 2:
-        return 0.0
+        return [0.0] * len(hist)
     adj = deposit_adjusted_series(hist, flows)
     floor = abs(hist[-1][1]) * 0.01
     peak_adj = adj[0]
     peak_raw = hist[0][1]
-    cur_dd = 0.0
+    out = []
     for v, (_ts, raw_v, _ccy) in zip(adj, hist):
         if v > peak_adj:
             peak_adj = v
             peak_raw = raw_v
-        cur_dd = (v - peak_adj) / peak_raw * 100.0 if peak_raw > floor else 0.0
-    return cur_dd
+        out.append((v - peak_adj) / peak_raw * 100.0 if peak_raw > floor else 0.0)
+    return out
 
 
 # ---- forward (live) paper trades: persistence ------------------------------
