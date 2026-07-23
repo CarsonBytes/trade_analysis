@@ -1,7 +1,59 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-23.
+Last updated 2026-07-24.
+
+---
+
+### 🚨 2026-07-24: live dashboard hung unresponsive for 7+ min with a runaway warning-log loop -- a second orphan-process variant
+
+**What happened:** mid-deploy of a routine UI change, the live dashboard (port 8081) stopped
+answering HTTP entirely (curl timeouts, `status=000`). The log showed a continuous flood of
+`ib_exec: LIVE trading ENABLED for U12991898 (IB_ALLOW_LIVE) -- REAL MONEY` -- normally logged
+once per `_guard()` call inside a ~30s tick cycle, here firing 5-10x/SECOND continuously for
+7+ minutes with no other log activity interleaved and no gaps.
+
+**First checked the thing that actually matters:** queried `ib_mirror` directly for anything
+inserted since the incident started -- nothing. **No new or duplicate real orders were placed.**
+The flood was a logging/hang problem, not a trading-safety breach, but an unresponsive
+real-money dashboard for 7+ minutes with an unexplained runaway pattern is not something to
+shrug off.
+
+**Root cause -- a second variant of the 2026-07-21 orphan-process bug:** `Stop-ScheduledTask
+"DashboardAppLive"` was run to restart the process. It appeared to succeed (the listening port
+came free). But a direct process scan (`Get-CimInstance Win32_Process ... dashboard.app`)
+found the SAME parent+child python.exe pair still alive afterward. This is different from the
+07-21 incident (where the orphan was healthy and just never got killed) -- here the process
+had apparently HUNG (explaining the unresponsive HTTP and the runaway log loop, likely stuck
+in some tight retry without yielding), and the kill signal managed to release its socket
+binding on the way down without the process actually exiting. **The 07-21 port-based
+self-healing guard checks what's bound to `DASH_PORT` at start time -- with the port already
+free, it would have found nothing to kill, and the hung process would have kept running
+indefinitely, invisible, still connected to the real account, alongside a freshly-started
+second instance.**
+
+**Immediate fix:** manually found both PIDs via a broad process scan and force-killed them
+(`Stop-Process -Force`), then confirmed clean (zero matching processes, port unbound) before
+starting fresh. The new process came up healthy immediately (200 OK, normal tick cadence,
+`reconcile: matched`) and stayed healthy on an extended monitoring pass.
+
+**Permanent fix:** added a SECOND guard to both launch scripts (`run_dashboard_live.ps1` +
+`C:\Scripts\dashboard.ps1`, outside this repo), run once at script startup alongside the
+existing port-based one. Can't just kill "any python.exe running dashboard.app" -- paper and
+live share the IDENTICAL command line (`-m dashboard.app`), differing only in environment
+variables not visible via `CommandLine`, so a blunt name match risks killing the OTHER
+instance's legitimate process from this one's own launcher. Scoped instead to an established
+OUTBOUND connection to that instance's own IB gateway port (4001 live-only / 4002 paper-only)
+-- a check that still works even when the LISTENING port has already been released. Since this
+runs before the real process for the current invocation ever spawns, anything it finds is
+guaranteed to be a leftover from a previous run, safe to kill unconditionally by construction,
+not a probabilistic heuristic.
+
+**Standing lesson, extending the 07-21 one:** verifying a deploy landed requires checking the
+BOUND port's PID/creation-time (07-21 lesson) -- but confirming an OLD process is truly gone
+after a stop/restart requires a broader process-name scan too, since a hung process can release
+its port while remaining alive. `Stop-ScheduledTask` returning success and the port coming free
+are both necessary but NOT sufficient evidence that the previous process actually exited.
 
 ---
 
