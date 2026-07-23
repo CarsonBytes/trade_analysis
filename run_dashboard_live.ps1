@@ -64,6 +64,38 @@ if ($staleConns) {
     }
     Start-Sleep -Seconds 2
 }
+
+# SECOND VARIANT of the same problem, found 2026-07-24: a python.exe that HANGS (stops
+# answering HTTP) can have Stop-ScheduledTask's kill signal release its LISTENING port
+# binding (socket cleanup ran) WITHOUT the process itself actually exiting -- it keeps
+# running in the background, still connected to the REAL live IB gateway, completely
+# invisible to the port-based guard above (which finds nothing, since the port is already
+# free). Confirmed live: found via a manual process scan, ~7 minutes after the dashboard had
+# gone fully unresponsive with a runaway warning-log loop -- Stop-ScheduledTask had already
+# "succeeded" and the port was free, yet the old process was still alive and still talking to
+# the account. No new/duplicate orders resulted this time, but two independent processes both
+# able to act on the same real-money account is not a risk to leave to luck.
+#
+# Can't just kill "any python.exe running dashboard.app" -- paper and live run the IDENTICAL
+# command line (`-m dashboard.app`), differing only in environment variables that aren't
+# visible via CommandLine, so a blunt name match would risk killing PAPER's legitimate
+# process from LIVE's own launcher. Scope the check to the one thing that's actually
+# instance-specific and still checkable even when the LISTENING port is gone: an established
+# OUTBOUND connection to the LIVE IB gateway port (4001 -- paper always uses 4002, never
+# this one). Only kill a match confirmed talking to 4001; anything ambiguous is left alone.
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'dashboard\.app' -and $_.ProcessId -ne $PID } |
+    ForEach-Object {
+        $isLiveInstance = [bool](Get-NetTCPConnection -OwningProcess $_.ProcessId -ErrorAction SilentlyContinue |
+                                 Where-Object { $_.RemotePort -eq 4001 })
+        if ($isLiveInstance) {
+            Add-Content -Path 'D:\quant\logs\restart-guard.log' -Value (
+                "$(Get-Date -Format o) [live] killing hung dashboard.app process confirmed " +
+                "connected to the LIVE gateway (port 4001) but NOT holding DASH_PORT -- " +
+                "PID $($_.ProcessId), started $($_.CreationDate)")
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
 $env:CASH_USD        = "1"
 $env:CASH_SWEEP      = "1"
