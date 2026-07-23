@@ -10,7 +10,7 @@ A research + trading platform for a diversified multi-asset ETF book, with three
 
 ---
 
-## Key research findings (as of 2026-07-14)
+## Key research findings (as of 2026-07-23)
 
 Exhaustive out-of-sample, deflated-Sharpe-penalised study, continuously re-verified as the
 system moved from paper to **real live trading** (IBKR account U12991898, first real fills
@@ -71,7 +71,23 @@ the full project; the honest conclusions:
   resolves a trade independently while the broker order is still unfilled; the entire
   trading/monitoring loop runs as a persistent background task, not tied to a browser tab
   being open (found and fixed 2026-07-12 — previously the whole system went silently dormant
-  with zero browser clients connected, while still returning healthy HTTP 200s).
+  with zero browser clients connected, while still returning healthy HTTP 200s). Two more
+  added 2026-07-21: a **commission-viability floor** (a `PORTFOLIO_CAP`-compressed 1-2 share
+  fill can burn a large fraction of its own tiny risk budget on IBKR's per-order minimum —
+  backtested against this account's REAL commission schedule before shipping, +1-3%
+  cumulative at today's account size) and a **ghost-entry auto-cancel** (an order silently
+  rejected/cancelled at the broker before ever filling used to stay marked OPEN locally
+  forever, caught only by a lucky reconnect — now self-resolves after a 30min grace period).
+- **A real ATR/RR exit target isn't undermined by exceeding the record high.** A natural
+  worry: several open positions' take-profits sit above the instrument's real all-time high —
+  is that unrealistic? Tested directly (2026-07-23) rather than argued: split all 702 real
+  historical long signals across the full 32-year universe by whether the TP already required
+  a new ATH at signal time (85% of all signals do, since trend entries fire near existing
+  highs by construction). Full-TP hit rate is lower when a new ATH is required (13% vs 19%,
+  confirming the intuition) — but expectancy is statistically the same either way (+0.362R vs
+  +0.398R), because a trade doesn't need the full target to be worth taking; the classic
+  trend-following signature (negative median, positive mean — small losses cut short, rare
+  big winners run past resistance) shows up in both buckets identically.
 - **Frequency is the point, not a bug.** Patience — multi-week holds, not daily trading — IS
   the edge; the no-edge daily game is exactly what this system avoids.
 

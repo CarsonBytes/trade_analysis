@@ -1,7 +1,97 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-21.
+Last updated 2026-07-23.
+
+---
+
+### 🔍 2026-07-23: does the fixed ATR/RR exit method make realistic sense when TP exceeds the all-time high?
+
+A live-account review noticed several open positions' take-profit targets sit above the
+instrument's real historical record high (AMLP +4.0% above ATH, IWM +6.7%, EEM +4.6%, VNQ
++4.8%, EFA +3.8%, QQQ +4.9%, SPY +3.5% -- checked directly against real max-high price history,
+not assumed). Reasonable question: is a TP that requires a NEW all-time high within the
+horizon window realistic, or is this baking in unwarranted optimism?
+
+**Tested directly rather than argued theoretically.** Pulled all 702 real historical long
+signals across the full 32-year, 22-instrument universe (the live re-entry-gate config:
+`reentry_gate="reclaim_buffer", reentry_buffer_r=1.0`), and split them by whether the TP, AT
+THE MOMENT the signal fired, was already above the running all-time-high known at that point
+(no lookahead -- the ATH is computed only from bars up to and including the signal bar):
+
+| | TP required a new ATH | TP was within existing range |
+|---|---|---|
+| n (trades) | 594 (85% of all long trades) | 108 (15%) |
+| Full TP hit (clean win) | 13% | 19% |
+| **Mean R (expectancy)** | **+0.362** | **+0.398** |
+| Median R | -0.06 | -1.00 |
+
+**Findings:**
+1. A full TP hit above the ATH IS genuinely harder (13% vs 19%) -- the instinct behind the
+   question is correct.
+2. **But it barely affects the actual expected value** -- +0.362R vs +0.398R, statistically
+   indistinguishable given the sample sizes. A trade doesn't need to reach the full TP to be
+   worth taking: many exit at the ~35-day horizon cap holding a partial gain (e.g. +1R of a
+   +3R target) without ever needing a new high.
+3. **Negative median, positive mean in BOTH buckets** -- the classic trend-following
+   signature. Most individual trades are small losses/breakevens; the average is carried by a
+   minority that run much further than typical, occasionally straight through the old high.
+   That asymmetry (cut losers short, let the rare big winner run past resistance) IS the
+   source of edge, not a modeling flaw.
+4. This is also structurally inherent to trend-following, not incidental: entries fire
+   because an instrument is ALREADY trending strongly, which usually means it's near its
+   highs -- 85% of all long signals in 32 years had a TP above the running ATH. A design that
+   capped TP at "must stay under the current record" would make the strategy structurally
+   unable to fully win during exactly the regime (established uptrends) it exists to exploit.
+
+**Conclusion: the fixed ATR/RR exit method is realistic, empirically, not just by argument.**
+The backtest resolves every trade against real subsequent price action bar-by-bar -- it never
+assumes the TP gets hit. If ATH-exceeding TPs were systematically unrealistic, the 85%-of-
+trades bucket would show materially worse expectancy than the 15%-of-trades bucket, and it
+doesn't. Script: `check_tp_expectancy.py`-style analysis (scratchpad, not yet a committed
+research script -- promote to `dashboard/research/` if this question comes up again).
+
+---
+
+### 🔧 2026-07-21: commission-viability floor + ghost-entry auto-cancel (execution-layer)
+
+Two related order-safety fixes shipped the same day as the re-entry-gate leverage bump,
+triggered by routine live-account review rather than a reported incident:
+
+**1. Commission-viability floor.** `PORTFOLIO_CAP`'s "scale down, never skip" philosophy can
+compress a signal to 1-2 shares when the account is already near-fully deployed (confirmed
+live: a same-cycle IWM/CWB/EEM signal batch left EEM funded at just 1 share, $3.35 of
+realized risk). The position still funds fine mechanically, but IBKR's per-order commission
+doesn't shrink with it. Pulled this account's REAL commission schedule via `reqExecutions`
+(not the general published rate previously assumed): **Fixed plan, $0.005/share, $1.00/order
+minimum, capped at 1% of trade value** -- the 1% cap, not the $1 floor, binds for any notional
+under $100, exactly the crumb regime this fix targets. The account's real EEM fill:
+round-trip commission ~$1.30 against $3.35 of risk -- 39% of the position's entire risk budget
+spent on fees alone. Backtested a fix BEFORE implementing (real 22-ETF universe,
+PORTFOLIO_CAP-aware chronological walk, real commission model): a **10% commission/risk
+floor** is net-positive at today's live equity (~$12.9k, +1-3% cumulative over the last 3yrs,
+since skipping a crumb also frees portfolio-cap room for better-sized signals in the same
+cycle) and roughly neutral once equity has compounded much larger. Added
+`is_commission_viable()`/`commission_estimate_usd()` to `ib_exec.py`, wired into both
+`_place_etf_bracket()` and `_place_sleeve_bracket()` (they share the same `PORTFOLIO_CAP`
+pool). 3 new tests, full suite green.
+
+**2. Ghost-entry auto-cancel.** Investigating why one queued signal (CWB) never resolved
+found a genuine gap: `sync_closures()` had a terminal outcome for EXITS (a real position that
+later closed) but not for an ENTRY that gets rejected/cancelled at the broker before ever
+filling -- confirmed live, CWB's bracket order vanished from the broker (no fill, no position,
+no working order) but stayed marked OPEN in both `paper_trades` and `ib_mirror`
+indefinitely, only caught by `reconcile_with_broker()` (which only runs once per fresh IB
+connection, not every cycle). Added `GHOST_ENTRY_GRACE_MIN` (30min): once a dead entry has
+had a generous grace period to resolve (comfortably longer than any normal fill/sync delay --
+a genuinely still-pending order is already excluded by the existing working-order check),
+auto-cancel it in both tables and record a warning-level event, instead of relying on an
+incidental reconnect to ever notice. Manually resolved CWB's already-stuck record the same
+way as a one-off. 2 new tests, full suite green.
+
+Both deployed to LIVE + PAPER same day. (Their deploy was itself the trigger for finding the
+orphaned-process bug below -- the restart to ship these fixes is what first exposed that
+neither had actually reached the live process for 3 days.)
 
 ---
 
