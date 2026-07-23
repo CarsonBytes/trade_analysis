@@ -526,14 +526,18 @@ def opportunities() -> None:
 
 @ui.refreshable
 def grid() -> None:
-    ui.label("Other instruments").classes("text-lg font-bold")
     n = SETTINGS.get("grid_cols", 3)
     top = set(_top_opportunity_keys())  # don't repeat the highlighted ones
     others = [s for s in rank(list(service.STATE["scores"].values())) if s.key not in top]
     if not others:
-        ui.label("All current signals are shown in Top Opportunities above.")\
-            .classes("text-sm text-grey")
         return
+    # 2026-07-23: this used to be its own "text-lg font-bold" heading -- same visual weight
+    # as "Top Opportunities" above it, for what's really the SAME ranked list continuing past
+    # a cutoff, not a separate concept. A plain divider + small caption keeps the distinction
+    # (still visually obvious where "top" ends) without a second full heading.
+    ui.separator().classes("my-2")
+    ui.label("Other instruments (ranked, not currently a top signal)")\
+        .classes("text-xs text-grey-6 uppercase")
     pending = _pending_keys()
     # inline CSS grid (not Tailwind grid-cols-N, which Tailwind purges when the
     # column count is dynamic) so any chosen column count always renders.
@@ -902,8 +906,13 @@ def portfolio_panel() -> None:
             ui.label("Fully in cash — no open positions").classes(
                 "text-sm text-grey-6 self-center")
 
-    ui.label("Cash & financing — how positions are funded, NOT profit or loss (see the "
-             "P&L card above for that)").classes("text-xs text-grey-6 italic mt-3")
+    # 2026-07-23: shortened from an always-visible full sentence -- the clarifying detail
+    # ("NOT profit or loss, see the P&L card above") moved into a tooltip on a small info
+    # icon instead, same pattern as elsewhere on this pass.
+    with ui.row().classes("items-center gap-1 mt-3"):
+        ui.label("Cash & financing").classes("text-xs text-grey-6 uppercase")
+        ui.icon("info", size="xs").classes("text-grey-5").tooltip(
+            "How positions are funded -- NOT profit or loss (see the P&L card above for that)")
     # Two intentional rows: line 1 groups Cash (buffer) with what it's ACTUALLY COSTING OR
     # EARNING (Interest accrued + Projected interest) so the causality is obvious at a glance
     # -- a negative buffer directly explains a negative projected interest, and vice versa
@@ -944,35 +953,40 @@ def portfolio_panel() -> None:
                   f"({'margin debit rate, approx' if cash_val < 0 else 'live ^IRX-derived rate'})")
 
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
-        if sgov_base > 0:
-            _stat("Cash in SGOV", _money(sgov_base), "text-green",
-                  f"Idle cash parked in SGOV (0-3mo T-bill ETF) yielding {sgov_yld} — auto-swept")
+        # 2026-07-23: SGOV/HKD/USD cash used to be 3 separate _stat() blocks, each with its
+        # own uppercase mini-heading -- same underlying idea ("where is idle cash currently
+        # sitting"), tripled. Merged into one "Cash breakdown" stat; the stuck-conversion
+        # warning (a real, actionable alert) now shows inline as a ⚠ marker plus a combined
+        # tooltip, instead of only appearing on its own separate USD-cash block.
         fx = service.STATE.get("fx_usd") or {}
+        _cash_bits = []
+        _stuck = fx.get("stuck", False)
+        _neg = False
+        if sgov_base > 0:
+            _cash_bits.append(f"SGOV {_money(sgov_base)}")
+        usd_c = hkd_c = None
         if fx.get("enabled"):
             usd_c = fx.get("usd_cash", 0.0)
             hkd_c = fx.get("hkd_cash", 0.0)
-            _stat("HKD cash", f"HKD {hkd_c:,.0f}",
-                  "text-green" if hkd_c >= 0 else "text-red",
-                  "HKD cash balance -- the keep-cash-usd feature converts this down to a small "
-                  "residual buffer each cycle, moving the rest into USD cash (next stat) to earn "
-                  "USD yield instead of sitting idle in HKD.")
-            if fx.get("stuck"):
-                with ui.column().classes("items-start gap-0"):
-                    ui.label("USD cash").classes("text-xs text-grey-6 uppercase")
-                    with ui.row().classes("items-center gap-1"):
-                        ui.label(f"${usd_c:,.0f}").classes(
-                            "text-xl font-bold " + ("text-green" if usd_c >= 0 else "text-red"))
-                        ui.badge("⚠", color="orange").classes("text-xs").tooltip(
-                            "HKD→USD conversion keeps failing to actually fill (repeated attempts, "
-                            "no real USD balance yet) -- most likely the account's Forex trading "
-                            f"permission isn't enabled/approved. HKD residual: {hkd_c:,.0f}")
-            else:
-                _stat("USD cash", f"${usd_c:,.0f}",
-                      "text-green" if usd_c >= 0 else "text-red",
-                      "USD cash balance, NOT profit/loss — negative just means the USD side of "
-                      "the account is a margin debit (~5-6% interest), same story as Cash "
-                      f"(buffer) above; auto-converts idle HKD→USD each cycle. "
-                      f"HKD residual: {hkd_c:,.0f}")
+            _neg = hkd_c < 0 or usd_c < 0
+            _cash_bits.append(f"HKD {hkd_c:,.0f}")
+            _cash_bits.append(f"USD ${usd_c:,.0f}" + (" ⚠" if _stuck else ""))
+        if _cash_bits:
+            with ui.column().classes("items-start gap-0"):
+                ui.label("Cash breakdown").classes("text-xs text-grey-6 uppercase")
+                _col = "text-red" if (_stuck or _neg) else "text-grey-9"
+                _tip = (f"Where idle cash currently sits -- SGOV (0-3mo T-bill ETF, yielding "
+                        f"{sgov_yld}, auto-swept), HKD (converts down to a small residual buffer "
+                        "each cycle), USD (auto-converts from idle HKD each cycle to earn USD "
+                        "yield). NOT profit/loss -- a negative HKD/USD figure just means that "
+                        "side is a margin debit (~5-6% interest), same story as Cash (buffer) "
+                        "above.")
+                if _stuck:
+                    _tip += (" ⚠ HKD→USD conversion keeps failing to actually fill (repeated "
+                            "attempts, no real USD balance yet) -- most likely the account's "
+                            "Forex trading permission isn't enabled/approved.")
+                ui.label("  ·  ".join(_cash_bits)).classes(f"text-xl font-bold {_col}")\
+                    .tooltip(_tip)
         buying_power = acct.get("BuyingPower")
         if buying_power is not None:
             _stat("Buying power (購買力)", _money(buying_power), "text-grey-9",
@@ -1419,13 +1433,24 @@ def active_panel() -> None:
                      "size even 1 share of this at the configured risk. Will sit here until "
                      "the account grows."),
         }
+        # 2026-07-23: each group used to render as a full "text-sm font-bold" heading line --
+        # 3 of those stacked (when all 3 categories are present) is a lot of heading-weight
+        # text just to label pending trades. Keeps the AT-A-GLANCE grouping the 2026-07-13 fix
+        # was FOR (that's still real -- see its comment above), just as a small chip instead
+        # of a full heading line: same color-coded distinction, much less visual weight.
+        _chip_color = {"placed": "grey-7", "retrying": "blue-7", "stuck": "orange-7"}
+        with ui.row().classes("items-center gap-2 mt-2"):
+            for _status in ("placed", "retrying", "stuck"):
+                items = groups[_status]
+                if not items:
+                    continue
+                _label, _colour, _tip = _PENDING_SECTIONS[_status]
+                ui.badge(f"{_label} ({len(items)})", color=_chip_color[_status])\
+                    .classes("text-xs").tooltip(_tip)
         for _status in ("placed", "retrying", "stuck"):
             items = groups[_status]
             if not items:
                 continue
-            _label, _colour, _tip = _PENDING_SECTIONS[_status]
-            ui.label(f"{_label} ({len(items)})").classes(
-                f"text-sm font-bold {_colour} mt-2").tooltip(_tip)
             with ui.row().classes("w-full flex-wrap gap-3"):
                 for t, msg in items:
                     _trade_card(t, None, reason=msg, status=_status)
@@ -1491,118 +1516,126 @@ def retrospective_panel() -> None:
         ui.label("No closed trades yet — the equity curve appears as trades settle.")\
             .classes("text-sm text-grey")
 
+    # 2026-07-23: the four sections below (confidence calibration, monthly attribution,
+    # constraint scorecard, recent events) are analysis you check occasionally, not a live
+    # monitor -- they used to stack as 4 always-visible headed sections, each with its own
+    # bold heading AND a full explanatory sentence underneath, adding up to a long scroll
+    # past this tab's actual headline KPIs/equity curve every single visit. Collapsed into
+    # expansions (default closed) with a short caption so you can still tell what's inside
+    # without opening it; the full explanation moved into each section's own tooltip/first
+    # line instead of always-visible subtext.
+
     # ADDED 2026-07-14: confidence calibration -- retrospective.confidence_calibration()
     # already existed (used by the text-export report) but was never surfaced live, so the
     # question "is the LLM's confidence actually predictive?" required generating a report.
     # A bar chart of realized expectancy per confidence band answers it at a glance: if
     # higher bands don't show higher expectancy, the confidence gate is noise, not signal.
-    with ui.row().classes("items-center gap-2 mt-4"):
-        ui.label("LLM confidence calibration").classes("text-sm font-bold")
-        ui.label("realized expectancy (R) by the LLM's OWN confidence band, over broker-"
-                 "executed trades -- higher bands should show higher expectancy if "
-                 "confidence is actually predictive, not just a number").classes(
-            "text-xs text-grey-6")
-    cal = confidence_calibration(closed)
-    if cal:
-        # NOTE: no custom JS tooltip formatter -- ui.echart() JSON-serializes the whole
-        # options dict (confirmed: no precedent for a JS-function-string formatter anywhere
-        # else in this file), so a formatter string here would arrive as an inert STRING,
-        # not an executable function. Same fix as the portfolio pie chart elsewhere in this
-        # file: bake the extra info (win rate, n) directly into the x-axis label text
-        # instead of relying on a callback.
-        _labels = [f"{c['band']}\nwin {c['win']:.0%}  n={c['n']}" for c in cal]
-        ui.echart({
-            "tooltip": {"trigger": "axis"},
-            "xAxis": {"type": "category", "data": _labels, "name": "LLM confidence",
-                      "axisLabel": {"fontSize": 10}},
-            "yAxis": {"type": "value", "name": "expectancy (R)"},
-            "series": [{"type": "bar",
-                        # per-bar colour is a plain JSON itemStyle property, not a JS
-                        # callback -- safe, unlike the removed tooltip formatter above
-                        "data": [{"value": round(c["expR"], 3),
-                                  "itemStyle": {"color": "#16a34a" if c["expR"] > 0
-                                               else "#dc2626"}}
-                                 for c in cal]}],
-            "grid": {"left": 55, "right": 20, "top": 20, "bottom": 55},
-        }).classes("w-full h-56").tooltip(
-            "Each bar = one confidence band's realized expectancy over broker-executed "
-            "trades. A useful confidence signal should show bars rising left-to-right -- "
-            "flat or inverted bars mean the LLM's confidence number isn't actually earning "
-            "its place as a filter.")
-    else:
-        ui.label("No closed, broker-executed trades with confidence data yet.")\
-            .classes("text-sm text-grey")
+    with ui.expansion("LLM confidence calibration", icon="psychology",
+                      caption="is the LLM's confidence number actually predictive?")\
+            .classes("w-full mt-2"):
+        cal = confidence_calibration(closed)
+        if cal:
+            # NOTE: no custom JS tooltip formatter -- ui.echart() JSON-serializes the whole
+            # options dict (confirmed: no precedent for a JS-function-string formatter
+            # anywhere else in this file), so a formatter string here would arrive as an
+            # inert STRING, not an executable function. Same fix as the portfolio pie chart
+            # elsewhere in this file: bake the extra info (win rate, n) directly into the
+            # x-axis label text instead of relying on a callback.
+            _labels = [f"{c['band']}\nwin {c['win']:.0%}  n={c['n']}" for c in cal]
+            ui.echart({
+                "tooltip": {"trigger": "axis"},
+                "xAxis": {"type": "category", "data": _labels, "name": "LLM confidence",
+                          "axisLabel": {"fontSize": 10}},
+                "yAxis": {"type": "value", "name": "expectancy (R)"},
+                "series": [{"type": "bar",
+                            # per-bar colour is a plain JSON itemStyle property, not a JS
+                            # callback -- safe, unlike the removed tooltip formatter above
+                            "data": [{"value": round(c["expR"], 3),
+                                      "itemStyle": {"color": "#16a34a" if c["expR"] > 0
+                                                   else "#dc2626"}}
+                                     for c in cal]}],
+                "grid": {"left": 55, "right": 20, "top": 20, "bottom": 55},
+            }).classes("w-full h-56").tooltip(
+                "Each bar = one confidence band's realized expectancy (R) over broker-"
+                "executed trades. A useful confidence signal should show bars rising "
+                "left-to-right -- flat or inverted bars mean the LLM's confidence number "
+                "isn't actually earning its place as a filter.")
+        else:
+            ui.label("No closed, broker-executed trades with confidence data yet.")\
+                .classes("text-sm text-grey")
 
     # monthly attribution: where did the P&L actually come from
-    with ui.row().classes("items-center gap-2 mt-4"):
-        ui.label("Monthly attribution (USD)").classes("text-sm font-bold")
-        ui.label("trend strategy vs. sleeve vs. other (cash interest + untracked, a "
-                 "residual — not separately modeled)").classes("text-xs text-grey-6")
-    attrib = _monthly_attribution()
-    if attrib:
-        rows = [{"month": a["month"],
-                 "trend": f"{a['trend']:+,.0f}", "sleeve": f"{a['sleeve']:+,.0f}",
-                 "other": f"{a['other']:+,.0f}" if a["other"] is not None else "—",
-                 "total": f"{a['total']:+,.0f}" if a["total"] is not None else "—"}
-                for a in reversed(attrib)]   # most recent month first
-        ui.table(rows=rows,
-                 columns=[{"name": "month", "label": "month", "field": "month", "align": "left"},
-                          {"name": "trend", "label": "trend $", "field": "trend", "align": "right"},
-                          {"name": "sleeve", "label": "sleeve $", "field": "sleeve", "align": "right"},
-                          {"name": "other", "label": "other $", "field": "other", "align": "right"},
-                          {"name": "total", "label": "total $", "field": "total", "align": "right"}])\
-            .classes("w-full").props("dense")
-    else:
-        ui.label("No closed trades / equity history yet — attribution appears once trades "
-                 "settle.").classes("text-sm text-grey")
+    with ui.expansion("Monthly attribution (USD)", icon="calendar_month",
+                      caption="trend strategy vs. sleeve vs. other, by month")\
+            .classes("w-full"):
+        attrib = _monthly_attribution()
+        if attrib:
+            rows = [{"month": a["month"],
+                     "trend": f"{a['trend']:+,.0f}", "sleeve": f"{a['sleeve']:+,.0f}",
+                     "other": f"{a['other']:+,.0f}" if a["other"] is not None else "—",
+                     "total": f"{a['total']:+,.0f}" if a["total"] is not None else "—"}
+                    for a in reversed(attrib)]   # most recent month first
+            ui.table(rows=rows,
+                     columns=[{"name": "month", "label": "month", "field": "month", "align": "left"},
+                              {"name": "trend", "label": "trend $", "field": "trend", "align": "right"},
+                              {"name": "sleeve", "label": "sleeve $", "field": "sleeve", "align": "right"},
+                              {"name": "other", "label": "other $", "field": "other", "align": "right"},
+                              {"name": "total", "label": "total $", "field": "total", "align": "right"}])\
+                .classes("w-full").props("dense")\
+                .tooltip("'other' is cash interest + an untracked residual -- not separately "
+                         "modeled, not an error")
+        else:
+            ui.label("No closed trades / equity history yet — attribution appears once trades "
+                     "settle.").classes("text-sm text-grey")
 
     # constraint scorecard
-    with ui.row().classes("items-center gap-2 mt-2"):
-        ui.label("Constraint scorecard").classes("text-sm font-bold")
+    with ui.expansion("Constraint scorecard", icon="rule",
+                      caption="how often each gate blocked a candidate")\
+            .classes("w-full"):
         ui.button("Reset", icon="restart_alt", on_click=_reset_scorecard)\
             .props("flat dense size=sm")\
             .tooltip("Archives the current tally (nothing lost) and starts the "
                      "scorecard at zero. Does NOT touch open positions or trade history.")
-    counts = journal.rejection_counts()
-    if counts:
-        rows = [{"constraint": reason, "blocked": n} for reason, n in counts]
-        ui.table(rows=rows,
-                 columns=[{"name": "constraint", "label": "constraint (gate)",
-                           "field": "constraint", "align": "left"},
-                          {"name": "blocked", "label": "times blocked",
-                           "field": "blocked", "align": "right",
-                           "sortable": True}])\
-            .classes("w-full").props("dense")
-    else:
-        ui.label("No rejected candidates recorded yet. Once board scans run, "
-                 "every blocked BUY/SELL is tallied here by gate.")\
-            .classes("text-sm text-grey")
+        counts = journal.rejection_counts()
+        if counts:
+            rows = [{"constraint": reason, "blocked": n} for reason, n in counts]
+            ui.table(rows=rows,
+                     columns=[{"name": "constraint", "label": "constraint (gate)",
+                               "field": "constraint", "align": "left"},
+                              {"name": "blocked", "label": "times blocked",
+                               "field": "blocked", "align": "right",
+                               "sortable": True}])\
+                .classes("w-full").props("dense")
+        else:
+            ui.label("No rejected candidates recorded yet. Once board scans run, "
+                     "every blocked BUY/SELL is tallied here by gate.")\
+                .classes("text-sm text-grey")
 
     # ADDED 2026-07-14: recent notable events (new orders, closes, DD-halts, reconcile
     # mismatches, orphaned-order cancellations) -- previously this history only existed in
     # the raw log file or HANDOFF.md, both external to the dashboard itself. Same source
     # (core/notable_events.py) that also feeds the Telegram alerts, so this view and any
     # alert you got should always agree.
-    with ui.row().classes("items-center gap-2 mt-4"):
-        ui.label("Recent notable events").classes("text-sm font-bold")
-        ui.label("new orders, closes, DD-halts, reconcile mismatches -- the same events "
-                 "that trigger a Telegram alert if configured").classes("text-xs text-grey-6")
     from dashboard.core import notable_events
     events = notable_events.recent(limit=20)
-    if events:
-        rows = [{"ts": e["ts"][:19].replace("T", " "), "level": e["level"],
-                 "message": e["message"]} for e in events]
-        ui.table(rows=rows,
-                 columns=[{"name": "ts", "label": "when (UTC)", "field": "ts",
-                           "align": "left"},
-                          {"name": "level", "label": "level", "field": "level",
-                           "align": "left"},
-                          {"name": "message", "label": "event", "field": "message",
-                           "align": "left"}])\
-            .classes("w-full").props("dense")
-    else:
-        ui.label("No notable events recorded yet this instance.")\
-            .classes("text-sm text-grey")
+    with ui.expansion(f"Recent notable events ({len(events)})", icon="history",
+                      caption="new orders, closes, DD-halts, reconcile mismatches")\
+            .classes("w-full")\
+            .tooltip("the same events that trigger a Telegram alert if configured"):
+        if events:
+            rows = [{"ts": e["ts"][:19].replace("T", " "), "level": e["level"],
+                     "message": e["message"]} for e in events]
+            ui.table(rows=rows,
+                     columns=[{"name": "ts", "label": "when (UTC)", "field": "ts",
+                               "align": "left"},
+                              {"name": "level", "label": "level", "field": "level",
+                               "align": "left"},
+                              {"name": "message", "label": "event", "field": "message",
+                               "align": "left"}])\
+                .classes("w-full").props("dense")
+        else:
+            ui.label("No notable events recorded yet this instance.")\
+                .classes("text-sm text-grey")
 
 
 # connection_panel removed -- access points are switched manually; the header
@@ -2125,50 +2158,13 @@ def main_page() -> None:
         header_status()
         health_banner()
 
-        with ui.row().classes("items-center gap-4 w-full"):
-            ui.label("LLM scan:").classes("text-sm")
-            ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
-                      value=SETTINGS["llm_min"],
-                      on_change=lambda e: (SETTINGS.update(llm_min=e.value),
-                                           _save_settings())).props("dense")
-            ui.checkbox("Pause LLM on weekends",
-                        value=SETTINGS["auto_pause"],
-                        on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
-                                             _save_settings()))
-            ui.label("Columns:").classes("text-sm")
-
-            def _set_cols(e) -> None:
-                SETTINGS.update(grid_cols=e.value)
-                _save_settings()
-                grid.refresh(); opportunities.refresh()
-            ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
-                      value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
-
-            from dashboard.core import paper as _paper
-
-            def _set_overext(e) -> None:
-                _paper.OVEREXT_FILTER = bool(e.value)
-                _save_settings()
-                gate_panel.refresh()
-
-            def _set_band(e) -> None:
-                _paper.OVEREXT_HI = float(e.value)
-                _paper.OVEREXT_LO = float(100 - e.value)
-                _save_settings()
-                gate_panel.refresh()
-            ui.checkbox("Block overextended", value=_paper.OVEREXT_FILTER,
-                        on_change=_set_overext)\
-                .tooltip("skip longs above / shorts below the RSI band (don't chase)")
-            ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
-                      value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
-            ui.label("Risk/trade:").classes("text-sm")
-            def _set_risk(e) -> None:
-                setattr(_paper, "RISK_PER_TRADE", e.value)
-                _save_settings()
-            ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
-                      value=_paper.RISK_PER_TRADE, on_change=_set_risk)\
-                .props("dense").tooltip("% of demo equity risked per trade "
-                                        "(applied to real equity at order time); remembered across restarts")
+        # 2026-07-23: split ACTIONS (things you click to do something now) from SETTINGS
+        # (set-once-and-forget toggles) -- these used to be one dense row with 5 labeled
+        # input groups and 4 buttons, all always visible, right below the health status.
+        # Actions stay visible (you might want Manual refresh/Restart without digging through
+        # a collapsed panel); settings move into a collapsed-by-default expansion, since none
+        # of them need re-checking on every visit the way account health does.
+        with ui.row().classes("items-center gap-2 w-full"):
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
             from dashboard.execution import broker as _bk_hdr
@@ -2181,6 +2177,52 @@ def main_page() -> None:
                 .tooltip("exit the app so the watchdog relaunches it fresh (~10s); "
                          "if the IB Gateway link is down, also force-kills and "
                          "relaunches it (~30-60s + 2FA if prompted)")
+
+        with ui.expansion("Settings", icon="tune").classes("w-full"):
+            with ui.row().classes("items-center gap-4 w-full"):
+                ui.label("LLM scan:").classes("text-sm")
+                ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
+                          value=SETTINGS["llm_min"],
+                          on_change=lambda e: (SETTINGS.update(llm_min=e.value),
+                                               _save_settings())).props("dense")
+                ui.checkbox("Pause LLM on weekends",
+                            value=SETTINGS["auto_pause"],
+                            on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
+                                                 _save_settings()))
+                ui.label("Columns:").classes("text-sm")
+
+                def _set_cols(e) -> None:
+                    SETTINGS.update(grid_cols=e.value)
+                    _save_settings()
+                    grid.refresh(); opportunities.refresh()
+                ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
+                          value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
+
+                from dashboard.core import paper as _paper
+
+                def _set_overext(e) -> None:
+                    _paper.OVEREXT_FILTER = bool(e.value)
+                    _save_settings()
+                    gate_panel.refresh()
+
+                def _set_band(e) -> None:
+                    _paper.OVEREXT_HI = float(e.value)
+                    _paper.OVEREXT_LO = float(100 - e.value)
+                    _save_settings()
+                    gate_panel.refresh()
+                ui.checkbox("Block overextended", value=_paper.OVEREXT_FILTER,
+                            on_change=_set_overext)\
+                    .tooltip("skip longs above / shorts below the RSI band (don't chase)")
+                ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
+                          value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
+                ui.label("Risk/trade:").classes("text-sm")
+                def _set_risk(e) -> None:
+                    setattr(_paper, "RISK_PER_TRADE", e.value)
+                    _save_settings()
+                ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
+                          value=_paper.RISK_PER_TRADE, on_change=_set_risk)\
+                    .props("dense").tooltip("% of demo equity risked per trade "
+                                            "(applied to real equity at order time); remembered across restarts")
 
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")
