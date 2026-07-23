@@ -269,14 +269,10 @@ def header_status() -> None:
                              "DU… paper account on a paper port), or the LIVE account when "
                              "IB_ALLOW_LIVE is armed (guard requires the exact configured "
                              "live account on a live port)")
-                _rec = service.STATE.get("reconcile") or {}
-                if _rec.get("only_local") or _rec.get("only_broker"):
-                    ui.badge("⚠ position mismatch", color="red").tooltip(
-                        f"Broker reconciliation (run on last login) found a desync -- "
-                        f"local-only (ghost, no broker position): {_rec.get('only_local')}; "
-                        f"broker-only (no local record): {_rec.get('only_broker')}. "
-                        f"Check ib_mirror vs paper_trades and the broker's own position list "
-                        f"directly before trusting P&L numbers.")
+                # 2026-07-23: the reconcile-mismatch badge that used to render here was
+                # removed -- it duplicated health_banner()'s "reconcile:" line (same
+                # STATE["reconcile"], same event), which is now the single authoritative
+                # indicator (its tooltip carries the same symbol-level detail this used to).
                 acct = service.STATE.get("account") or {}
                 if acct:
                     cc = acct.get("_ccy", "")
@@ -355,8 +351,23 @@ def health_banner() -> None:
     broker_txt = bc.get("detail", "no broker") if bc else "not connected"
 
     rec = service.STATE.get("reconcile") or {}
+    rec_tooltip = None
     if rec.get("only_local") or rec.get("only_broker"):
         rec_colour, rec_txt = "text-red", "mismatch found"
+        # 2026-07-23: this used to ALSO render as a separate "⚠ position mismatch" badge in
+        # header_status() -- same STATE["reconcile"], same event, shown twice at once. That
+        # duplication is exactly what made a since-fixed mismatch confusing to read: two
+        # indicators to check, and no guarantee they'd read consistently. Consolidated into
+        # this single "reconcile:" line (the one place `_refresh_all_panels()` already treats
+        # as the System Health summary); the detailed symbol-level tooltip moves here too so
+        # nothing is lost by dropping the second badge.
+        rec_tooltip = (
+            f"Broker reconciliation (run on last login, or periodically -- see "
+            f"RECONCILE_PERIODIC_SEC) found a desync -- "
+            f"local-only (ghost, no broker position): {rec.get('only_local')}; "
+            f"broker-only (no local record): {rec.get('only_broker')}. "
+            f"Check ib_mirror vs paper_trades and the broker's own position list "
+            f"directly before trusting P&L numbers.")
     elif rec.get("skipped"):
         rec_colour, rec_txt = "text-grey-5", "skipped (broker unavailable)"
     elif rec:
@@ -380,7 +391,9 @@ def health_banner() -> None:
             ui.label(broker_txt).classes(f"text-xs {broker_colour}")
         with ui.row().classes("items-baseline gap-1"):
             ui.label("reconcile:").classes("text-xs text-grey-6")
-            ui.label(rec_txt).classes(f"text-xs {rec_colour}")
+            rec_label = ui.label(rec_txt).classes(f"text-xs {rec_colour}")
+            if rec_tooltip:
+                rec_label.tooltip(rec_tooltip)
 
 
 @ui.refreshable
@@ -1175,19 +1188,21 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     # while equity was already fully committed to other pending orders) is a NORMAL, expected,
     # SELF-RESOLVING state -- not stuck, not an error, just the risk budget doing its job.
     if room is not None and room < t["entry"]:
+        # SHORTENED 2026-07-23: this used to repeat the full "nothing wrong here... it'll
+        # place automatically..." framing sentence on EVERY card in this group -- with 3+
+        # room-blocked signals on screen at once (a common state), that's the same paragraph
+        # verbatim, 3+ times, for information that's already stated ONCE at the group level
+        # (see _PENDING_SECTIONS["retrying"]'s header + tooltip in active_panel()). Each card
+        # now shows only what's actually instrument-specific: the numbers and the ETA bound.
         eta = ""
         if earliest_free:
             try:
                 d = dt.datetime.fromisoformat(earliest_free).date()
-                eta = (f" At the latest, something currently deployed resolves by {d} "
-                       f"(its {paper.HORIZON_CAL}-day horizon) -- could easily be sooner via "
-                       f"a stop/target hit, this is just the guaranteed outer bound.")
+                eta = f" ETA (outer bound): {d} at the latest, could be sooner."
             except ValueError:
                 pass
-        return (f"Nothing wrong here — the strategy's risk budget is fully committed right "
-                f"now (~${room:,.0f} of room left, this one needs ~${t['entry']:,.0f}/share), "
-                f"so it's being held back on purpose. It'll place automatically the moment an "
-                f"existing position closes or a pending order fills.{eta}", "retrying")
+        return (f"Needs ~${t['entry']:,.0f}/share, ~${room:,.0f} of room left.{eta}",
+               "retrying")
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 
@@ -1862,6 +1877,32 @@ def _restart_server() -> None:
     threading.Timer(1.2, lambda: os._exit(0)).start()
 
 
+def _confirm_restart() -> None:
+    """2026-07-23: the Restart button used to call _restart_server() directly, with zero
+    confirmation, sitting in the same row and visual weight as routine buttons (Manual
+    refresh, Log trades now) -- a misclick force-kills the live real-money process (and
+    the IB Gateway too, if it's currently down). Same dialog pattern as _open_withdraw()."""
+    from dashboard.execution import broker as _bk
+    bc = service.STATE.get("broker_conn") or {}
+    gw_would_kick = _bk.is_ib() and not bc.get("available")
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[440px]"):
+        ui.label("Restart the app now?").classes("text-lg font-bold")
+        msg = ("Exits the live process immediately -- the watchdog relaunches it fresh in "
+              "~10s.")
+        if gw_would_kick:
+            msg += (" The IB Gateway link is currently down, so this will ALSO force-kill "
+                   "and relaunch it (~30-60s + 2FA if prompted).")
+        ui.label(msg).classes("text-sm text-grey-7")
+        with ui.row().classes("justify-end gap-2 w-full mt-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            def _confirmed():
+                dlg.close()
+                _restart_server()
+            ui.button("Restart now", icon="restart_alt", on_click=_confirmed)\
+                .props("color=negative")
+    dlg.open()
+
+
 async def _archive_records(table) -> None:
     """Archive the rows ticked in a paper-trades table (specific records)."""
     from dashboard.core import paper
@@ -2042,6 +2083,13 @@ def main_page() -> None:
                 .classes("text-sm text-grey-6")
         clock_row()
 
+        # 2026-07-23: this account-health block used to render BELOW the settings row --
+        # meaning the thing you check on every visit (is my real money okay) sat under a
+        # row of controls you touch once a month (LLM interval, risk%, overextended band).
+        # Moved account health first; settings now follow it, right before the tabs.
+        header_status()
+        health_banner()
+
         with ui.row().classes("items-center gap-4 w-full"):
             ui.label("LLM scan:").classes("text-sm")
             ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
@@ -2093,14 +2141,11 @@ def main_page() -> None:
                 ui.button("Withdraw", icon="savings", on_click=_open_withdraw).props("flat")\
                     .tooltip("Prepare a cash withdrawal from SGOV/cash shield first (never Core); "
                              "you still transfer the money manually in IBKR")
-            ui.button("Restart", icon="restart_alt", on_click=_restart_server)\
+            ui.button("Restart", icon="restart_alt", on_click=_confirm_restart)\
                 .props("flat color=negative")\
                 .tooltip("exit the app so the watchdog relaunches it fresh (~10s); "
                          "if the IB Gateway link is down, also force-kills and "
                          "relaunches it (~30-60s + 2FA if prompted)")
-
-        header_status()
-        health_banner()
 
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("Board", icon="dashboard")
