@@ -254,86 +254,41 @@ def clock_row() -> None:
 
 @ui.refreshable
 def header_status() -> None:
-    cap = SETTINGS["cap"]
-    used = service.STATE.get("calls_today", 0)  # cached; avoids a DB read each second
-    near = used >= cap - 10
-    # Shared quota (quant+study+events all draw from the same chatanywhere.tech key) --
-    # THIS is the real constraint, not the line above: the 2026-07-14 incident was this
-    # instance's own counter saying "under budget" while the shared key was already
-    # exhausted by another caller. Fetched on the LLM refresh cadence, cached there --
-    # see analyst/usage_log.py::fetch_shared_usage_today() -- never a per-tick network call.
-    shared_used = service.STATE.get("shared_calls_today", 0)
-    shared_near = shared_used >= cap - 10
-    shared_by_project = service.STATE.get("shared_calls_by_project", {})
-    data_txt, data_css = _data_source_text()
-    with ui.column().classes("gap-1 w-full"):
-        ui.label(data_txt).classes("text-sm " + data_css)
-        with ui.row().classes("items-center gap-6 w-full"):
-            ui.label("Prices/scores: " + _ago(service.STATE["last_cheap"])).classes("text-sm text-grey-7")
-            ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
-            ui.label(f"API calls today: {used}/{cap}").classes(
-                "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
-            ui.label(f"Shared quota (quant+study+events): {shared_used}/{cap}").classes(
-                "text-sm " + ("text-red font-bold" if shared_near else "text-grey-7")
-            ).tooltip(", ".join(f"{k}: {v}" for k, v in shared_by_project.items()) or "no data yet")
-            from dashboard.execution import broker as _broker
-            if _broker.is_ib():
-                bc = service.STATE.get("broker_conn") or {}
-                up = bc.get("available")
-                ok = bc.get("ok")
-                dot = "●" if up else "○"
-                css = ("text-green" if up and ok else "text-orange" if up
-                       else "text-red")
-                ui.label(f"{_broker.name()}: {bc.get('detail', 'gateway down')} {dot}")\
-                    .classes(f"text-sm {css}")\
-                    .tooltip("BROKER=ib — orders go to the IBKR paper account (guard requires a "
-                             "DU… paper account on a paper port), or the LIVE account when "
-                             "IB_ALLOW_LIVE is armed (guard requires the exact configured "
-                             "live account on a live port)")
-                # 2026-07-23: the reconcile-mismatch badge that used to render here was
-                # removed -- it duplicated health_banner()'s "reconcile:" line (same
-                # STATE["reconcile"], same event), which is now the single authoritative
-                # indicator (its tooltip carries the same symbol-level detail this used to).
-                acct = service.STATE.get("account") or {}
-                if acct:
-                    cc = acct.get("_ccy", "")
-                    nl = acct.get("NetLiquidation"); cash = acct.get("TotalCashValue")
-                    bp = acct.get("BuyingPower"); upnl = acct.get("UnrealizedPnL")
-                    parts = []
-                    if nl is not None:   parts.append(f"NetLiq {cc} {nl:,.0f}")
-                    if cash is not None: parts.append(f"cash {cc} {cash:,.0f}")
-                    if bp is not None:   parts.append(f"BP {cc} {bp:,.0f}")
-                    if upnl:             parts.append(f"uPnL {cc} {upnl:+,.0f}")
-                    ui.label(" · ".join(parts)).classes(
-                        "text-sm " + ("text-green" if (upnl or 0) >= 0 else "text-red"))\
-                        .tooltip(f"{_broker.name()} account (base ccy): net liquidation, cash, "
-                                 "buying power, unrealized P&L")
-                ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
-                return
-            conn = service.STATE.get("conn")
-            if conn:
-                from dashboard.execution import link_monitor
-                lk = link_monitor.status()
-                ap = lk.get("access_point") or conn["server"]
-                ping = lk.get("ping_ms") or conn["ping_ms"]
-                dot = "●" if conn["connected"] else "○"
-                css = ("text-green" if conn["connected"] and ping < 150
-                       else "text-orange" if conn["connected"] and ping < 300
-                       else "text-red")
-                ui.label(f"MT5: {ap} · {ping:.0f}ms {dot}")\
-                    .classes(f"text-sm {css}")\
-                    .tooltip(f"server {conn['server']}; retransmission "
-                             f"{conn['retransmission']:.0%}; "
-                             f"seen: {lk.get('history', {})}")
-                best_ap, best_ping = lk.get("best_ap"), lk.get("best_ping")
-                if best_ap and ap and best_ap != ap and best_ping and ping - best_ping > 15:
-                    hint = (f"→ {best_ap} ~{best_ping:.0f}ms"
-                            + ("" if lk.get("can_reroll") else " (pin via icon)"))
-                    ui.label(hint).classes("text-sm text-orange")\
-                        .tooltip("a faster access point is available; the link "
-                                 "monitor re-rolls automatically when credentials "
-                                 "are set, else pin it via the MT5 connection icon")
-            ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
+    """2026-07-24: this used to render ~4 stacked lines on every page load -- data source,
+    timestamps, LLM budget, account P&L -- all useful occasionally, none of them the "is my
+    money okay" signal that has to be visible at a glance (that's this function's one
+    remaining line -- broker connection -- plus health_banner() right below it). The rest
+    moved into the ⓘ info modal next to the title (_open_info_modal())."""
+    from dashboard.execution import broker as _broker
+    if _broker.is_ib():
+        bc = service.STATE.get("broker_conn") or {}
+        up = bc.get("available")
+        ok = bc.get("ok")
+        dot = "●" if up else "○"
+        css = ("text-green" if up and ok else "text-orange" if up
+               else "text-red")
+        ui.label(f"{_broker.name()}: {bc.get('detail', 'gateway down')} {dot}")\
+            .classes(f"text-sm {css}")\
+            .tooltip("BROKER=ib — orders go to the IBKR paper account (guard requires a "
+                     "DU… paper account on a paper port), or the LIVE account when "
+                     "IB_ALLOW_LIVE is armed (guard requires the exact configured "
+                     "live account on a live port)")
+        return
+    conn = service.STATE.get("conn")
+    if conn:
+        from dashboard.execution import link_monitor
+        lk = link_monitor.status()
+        ap = lk.get("access_point") or conn["server"]
+        ping = lk.get("ping_ms") or conn["ping_ms"]
+        dot = "●" if conn["connected"] else "○"
+        css = ("text-green" if conn["connected"] and ping < 150
+               else "text-orange" if conn["connected"] and ping < 300
+               else "text-red")
+        ui.label(f"MT5: {ap} · {ping:.0f}ms {dot}")\
+            .classes(f"text-sm {css}")\
+            .tooltip(f"server {conn['server']}; retransmission "
+                     f"{conn['retransmission']:.0%}; "
+                     f"seen: {lk.get('history', {})}")
 
 
 @ui.refreshable
@@ -2109,6 +2064,87 @@ async def _archive_reset() -> None:
     dlg.open()
 
 
+def _open_info_modal() -> None:
+    """2026-07-24: the head of the page used to stack the mode-explainer sentence,
+    clock_row(), and header_status()'s data-source/timestamp/LLM-budget/account-P&L lines
+    on every visit -- five separate blocks of small text before reaching any actual control.
+    None of it is the "is my money okay" signal (that's the broker-connection line still in
+    header_status() plus health_banner(), both still inline) -- it's all useful occasionally,
+    not on every single visit. Moved here, rebuilt fresh from STATE each time it opens (not
+    refreshable -- it's only ever open a few seconds at a time)."""
+    _live = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
+    from dashboard.execution import broker as _bk
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[520px] gap-2"):
+        ui.label("Session info").classes("text-lg font-bold")
+
+        if _live:
+            ui.label("Auto-trades qualifying signals with REAL MONEY on this account. "
+                     "Not a suggestion box — verify positions directly in IBKR too.")\
+                .classes("text-sm text-red-6 font-bold")
+        else:
+            ui.label("Auto-trades qualifying signals on the IBKR paper account "
+                     "(simulated fills, no real money).")\
+                .classes("text-sm text-grey-7")
+
+        ui.separator()
+        clock_row()
+
+        ui.separator()
+        data_txt, data_css = _data_source_text()
+        ui.label(data_txt).classes("text-sm " + data_css)
+        ui.label("Prices/scores: " + _ago(service.STATE["last_cheap"])).classes("text-sm text-grey-7")
+        ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
+
+        cap = SETTINGS["cap"]
+        used = service.STATE.get("calls_today", 0)
+        near = used >= cap - 10
+        ui.label(f"API calls today: {used}/{cap}").classes(
+            "text-sm " + ("text-red font-bold" if near else "text-grey-7"))
+        shared_used = service.STATE.get("shared_calls_today", 0)
+        shared_near = shared_used >= cap - 10
+        shared_by_project = service.STATE.get("shared_calls_by_project", {})
+        ui.label(f"Shared quota (quant+study+events): {shared_used}/{cap}").classes(
+            "text-sm " + ("text-red font-bold" if shared_near else "text-grey-7")
+        ).tooltip(", ".join(f"{k}: {v}" for k, v in shared_by_project.items()) or "no data yet")
+
+        if _bk.is_ib():
+            acct = service.STATE.get("account") or {}
+            if acct:
+                cc = acct.get("_ccy", "")
+                nl = acct.get("NetLiquidation"); cash = acct.get("TotalCashValue")
+                bp = acct.get("BuyingPower"); upnl = acct.get("UnrealizedPnL")
+                parts = []
+                if nl is not None:   parts.append(f"NetLiq {cc} {nl:,.0f}")
+                if cash is not None: parts.append(f"cash {cc} {cash:,.0f}")
+                if bp is not None:   parts.append(f"BP {cc} {bp:,.0f}")
+                if upnl:             parts.append(f"uPnL {cc} {upnl:+,.0f}")
+                ui.label(" · ".join(parts)).classes(
+                    "text-sm " + ("text-green" if (upnl or 0) >= 0 else "text-red"))\
+                    .tooltip(f"{_bk.name()} account (base ccy): net liquidation, cash, "
+                             "buying power, unrealized P&L -- also on the Board tab's "
+                             "Portfolio panel")
+        else:
+            conn = service.STATE.get("conn")
+            if conn:
+                from dashboard.execution import link_monitor
+                lk = link_monitor.status()
+                ap = lk.get("access_point") or conn["server"]
+                ping = lk.get("ping_ms") or conn["ping_ms"]
+                best_ap, best_ping = lk.get("best_ap"), lk.get("best_ping")
+                if best_ap and ap and best_ap != ap and best_ping and ping - best_ping > 15:
+                    hint = (f"faster access point available: {best_ap} ~{best_ping:.0f}ms"
+                            + ("" if lk.get("can_reroll") else " (pin via icon)"))
+                    ui.label(hint).classes("text-sm text-orange")\
+                        .tooltip("the link monitor re-rolls automatically when credentials "
+                                 "are set, else pin it via the MT5 connection icon")
+
+        ui.label(service.STATE["last_status"]).classes("text-sm text-grey-5 italic")
+
+        with ui.row().classes("justify-end w-full mt-1"):
+            ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+
+
 # ---- page ------------------------------------------------------------------
 
 @ui.page("/")
@@ -2117,7 +2153,9 @@ def main_page() -> None:
     _live = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
     with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-4"):
         with ui.row().classes("items-center gap-3 w-full"):
-            ui.label("Trade Analysis — all popular signals").classes("text-2xl font-bold")
+            ui.label("Quantitative Trading System").classes("text-2xl font-bold")
+            ui.button(icon="info", on_click=_open_info_modal).props("flat dense round size=sm")\
+                .tooltip("Session info: connection clocks, LLM budget, account detail")
             # Unmistakable mode badge so concurrent PAPER/LIVE windows are never confused.
             if _live:
                 ui.badge("● LIVE — REAL MONEY", color="red").classes("text-sm px-3 py-1")
@@ -2181,15 +2219,10 @@ def main_page() -> None:
                             else "border-red-600 text-red-700"))\
                 .tooltip(f"opens the {_other} dashboard (separate always-on instance, own gateway "
                          "+ account + database; both trade concurrently)")
-        if _live:
-            ui.label("Auto-trades qualifying signals with REAL MONEY on this account. "
-                     "Not a suggestion box — verify positions directly in IBKR too.")\
-                .classes("text-sm text-red-6 font-bold")
-        else:
-            ui.label("Auto-trades qualifying signals on the IBKR paper account "
-                     "(simulated fills, no real money).")\
-                .classes("text-sm text-grey-6")
-        clock_row()
+        # 2026-07-24: the static mode-explainer sentence and clock_row() used to render here
+        # on every visit -- the sentence is redundant with the "● LIVE — REAL MONEY" /
+        # "● PAPER" badge right above it, and the clocks are rarely the first thing anyone
+        # needs. Both moved into the ⓘ info modal next to the title (_open_info_modal()).
 
         # 2026-07-23: this account-health block used to render BELOW the settings row --
         # meaning the thing you check on every visit (is my real money okay) sat under a
@@ -2309,4 +2342,4 @@ if not _bk0.is_ib():
 _DASH_PORT = int(os.environ.get("DASH_PORT", "8080"))
 _LIVE = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 _MODE = "LIVE" if _LIVE else "PAPER"
-ui.run(title=f"Trade Analysis [{_MODE}]", port=_DASH_PORT, reload=False, show=False)
+ui.run(title=f"Quantitative Trading System [{_MODE}]", port=_DASH_PORT, reload=False, show=False)
