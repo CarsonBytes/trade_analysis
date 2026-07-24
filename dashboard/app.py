@@ -674,9 +674,20 @@ def paper_panel() -> None:
             ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold")
             ui.button("Archive selected", icon="archive",
                       on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
+        # ADDED 2026-07-24: entry/SL/TP/exit + a $ P&L column -- R alone doesn't say how much
+        # a closed trade actually won or lost. risk_money (the real $ risked at execution,
+        # same source _monthly_attribution() uses, always USD regardless of account base ccy)
+        # is only ever recorded for broker-funded trades -- '○ signal only' rows show "—"
+        # rather than a fabricated dollar figure, since no real money was ever on the line.
+        with paper._LOCK, paper._conn() as c:
+            risk_by_id = dict(c.execute(f"SELECT paper_id, risk_money FROM {_bk.mirror_table()}").fetchall())
         rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
                  "method": t["method"], "status": t["status"],
+                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
+                 "exit": round(t["exit_price"], 4) if t["exit_price"] else None,
                  "R": round(t["realized_r"], 2),
+                 "P&L (USD)": (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
+                              if t["id"] in risk_by_id else "—"),
                  "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
                  "opened": _fmt_ts(t["ts"]),
                  "closed": _fmt_ts(t["exit_ts"])} for t in closed[:20]]
@@ -684,7 +695,8 @@ def paper_panel() -> None:
                               columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
             .classes("w-full").props("dense")\
             .tooltip("'R' is what the signal-logic scored regardless of funding -- "
-                     "'○ signal only' rows never had a real broker order, see the "
+                     "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
+                     "rows -- '○ signal only' rows never had a real broker order, see the "
                      "Retrospective tab for broker-executed-only KPIs")
 
 
