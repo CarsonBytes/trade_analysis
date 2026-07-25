@@ -1,7 +1,55 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-24.
+Last updated 2026-07-25.
+
+---
+
+### 🚨 2026-07-25: chatanywhere.tech API key silently dead (403) for ~9h, LLM board-scan fully down
+
+The shared chatanywhere.tech key in `analyst/.env` (used by quant's `analyst/llm.py::make_llm()`)
+started returning **HTTP 403 Forbidden** on every call at 03:03:36, after working normally as
+recently as 02:24:50 (a legitimate 429 quota message, "calls today 9/200" -- so this wasn't a
+quota issue, the key itself got invalidated). Root cause per the error body: chatanywhere.tech
+migrated their free-tier key format server-side ("新版本免费ApiKey已上线，老版本免费 ApiKey 已失效" --
+"the new-version free key is live, the old-version free key has been invalidated"). ~1,700
+identical failures logged, one per tick (~30-40s), over ~9h -- **completely silent to a user**
+since `run_board_scan()`'s exception handler only special-cases 429/RateLimitError for backoff;
+a 403 fell through to `raise`, so it just logged as an unhandled-exception traceback every
+cycle rather than surfacing as anything actionable in the UI (System Health's "llm: never" was
+the only visible symptom, easy to miss).
+
+**Blast radius:** this exact key value is shared verbatim with [[project-event-radar]] (confirmed
+-- the masked key in the error response matched event-radar's `.env` byte-for-byte), so
+event-radar's LLM calls were down too, same 403, same window. [[project-adaptive-study-platform]]
+uses a DIFFERENT, separately-registered chatanywhere key and was unaffected (tested directly,
+200 OK) -- confirms the 3 projects do NOT all share one physical key despite loose memory
+language calling it "the shared chatanywhere.tech key."
+
+**Trading impact: none on execution.** The LLM is a veto/macro-annotation layer only --
+`MIN_STRENGTH`/`MIN_EDGE_R` (the deterministic gate) still ran and placed orders normally the
+whole time. Only the macro-backdrop text and LLM veto were stale/absent for ~9h.
+
+**Fix:** user supplied a new-format key (tested directly against the API before deploying --
+200 OK). Replaced `OPENAI_API_KEY` in both `D:\quant\analyst\.env` and
+`D:\event-radar\backend\.env` (both gitignored, never touch git history). Verified via the REAL
+code path, not just a raw curl probe: `analyst.llm.make_llm().invoke(...)` -> "OK" through
+langchain's ChatOpenAI wrapper. Both quant instances restarted via
+Stop/Start-ScheduledTask (fresh PIDs confirmed); event-radar's backend has NO scheduled task
+(`register-app-task.ps1` exists but was never successfully registered -- `Register-ScheduledTask`
+returns Access Denied in this session context) -- it's supervised instead by
+`deploy/watchdog.ps1` (20s poll loop, PID-lock-guarded against duplicate watchdogs, itself
+relaunched by both a Startup-folder VBS and quant's own cloudflared watchdog) -- killed the 2
+running uvicorn processes directly and let the watchdog relaunch fresh (confirmed via PID lock
+file the watchdog was genuinely alive first, then verified fresh PIDs + 200 OK after).
+
+**Standing lesson:** `run_board_scan()`'s exception handling only backs off on 429 -- any OTHER
+provider-side failure (auth revoked, key format migration, network) raises and gets logged as a
+generic unhandled-tick-exception every single cycle, indefinitely, with nothing surfaced to the
+UI beyond a stale "llm: never" timestamp. **Not yet fixed** -- worth widening that handler to
+back off (with a shorter/different message) on ANY LLM-call failure, not just 429, so a dead key
+doesn't silently flood the log for hours next time. Also worth periodically re-verifying the key
+still works directly (`curl .../chat/completions`) rather than only noticing via log noise.
 
 ---
 
