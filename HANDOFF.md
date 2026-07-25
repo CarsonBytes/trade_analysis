@@ -43,13 +43,21 @@ relaunched by both a Startup-folder VBS and quant's own cloudflared watchdog) --
 running uvicorn processes directly and let the watchdog relaunch fresh (confirmed via PID lock
 file the watchdog was genuinely alive first, then verified fresh PIDs + 200 OK after).
 
-**Standing lesson:** `run_board_scan()`'s exception handling only backs off on 429 -- any OTHER
-provider-side failure (auth revoked, key format migration, network) raises and gets logged as a
-generic unhandled-tick-exception every single cycle, indefinitely, with nothing surfaced to the
-UI beyond a stale "llm: never" timestamp. **Not yet fixed** -- worth widening that handler to
-back off (with a shorter/different message) on ANY LLM-call failure, not just 429, so a dead key
-doesn't silently flood the log for hours next time. Also worth periodically re-verifying the key
-still works directly (`curl .../chat/completions`) rather than only noticing via log noise.
+**Standing lesson (FIXED same day, follow-up commit `126822a`):** `run_board_scan()`'s exception
+handling only backed off on 429 -- any OTHER provider-side failure (auth revoked, key format
+migration, network) raised and got logged as a generic unhandled-tick-exception every single
+cycle, indefinitely, with nothing surfaced to the UI beyond a stale "llm: never" timestamp.
+Two changes: (1) a genuine key-rotation mechanism -- `OPENAI_API_KEY_FALLBACK` (a separately-
+registered chatanywhere key, currently study's) is now tried automatically via
+`analyst/llm.py::invoke_with_key_fallback()` whenever the primary key is exhausted (429) or
+rejected (401/403), used by BOTH LLM call sites (`board_scan.py`, `analyst/nodes.py::_ask()`);
+(2) `run_board_scan()`'s except-block now also backs off gracefully on 401/403 (not just 429)
+for the case where BOTH keys are down. Verified via mocked unit tests (12 new, covering the
+classifier, the retry-then-give-up logic, and the widened backoff) plus a real end-to-end call
+through the actual `invoke_with_key_fallback()` code path against the live API. Also fixed
+`test_board_scan.py`'s pre-existing real-network dependency (it never mocked the shared-quota
+budget guard, so it silently depended on production state at test-run time) while rewriting it
+for the new call shape.
 
 ---
 
