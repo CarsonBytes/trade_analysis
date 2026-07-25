@@ -15,7 +15,7 @@ from typing import Literal
 from dashboard.core import net  # noqa: F401
 from pydantic import BaseModel, Field
 
-from analyst.llm import make_llm  # from quant/analyst
+from analyst.llm import invoke_with_key_fallback, is_chatanywhere_unavailable  # from quant/analyst
 from dashboard.core import store
 from dashboard.core.scoring import Score
 
@@ -147,7 +147,7 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     if backoff:
         try:
             if _dt.datetime.now() < _dt.datetime.fromisoformat(backoff):
-                return None, f"rate-limited by provider -- backing off until {backoff[:16]}"
+                return None, f"provider unavailable -- backing off until {backoff[:16]}"
         except ValueError:
             pass    # malformed cached value -- ignore and attempt normally
 
@@ -160,17 +160,31 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         "Return a signal for EVERY instrument above, plus a macro_note."
     )
     import time
-    llm = make_llm().with_structured_output(BoardScan)
     _start = time.perf_counter()
     try:
-        result = llm.invoke([
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": human},
-        ])
+        # invoke_with_key_fallback() already retries once against
+        # OPENAI_API_KEY_FALLBACK if the primary chatanywhere key is exhausted or dead --
+        # reaching this except block means EITHER no fallback is configured, or both keys
+        # failed, so backing off here is still the right call either way.
+        result = invoke_with_key_fallback(
+            lambda llm: llm.with_structured_output(BoardScan),
+            [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": human},
+            ],
+        )
     except Exception as e:                      # noqa: BLE001
-        if "429" in str(e) or "RateLimitError" in type(e).__name__:
+        # WIDENED 2026-07-25: this used to only special-case 429/RateLimitError -- the
+        # 2026-07-25 incident (chatanywhere silently deprecated the old key format, a 403
+        # PermissionDeniedError) fell through to `raise` and flooded the log with a full
+        # traceback every ~30-40s tick for ~9h straight, with nothing surfaced to the UI
+        # beyond a stale "llm: never" timestamp. is_chatanywhere_unavailable() now covers
+        # both classes (quota exhausted OR key rejected) so either backs off gracefully.
+        if is_chatanywhere_unavailable(e):
             _set_rate_limit_backoff()
-            return None, f"rate-limited by provider -- backing off until next reset ({e})"
+            reason = ("rate-limited by provider" if ("429" in str(e) or "RateLimitError" in type(e).__name__)
+                      else "provider rejected the key (auth/permission error)")
+            return None, f"{reason} -- backing off until next reset ({e})"
         raise    # anything else is a real, unexpected failure -- don't swallow it
     store.record_call(1)
     try:                                          # cross-project usage visibility only

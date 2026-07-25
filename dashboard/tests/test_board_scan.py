@@ -9,6 +9,19 @@ matching response-time regression. This tests the fix: catch the rate-limit
 condition, cache a backoff deadline, and skip the network call entirely while
 still in backoff.
 
+WIDENED 2026-07-25: `run_board_scan()` now goes through
+analyst.llm.invoke_with_key_fallback() (a primary-then-fallback-key retry, added after
+the primary chatanywhere key was silently invalidated server-side for ~9h) and its
+exception handling now also catches 401/403 (auth/permission errors), not just 429 --
+see test_permission_denied_error_also_backs_off below.
+
+FIXED 2026-07-25: these tests never mocked usage_log.shared_calls_ok()/store.can_call()
+(the budget guard at the top of run_board_scan()), so they silently depended on the REAL
+production shared-quota state at whatever moment they happened to run -- confirmed flaky
+by reproducing an identical failure on an already-pushed, previously-green commit, purely
+because the real shared count was near cap that day. All 3 pre-existing tests now mock
+the budget guard explicitly.
+
 Run:  uv run python -m dashboard.tests.test_board_scan
 """
 from __future__ import annotations
@@ -47,6 +60,15 @@ def _restore_db(old, path):
         pass
 
 
+def _mock_budget_ok(board_scan):
+    """Two patches needed to get run_board_scan() past its budget gate regardless of the
+    REAL shared/local usage state -- see the module docstring's 2026-07-25 note."""
+    return (
+        mock.patch("analyst.usage_log.shared_calls_ok", return_value=(True, 0)),
+        mock.patch.object(board_scan.store, "can_call", return_value=True),
+    )
+
+
 def test_rate_limit_error_sets_backoff_and_returns_none():
     print("run_board_scan(): a RateLimitError (429) is caught, backoff is cached, "
           "call returns (None, status) instead of raising:")
@@ -54,15 +76,12 @@ def test_rate_limit_error_sets_backoff_and_returns_none():
     try:
         from dashboard.web import board_scan
 
-        class _FakeLLM:
-            def with_structured_output(self, _model):
-                return self
-
-            def invoke(self, _messages):
-                raise RuntimeError("Error code: 429 - RateLimitError: rate limit exceeded")
+        def _raise_429(build_chain, messages, temperature=0.2, model=None):
+            raise RuntimeError("Error code: 429 - RateLimitError: rate limit exceeded")
 
         raised = False
-        with mock.patch.object(board_scan, "make_llm", return_value=_FakeLLM()):
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback", side_effect=_raise_429):
             try:
                 result, status = board_scan.run_board_scan([], [])
             except Exception:
@@ -86,19 +105,50 @@ def test_second_call_skips_llm_entirely_while_in_backoff():
 
         calls = []
 
-        class _FakeLLM:
-            def with_structured_output(self, _model):
-                return self
+        def _never_called(build_chain, messages, temperature=0.2, model=None):
+            calls.append(1)
+            raise AssertionError("should never be called while backing off")
 
-            def invoke(self, _messages):
-                calls.append(1)
-                raise AssertionError("should never be called while backing off")
-
-        with mock.patch.object(board_scan, "make_llm", return_value=_FakeLLM()):
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback", side_effect=_never_called):
             result, status = board_scan.run_board_scan([], [])
         check("LLM never invoked", len(calls), 0)
         check("result is None", result, None)
         check("status mentions backing off", "backing off" in status, True)
+    finally:
+        _restore_db(old, path)
+
+
+def test_permission_denied_error_also_backs_off():
+    print("\nrun_board_scan(): a 403 PermissionDeniedError (2026-07-25 incident shape -- "
+          "chatanywhere's old key format was deprecated server-side) is ALSO caught and "
+          "backed off, not just 429 -- this used to fall through to `raise` and flood the "
+          "log with a full traceback every tick for hours:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.web import board_scan
+
+        class PermissionDeniedError(Exception):
+            pass
+
+        def _raise_403(build_chain, messages, temperature=0.2, model=None):
+            raise PermissionDeniedError(
+                "Error code: 403 - {'error': {'code': '403 FORBIDDEN', 'message': 'key invalid'}}")
+
+        raised = False
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback", side_effect=_raise_403):
+            try:
+                result, status = board_scan.run_board_scan([], [])
+            except Exception:
+                raised = True
+        check("does not raise", raised, False)
+        check("result is None", result, None)
+        check("status mentions backing off", "backing off" in status, True)
+        check("status does NOT claim 'rate-limited' (it wasn't -- key was rejected)",
+              "rate-limited" in status, False)
+        cached = board_scan._rate_limited_until()
+        check("backoff deadline was cached", cached is not None, True)
     finally:
         _restore_db(old, path)
 
@@ -110,15 +160,12 @@ def test_non_rate_limit_exception_still_propagates():
     try:
         from dashboard.web import board_scan
 
-        class _FakeLLM:
-            def with_structured_output(self, _model):
-                return self
-
-            def invoke(self, _messages):
-                raise ValueError("some unrelated schema validation error")
+        def _raise_schema_error(build_chain, messages, temperature=0.2, model=None):
+            raise ValueError("some unrelated schema validation error")
 
         raised = False
-        with mock.patch.object(board_scan, "make_llm", return_value=_FakeLLM()):
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback", side_effect=_raise_schema_error):
             try:
                 board_scan.run_board_scan([], [])
             except ValueError:
@@ -131,6 +178,7 @@ def test_non_rate_limit_exception_still_propagates():
 if __name__ == "__main__":
     test_rate_limit_error_sets_backoff_and_returns_none()
     test_second_call_skips_llm_entirely_while_in_backoff()
+    test_permission_denied_error_also_backs_off()
     test_non_rate_limit_exception_still_propagates()
     print()
     if _fails:

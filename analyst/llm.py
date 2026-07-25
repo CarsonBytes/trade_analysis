@@ -92,20 +92,26 @@ def provider_decision(cap: int = 200, reserve: int = 10) -> str:
     return provider
 
 
-def make_llm(temperature: float = 0.2, model: str | None = None) -> ChatOpenAI:
+def make_llm(temperature: float = 0.2, model: str | None = None,
+            _use_fallback_key: bool = False) -> ChatOpenAI:
     """Return a chat model. Low temperature: we want consistent, auditable
     analysis, not creative writing.
 
     Env:
-      OPENAI_API_KEY    (required for chatanywhere)
-      OPENAI_MODEL      (optional, default gpt-4o-mini)
-      OPENAI_BASE_URL   (optional, e.g. point at a compatible endpoint)
-      DEEPSEEK_API_KEY  (optional -- enables the fallback; without it, always
-                         stays on chatanywhere regardless of provider_decision())
-      DEEPSEEK_MODEL    (optional, default deepseek-chat)
+      OPENAI_API_KEY          (required for chatanywhere)
+      OPENAI_API_KEY_FALLBACK (optional -- a SEPARATELY-registered chatanywhere key,
+                               e.g. study's own -- see invoke_with_key_fallback() below)
+      OPENAI_MODEL            (optional, default gpt-4o-mini)
+      OPENAI_BASE_URL         (optional, e.g. point at a compatible endpoint)
+      DEEPSEEK_API_KEY        (optional -- enables the fallback; without it, always
+                               stays on chatanywhere regardless of provider_decision())
+      DEEPSEEK_MODEL          (optional, default deepseek-chat)
+
+    `_use_fallback_key` is internal -- callers should go through
+    invoke_with_key_fallback() below rather than pass this directly.
     """
     provider = "chatanywhere"
-    if os.environ.get("DEEPSEEK_API_KEY"):
+    if not _use_fallback_key and os.environ.get("DEEPSEEK_API_KEY"):
         provider = provider_decision()
 
     if provider == "deepseek" and os.environ.get("DEEPSEEK_API_KEY"):
@@ -121,17 +127,69 @@ def make_llm(temperature: float = 0.2, model: str | None = None) -> ChatOpenAI:
         _tls.model = model
         return ChatOpenAI(**kwargs)
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise RuntimeError(
-            "OPENAI_API_KEY not set. Put it in analyst/.env or your environment."
-        )
+    key_env = "OPENAI_API_KEY_FALLBACK" if _use_fallback_key else "OPENAI_API_KEY"
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        raise RuntimeError(f"{key_env} not set. Put it in analyst/.env or your environment.")
     model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    kwargs = {"model": model, "http_client": _HTTP_CLIENT}
+    kwargs = {"model": model, "http_client": _HTTP_CLIENT, "api_key": api_key}
     # gpt-5 / o-series reasoning models only accept the default temperature.
     if not any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4")):
         kwargs["temperature"] = temperature
     if os.environ.get("OPENAI_BASE_URL"):
         kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
+    # Still "chatanywhere" either way -- same provider/tier, just a different account's
+    # key -- see invoke_with_key_fallback()'s docstring for the accounting caveat this implies.
     _tls.provider = "chatanywhere"
     _tls.model = model
     return ChatOpenAI(**kwargs)
+
+
+def is_chatanywhere_unavailable(e: Exception) -> bool:
+    """True for errors that mean THIS chatanywhere KEY specifically can't serve the request
+    right now -- quota exhausted (429) or the key itself rejected outright (401/403, e.g. the
+    2026-07-25 incident where chatanywhere silently deprecated the old free-tier key format
+    server-side). False for anything else (schema validation, network blips, etc.) -- those
+    aren't fixed by trying a different key, so they should propagate normally rather than
+    trigger a pointless retry."""
+    msg = str(e)
+    name = type(e).__name__
+    return ("429" in msg or "RateLimitError" in name
+            or "403" in msg or "401" in msg
+            or "PermissionDeniedError" in name or "AuthenticationError" in name)
+
+
+def invoke_with_key_fallback(build_chain, messages, temperature: float = 0.2, model: str | None = None):
+    """ADDED 2026-07-25, after the primary chatanywhere key silently 403'd for ~9h with no
+    automatic recovery (see HANDOFF.md). Tries the primary key; if it's exhausted or dead
+    (is_chatanywhere_unavailable()), transparently rebuilds the SAME chain with
+    OPENAI_API_KEY_FALLBACK (a separately-registered chatanywhere key -- currently study's,
+    see analyst/.env) and retries ONCE before giving up.
+
+    `build_chain(llm)` should return whatever runnable the caller wants to invoke, e.g.
+    `lambda llm: llm.with_structured_output(SomeModel)` -- this only wraps the actual
+    .invoke() call, not the provider/deepseek decision in make_llm(), so it only ever swaps
+    between the two chatanywhere keys, never accidentally masks a real deepseek failure.
+
+    Re-raises the ORIGINAL (primary-key) error if no fallback key is configured or the
+    fallback also fails, so callers' own exception handling (e.g. board_scan.py's rate-limit
+    backoff) still sees a recognizable, classifiable error either way.
+
+    Accounting caveat: a fallback-key call still logs as provider="chatanywhere" (see
+    make_llm()) since it genuinely is the same tier of key -- it draws against the fallback
+    account's OWN separate daily quota, not the primary's, so the shared usage ledger
+    (usage_log.py) can't currently tell a fallback-key call apart from a primary-key one.
+    Acceptable for now since this should only fire during an active primary-key outage.
+    """
+    primary_llm = make_llm(temperature=temperature, model=model)
+    try:
+        return build_chain(primary_llm).invoke(messages)
+    except Exception as e:
+        if is_chatanywhere_unavailable(e) and os.environ.get("OPENAI_API_KEY_FALLBACK"):
+            from dashboard.core.log import log      # local import: see provider_decision()'s
+                                                      # same note on staying import-safe
+            log.warning("primary chatanywhere key unavailable (%s: %s) -- retrying with "
+                       "OPENAI_API_KEY_FALLBACK", type(e).__name__, e)
+            fallback_llm = make_llm(temperature=temperature, model=model, _use_fallback_key=True)
+            return build_chain(fallback_llm).invoke(messages)
+        raise

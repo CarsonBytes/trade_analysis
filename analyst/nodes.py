@@ -17,14 +17,16 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .state import (
     AnalystState, RegimeView, TechnicalView, SentimentView, Decision, RiskAssessment,
 )
-from .llm import last_model_used, last_provider_used, make_llm
+from .llm import invoke_with_key_fallback, last_model_used, last_provider_used
 from .usage_log import log_usage
 
 
 def _ask(structured_model, system: str, human: str, kind: str = "analyst"):
     start = time.perf_counter()
-    llm = make_llm().with_structured_output(structured_model, include_raw=True)
-    result = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
+    result = invoke_with_key_fallback(
+        lambda llm: llm.with_structured_output(structured_model, include_raw=True),
+        [SystemMessage(content=system), HumanMessage(content=human)],
+    )
     try:
         usage = getattr(result["raw"], "usage_metadata", None) or {}
         log_usage(
