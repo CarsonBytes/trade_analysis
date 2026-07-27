@@ -41,6 +41,18 @@ def test_deposit_adjusted_series():
     flows2 = [[100, 10000.0, "HKD"]]  # a deposit exactly AT the first point
     check("flow exactly at a point's timestamp is included (<=, not <)",
           deposit_adjusted_series(hist, flows2), [0.0, 100.0, 10100.0])
+    # REGRESSION 2026-07-27: the LIVE dashboard 500'd immediately after this same day's
+    # cash-flow fix landed -- equity_history entries grew a 4th/5th field (cash, gpv) for
+    # detect_external_cash_flow(), but this function's strict `for ts, val, _ccy in hist`
+    # unpacking assumed exactly 3 fields and raised "too many values to unpack" on every
+    # single tick. Caught here so a shape change to equity_history can never silently break
+    # this function again.
+    hist5 = [[100, 10000.0, "HKD", 4000.0, 6000.0], [200, 10100.0, "HKD", 4100.0, 6000.0],
+             [300, 20100.0, "HKD", 14100.0, 6000.0]]
+    check("5-field entries (2026-07-27 cash/gpv fields) don't raise, same result as 3-field",
+          deposit_adjusted_series(hist5, None), [10000.0, 10100.0, 20100.0])
+    check("5-field entries with flows still nets out correctly",
+          deposit_adjusted_series(hist5, flows), [10000.0, 10100.0, 10100.0])
 
 
 def test_current_drawdown_pct():
@@ -63,6 +75,13 @@ def test_current_drawdown_pct():
     # exactly at the -13% halt threshold a real caller would check
     at_threshold = [[100, 100.0, "HKD"], [200, 87.0, "HKD"]]
     approx("exactly -13% from peak", current_drawdown_pct(at_threshold, None), -13.0)
+    # REGRESSION 2026-07-27: same "too many values to unpack" 500 as deposit_adjusted_series
+    # above, but here the caller is ib_exec.mirror_new()'s DD_HALT_PCT gate -- a live safety
+    # check silently 500ing on every tick is far worse than a UI page failing to render.
+    dropped5 = [[100, 100.0, "HKD", 40.0, 60.0], [200, 120.0, "HKD", 60.0, 60.0],
+               [300, 108.0, "HKD", 48.0, 60.0]]
+    approx("5-field entries (2026-07-27 cash/gpv fields) don't raise, same result as 3-field",
+          current_drawdown_pct(dropped5, None), -10.0)
     # MATERIALITY FLOOR (2026-07-11 bug): a tiny pre-funding leftover balance (40 HKD) must
     # NOT be treated as an eternal "peak" once real deposits land -- a few-dollar wobble on
     # a near-zero deposit-adjusted P&L shouldn't compute as a huge %. Reproduces the exact

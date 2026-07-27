@@ -301,18 +301,20 @@ def stats(rs: list[float]) -> dict:
 
 
 def deposit_adjusted_series(hist: list, flows: list | None) -> list[float]:
-    """hist: [[ts, value, ccy], ...] ascending. flows: [[ts, amount, ccy], ...] (see
-    service.py's equity_history cash-flow logging). Returns hist's values with the
-    cumulative net cash flow up to each point subtracted, so the series reads as pure
-    trading P&L -- deposits/withdrawals become invisible instead of looking like gains.
-    Shared by app.py's equity chart AND current_drawdown_pct() below -- a deposit must
-    never look like a new all-time high that resets the peak and hides a real drawdown."""
+    """hist: [[ts, value, ccy], ...] or [[ts, value, ccy, cash, gpv], ...] (2026-07-27 added
+    the trailing cash/gpv fields for service.detect_external_cash_flow() -- `*_` below
+    absorbs either shape). flows: [[ts, amount, ccy], ...] (see service.py's equity_history
+    cash-flow logging). Returns hist's values with the cumulative net cash flow up to each
+    point subtracted, so the series reads as pure trading P&L -- deposits/withdrawals become
+    invisible instead of looking like gains. Shared by app.py's equity chart AND
+    current_drawdown_pct() below -- a deposit must never look like a new all-time high that
+    resets the peak and hides a real drawdown."""
     if not flows:
         return [h[1] for h in hist]
     flows_sorted = sorted(flows, key=lambda f: f[0])
     out = []
     fi, cum = 0, 0.0
-    for ts, val, _ccy in hist:
+    for ts, val, *_ in hist:
         while fi < len(flows_sorted) and flows_sorted[fi][0] <= ts:
             cum += flows_sorted[fi][1]
             fi += 1
@@ -388,7 +390,7 @@ def drawdown_series(hist: list, flows: list | None) -> list[float]:
     peak_adj = adj[0]
     peak_raw = hist[0][1]
     out = []
-    for v, (_ts, raw_v, _ccy) in zip(adj, hist):
+    for v, (_ts, raw_v, *_) in zip(adj, hist):
         if v > peak_adj:
             peak_adj = v
             peak_raw = raw_v

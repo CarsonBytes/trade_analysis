@@ -763,7 +763,7 @@ def _monthly_attribution() -> list[dict]:
     usd_per_ccy = ib_client._PEG_USD_PER.get(ccy, 1.0)
     adj = paper.deposit_adjusted_series(hist, flows)
     month_end_usd: dict[str, float] = {}
-    for (ts, _v, _c), av in zip(hist, adj):
+    for (ts, *_), av in zip(hist, adj):
         m = dt.datetime.fromtimestamp(ts).strftime("%Y-%m")
         month_end_usd[m] = av * usd_per_ccy   # last write per month wins (hist is ascending)
 
