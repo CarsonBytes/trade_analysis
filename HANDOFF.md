@@ -1,9 +1,67 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-25.
+Last updated 2026-07-27.
 
 ---
+
+### 🚨 2026-07-27: a real HKD 30,000 deposit was counted as trading profit -- 3-layer fix
+
+The monthly deposit landed on the LIVE account at 13:11 (NetLiq 102,120 -> 132,102 HKD) while
+9 ETF positions were open. `is_equity_jump_implausible()` only tightens its detection band
+while the account is FLAT (no open positions) -- with positions open it falls back to a wide
+0.5x-2.0x ratio band, and 132102/102120 = 1.29 sails straight through since magnitude alone
+can't distinguish a 29% deposit from a 29% market move (this was the exact hole the 2026-07-10
+fix to this same function warned about but didn't close). Result: the deposit was never
+written to `cash_flows`, and Total P&L displayed 32,071 HKD instead of the true 2,066 -- a
+15x overstatement.
+
+**Root cause, verified structurally, not just by magnitude:** `NetLiq = cash + GPV` holds
+exactly (confirmed against the live snapshot: 102,095.55 + 29,968.62 = 132,064.17). A deposit
+moves cash with no offsetting GPV move; a fill moves both, opposite ways, cancelling; a market
+move leaves cash untouched. This signature is size-independent and works with positions open,
+unlike magnitude.
+
+**Fix -- three layers, all shipped same day:**
+1. **Detection** (`service.py::detect_external_cash_flow()`): replaces the magnitude guess
+   with the cash-vs-GPV structural signature above. `equity_history` entries grew from
+   `[ts, val, ccy]` to `[ts, val, ccy, cash, gpv]`; legacy 3-field entries fall back to the old
+   magnitude heuristic (still useful for the flat case, kept as-is).
+2. **Cross-check** (`service.py::pnl_crosscheck()`): a genuinely independent second opinion --
+   deposit-adjusted equity change vs the trade journal's realized $ (`realized_r * risk_money`)
+   plus broker unrealized. A misbooked flow can't hide in both routes simultaneously. Shown as
+   a new "P&L check:" line in System Health, alerts on transition into divergence.
+3. **Manual backstop** (`app.py::_open_cash_flows()`): a "Cash flows" dialog to record/delete
+   entries by hand, with a "Detect from history" helper that scans for an unrecorded jump --
+   so a miss no longer requires editing SQLite directly (which is what today's correction
+   required, before this shipped).
+
+**Immediate correction:** backfilled the missing flow. Cross-referencing the account snapshot
+(`cash + GPV = NetLiq` exactly) showed the real deposit was precisely 30,000.00 HKD, not the
+29,981.95 the raw NetLiq delta implied -- the ~18 HKD difference was genuine market drift on
+the open book during the ~10min gap between snapshots, correctly left in P&L rather than
+folded into the deposit amount.
+
+**Self-inflicted regression, caught before real damage:** deploying the above took the LIVE
+dashboard down with a 500 immediately -- `equity_history`'s new 4th/5th fields broke 3 call
+sites that still did strict `for ts, val, _ccy in hist` tuple unpacking
+(`deposit_adjusted_series()`, `current_drawdown_pct()` -- which also feeds `ib_exec.py`'s
+DD_HALT_PCT live safety gate -- and `_monthly_attribution()`). Fixed by switching all three to
+`*_` (accepts either shape). Caught within the same redeploy-and-verify cycle (curl returned
+500 immediately), fixed, retested against the REAL live DB entry that triggered it, redeployed
+clean. Added regression tests feeding 5-field entries to both functions so a future
+`equity_history` shape change can't silently reintroduce this.
+
+**Verified end-to-end post-fix:** health banner shows "P&L check: agrees"; Total P&L reads a
+sane HKD 980 (+0.75%) instead of the inflated ~32k; Cash flows dialog shows all 3 real deposits
+including the backfilled 30,000. 12 new tests (detection cases, an exact reproduction of the
+incident via `pnl_crosscheck`, the unpacking regression), full suite green.
+
+**Standing lesson:** when extending a shared data structure's shape (here, `equity_history`
+tuples), grep for EVERY unpacking site across the whole repo, not just the ones in the file
+being edited -- `deposit_adjusted_series()` and `current_drawdown_pct()` live in `paper.py`,
+two files away from the `service.py` write site that changed the shape, and were only found by
+the crash itself, not by review.
 
 ### 🚨 2026-07-25: chatanywhere.tech API key silently dead (403) for ~9h, LLM board-scan fully down
 
