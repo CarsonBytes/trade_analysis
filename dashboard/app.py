@@ -351,6 +351,23 @@ def health_banner() -> None:
     else:
         rec_colour, rec_txt = "text-grey-5", "no check yet this session"
 
+    # ADDED 2026-07-27 (Layer 2): P&L cross-check -- see service.pnl_crosscheck(). This is the
+    # line that would have caught the 30,000 HKD deposit being booked as profit, within a tick.
+    xc = service.STATE.get("pnl_crosscheck") or {}
+    if xc.get("ok") is True:
+        xc_colour, xc_txt = "text-green", "agrees"
+    elif xc.get("ok") is False:
+        xc_colour, xc_txt = "text-red", f"diverged {xc['gap']:+,.0f} {xc['ccy']}"
+    else:
+        xc_colour, xc_txt = "text-grey-5", "not enough data"
+    xc_tooltip = (
+        "Two independent routes to the same number: deposit-adjusted equity change "
+        f"({xc.get('equity_pl', 0):+,.0f}) vs the trade journal's realized $ plus broker "
+        f"unrealized ({xc.get('trade_pl', 0):+,.0f}), tolerance {xc.get('tol', 0):,.0f} "
+        f"{xc.get('ccy', '')}. They should agree to within cash interest, dividends and FX. "
+        "A large gap usually means a deposit or withdrawal was counted as trading profit -- "
+        "record it via Cash flows to correct it.")
+
     with ui.row().classes("w-full items-center gap-4 bg-grey-1 rounded px-3 py-1"):
         ui.label("System health").classes("text-xs uppercase text-grey-7 font-bold")
         with ui.row().classes("items-baseline gap-1"):
@@ -370,6 +387,9 @@ def health_banner() -> None:
             rec_label = ui.label(rec_txt).classes(f"text-xs {rec_colour}")
             if rec_tooltip:
                 rec_label.tooltip(rec_tooltip)
+        with ui.row().classes("items-baseline gap-1"):
+            ui.label("P&L check:").classes("text-xs text-grey-6")
+            ui.label(xc_txt).classes(f"text-xs {xc_colour}").tooltip(xc_tooltip)
 
 
 @ui.refreshable
@@ -1848,6 +1868,129 @@ def _open_withdraw() -> None:
     dlg.open()
 
 
+def _find_unrecorded_jump() -> tuple[int, float] | None:
+    """(ts, amount) of the largest equity jump not already covered by a recorded cash flow,
+    or None. Backstop for Layer 1 (service.detect_external_cash_flow) -- used to pre-fill the
+    Cash flows dialog so a missed deposit can be corrected without hand-editing SQLite.
+    Deliberately compares against NetLiq deltas (not the cash signature) because legacy
+    history entries predating 2026-07-27 carry no cash/GPV to work from."""
+    from dashboard.core import store
+    hist, _ = store.cache_get("equity_history")
+    flows, _ = store.cache_get("cash_flows")
+    hist = hist or []
+    if len(hist) < 2:
+        return None
+    covered = [f[0] for f in (flows or [])]
+    best = None
+    for i in range(1, len(hist)):
+        ts, delta = hist[i][0], hist[i][1] - hist[i - 1][1]
+        # a flow recorded within 10min of the jump already accounts for it
+        if any(abs(ts - c) < 600 for c in covered):
+            continue
+        # only material moves are candidates -- same spirit as service.CASH_FLOW_MIN_*
+        if abs(delta) < max(1000.0, abs(hist[i][1]) * 0.02):
+            continue
+        if best is None or abs(delta) > abs(best[1]):
+            best = (ts, delta)
+    return best
+
+
+def _open_cash_flows() -> None:
+    """ADDED 2026-07-27 (Layer 3): record a deposit/withdrawal by hand. Layers 1 and 2 should
+    make this unnecessary, but on 2026-07-27 a real HKD 30,000 deposit WAS missed and the only
+    way to correct it was editing SQLite directly -- which is not something this dashboard
+    should ever require. Deposits are not trading profit; anything recorded here is netted out
+    of Total P&L, the equity chart, and the drawdown-from-peak baseline."""
+    from dashboard.core import store, paper
+    acct = service.STATE.get("account") or {}
+    ccy = acct.get("_ccy", "")
+
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[560px] gap-2"):
+        ui.label("Cash flows — deposits & withdrawals").classes("text-lg font-bold")
+        ui.label("Money moving IN or OUT of the account is not trading profit. Anything "
+                 "recorded here is excluded from Total P&L, the equity chart and the "
+                 "drawdown baseline.").classes("text-xs text-grey-7")
+
+        flows, _ = store.cache_get("cash_flows")
+        flows = list(flows or [])
+        body = ui.column().classes("w-full gap-1")
+
+        def _render_list() -> None:
+            body.clear()
+            cur, _ = store.cache_get("cash_flows")
+            with body:
+                if not cur:
+                    ui.label("Nothing recorded yet.").classes("text-sm text-grey-6")
+                    return
+                for f in sorted(cur, key=lambda x: x[0]):
+                    with ui.row().classes("items-center gap-2 w-full"):
+                        ui.label(dt.datetime.fromtimestamp(f[0]).strftime("%Y-%m-%d %H:%M"))\
+                            .classes("text-xs text-grey-7 font-mono")
+                        ui.label(f"{f[1]:+,.2f} {f[2]}").classes(
+                            "text-sm font-bold " + ("text-green" if f[1] > 0 else "text-red"))
+                        ui.space()
+                        ui.button(icon="delete", on_click=lambda ff=f: _delete(ff))\
+                            .props("flat dense round size=sm").tooltip("remove this record")
+
+        def _persist(new_flows: list) -> None:
+            store.cache_set("cash_flows", sorted(new_flows, key=lambda x: x[0])[-500:])
+            _render_list()
+            portfolio_panel.refresh(); health_banner.refresh(); retrospective_panel.refresh()
+
+        def _delete(f) -> None:
+            cur, _ = store.cache_get("cash_flows")
+            _persist([x for x in (cur or []) if not (x[0] == f[0] and x[1] == f[1])])
+            ui.notify(f"Removed {f[1]:+,.2f} {f[2]}")
+
+        ui.separator()
+        ui.label("Recorded").classes("text-xs uppercase text-grey-6")
+        _render_list()
+
+        ui.separator()
+        ui.label("Add").classes("text-xs uppercase text-grey-6")
+        amt = ui.number(f"Amount ({ccy})", value=0, step=1000).props("dense outlined")\
+            .classes("w-full")\
+            .tooltip("positive = deposit into the account, negative = withdrawal out of it")
+        when = ui.input("When (YYYY-MM-DD HH:MM)",
+                        value=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))\
+            .props("dense outlined").classes("w-full")\
+            .tooltip("Should match when the money actually landed, so the equity chart and "
+                     "drawdown baseline are corrected from that point onward -- not just today")
+        hint = ui.label("").classes("text-xs text-orange")
+
+        def _detect() -> None:
+            found = _find_unrecorded_jump()
+            if not found:
+                hint.set_text("No unrecorded jump found in the tracked history.")
+                return
+            ts, delta = found
+            amt.set_value(round(delta, 2))
+            when.set_value(dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"))
+            hint.set_text(f"Found an unexplained {delta:+,.0f} {ccy} move — check the amount "
+                          "against your bank/IBKR record before saving (this is the NetLiq "
+                          "delta, so it may include a little market drift).")
+
+        def _add() -> None:
+            try:
+                ts = int(dt.datetime.strptime(when.value.strip(), "%Y-%m-%d %H:%M").timestamp())
+            except ValueError:
+                ui.notify("Date must look like 2026-07-27 13:11", type="warning"); return
+            if not amt.value:
+                ui.notify("Amount can't be zero.", type="warning"); return
+            cur, _ = store.cache_get("cash_flows")
+            _persist(list(cur or []) + [[ts, round(float(amt.value), 2), ccy]])
+            ui.notify(f"Recorded {float(amt.value):+,.2f} {ccy}")
+            amt.set_value(0); hint.set_text("")
+
+        with ui.row().classes("items-center gap-2 w-full"):
+            ui.button("Detect from history", icon="search", on_click=_detect).props("flat")\
+                .tooltip("Scan the equity history for a large move not already recorded here")
+            ui.space()
+            ui.button("Add", icon="add", on_click=_add).props("color=primary")
+            ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+
+
 def _kill_and_relaunch_gateway() -> None:
     """Force-kill a stuck IB Gateway process tree and relaunch it hidden via IBC.
     Needed because a gateway that timed out mid-2FA can sit alive but unauthenticated
@@ -2257,6 +2400,9 @@ def main_page() -> None:
                 ui.button("Withdraw", icon="savings", on_click=_open_withdraw).props("flat")\
                     .tooltip("Prepare a cash withdrawal from SGOV/cash shield first (never Core); "
                              "you still transfer the money manually in IBKR")
+            ui.button("Cash flows", icon="account_balance", on_click=_open_cash_flows).props("flat")\
+                .tooltip("Record a deposit/withdrawal by hand -- e.g. if a monthly contribution "
+                         "wasn't auto-detected and is being shown as trading profit")
             ui.button("Restart", icon="restart_alt", on_click=_confirm_restart)\
                 .props("flat color=negative")\
                 .tooltip("exit the app so the watchdog relaunches it fresh (~10s); "

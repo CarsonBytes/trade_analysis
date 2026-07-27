@@ -5,9 +5,12 @@ self-heal and the account-summary confirm-then-accept guard. Run:
 from __future__ import annotations
 
 import datetime as dt
+import os
+import tempfile
 
 from dashboard.web.service import (heal_series, is_nl_implausible, pending_confirms,
-                                   is_equity_jump_implausible, reconcile_due)
+                                   is_equity_jump_implausible, reconcile_due,
+                                   hist_cash_gpv, detect_external_cash_flow)
 
 _fails = []
 
@@ -139,12 +142,165 @@ def test_reconcile_due():
           reconcile_due(now - dt.timedelta(seconds=601), now), True)
 
 
+# ADDED 2026-07-27: a real HKD 30,000 monthly deposit landed on the LIVE account while 9 ETF
+# positions were open and was counted as trading profit (P&L displayed 32,071 HKD vs a true
+# 2,066 -- a 15x overstatement). is_equity_jump_implausible() only tightens its band while
+# FLAT (no open positions) -- with positions open it falls back to a wide 0.5x-2.0x ratio band,
+# and 132102/102120=1.29 sails straight through since magnitude alone can't distinguish a 29%
+# deposit from a 29% market move. detect_external_cash_flow() replaces magnitude with the
+# structural cash-vs-position-value signature (NetLiq = cash + GPV, verified exactly against
+# the live account: 102,095.55 + 29,968.62 = 132,064.17), which works regardless of position
+# state. See service.py's case table for the full reasoning.
+def test_hist_cash_gpv():
+    print("hist_cash_gpv():")
+    check("legacy 3-field entry (pre-2026-07-27) -> (None, None), not (0, 0)",
+          hist_cash_gpv([1785129096, 132101.90, "HKD"]), (None, None))
+    check("new 5-field entry -> (cash, gpv)",
+          hist_cash_gpv([1785129096, 132101.90, "HKD", 29968.62, 102079.09]),
+          (29968.62, 102079.09))
+
+
+def test_detect_external_cash_flow():
+    print("\ndetect_external_cash_flow():")
+    # THE REAL 2026-07-27 INCIDENT, reproduced exactly from the live snapshot
+    got = detect_external_cash_flow(-31.38, 102079.0, 29968.62, 102079.0, 132047.86)
+    approx("real deposit case: cash -31.38 -> 29968.62, gpv unchanged -> +30000", got, 30000.0, tol=0.01)
+    check("withdrawal: cash drops, gpv unchanged -> negative flow",
+          detect_external_cash_flow(30000.0, 102000.0, 10000.0, 102000.0, 112000.0), -20000.0)
+    check("buy fill: cash down, gpv up by the same amount -> None (not an external flow)",
+          detect_external_cash_flow(30000.0, 102000.0, 10000.0, 122000.0, 132000.0), None)
+    check("sell fill: cash up, gpv down by the same amount -> None",
+          detect_external_cash_flow(10000.0, 122000.0, 30000.0, 102000.0, 132000.0), None)
+    check("market move only: cash untouched -> None (this IS trading P&L)",
+          detect_external_cash_flow(29968.0, 102000.0, 29968.0, 104040.0, 134008.0), None)
+    check("small dividend-sized cash bump -> None (below the noise floor, stays in P&L)",
+          detect_external_cash_flow(29968.0, 102000.0, 30468.0, 102000.0, 132468.0), None)
+    check("legacy entry (cash/gpv unknown) -> None (caller must fall back to the magnitude check)",
+          detect_external_cash_flow(None, None, 29968.62, 102079.0, 132047.86), None)
+    # Documents WHY layer 1 exists: the OLD magnitude-only heuristic really did miss this.
+    check("regression check: the pre-existing magnitude heuristic missed this exact deposit",
+          is_equity_jump_implausible(132101.90, 102119.95, 90000.0), False)
+
+
+def _isolated_db():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    return old, path
+
+
+def _restore_db(old, path):
+    if old is None:
+        os.environ.pop("DASH_DB_NAME", None)
+    else:
+        os.environ["DASH_DB_NAME"] = old
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _insert_closed_trade(c, realized_r=3.0, risk_money=1000.0):
+    c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, entry, sl, "
+             "tp, rr, size_units, status, exit_ts, exit_price, realized_r) VALUES "
+             "(1,'2026-07-01T00:00:00','SPY','long','ATR rr3.0',400,390,430,3.0,10,'WIN',"
+             f"'2026-07-10T00:00:00',430,{realized_r})")
+    c.execute("INSERT INTO ib_mirror VALUES "
+             f"(1,0,111,'SPY',10.0,{risk_money},'','2026-07-01T00:00:00','CLOSED','')")
+
+
+def test_pnl_crosscheck_agrees_when_clean():
+    print("\npnl_crosscheck(): equity route and trade route agree on an ordinary, "
+          "correctly-recorded history:")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        from dashboard.core import paper, store
+        from dashboard.execution import ib_exec   # local import: creates the ib_mirror table
+        from dashboard.web import service
+        with paper._LOCK, paper._conn():
+            pass                                    # ensures paper_trades exists first
+        with paper._LOCK, ib_exec._conn() as c:
+            _insert_closed_trade(c, realized_r=3.0, risk_money=1000.0)   # +3000 USD realized
+        store.cache_set("equity_history", [[1000, 100000.0, "USD"], [2000, 103000.0, "USD"]])
+        store.cache_set("cash_flows", [])
+        service.STATE["account"] = {"NetLiquidation": 103000.0, "_ccy": "USD"}
+        service.STATE["positions"] = {}
+        result = service.pnl_crosscheck()
+        check("ok is True", result["ok"], True)
+        approx("equity_pl", result["equity_pl"], 3000.0)
+        approx("trade_pl", result["trade_pl"], 3000.0)
+        approx("gap ~0", result["gap"], 0.0, tol=0.01)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+
+
+def test_pnl_crosscheck_flags_unrecorded_deposit():
+    print("\npnl_crosscheck(): reproduces the REAL 2026-07-27 incident -- an unrecorded "
+          "30,000 deposit makes the equity route diverge sharply from the trade route:")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        from dashboard.core import paper, store
+        from dashboard.execution import ib_exec
+        from dashboard.web import service
+        with paper._LOCK, paper._conn():
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            _insert_closed_trade(c, realized_r=3.0, risk_money=1000.0)   # trade route: +3000
+        # equity jumped +33000 total, but the deposit was NEVER logged to cash_flows -- exactly
+        # what happened live (the deposit landed, is_equity_jump_implausible() didn't flag it
+        # because positions were open, so nothing ever wrote it to cash_flows)
+        store.cache_set("equity_history", [[1000, 100000.0, "USD"], [2000, 133000.0, "USD"]])
+        store.cache_set("cash_flows", [])
+        service.STATE["account"] = {"NetLiquidation": 133000.0, "_ccy": "USD"}
+        service.STATE["positions"] = {}
+        result = service.pnl_crosscheck()
+        check("ok is False -- the divergence is caught", result["ok"], False)
+        approx("equity_pl (inflated by the missed deposit)", result["equity_pl"], 33000.0)
+        approx("trade_pl (unaffected -- correctly excludes the deposit)", result["trade_pl"], 3000.0)
+        approx("gap equals exactly the missed deposit", result["gap"], 30000.0)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+
+
+def test_pnl_crosscheck_not_enough_data():
+    print("\npnl_crosscheck(): no funded trades yet -> ok is None (can't judge), not a "
+          "false positive on a brand-new account:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper, store
+        from dashboard.web import service
+        with paper._LOCK, paper._conn():
+            pass
+        store.cache_set("equity_history", [[1000, 100000.0, "USD"], [2000, 100000.0, "USD"]])
+        store.cache_set("cash_flows", [])
+        service.STATE["account"] = {"NetLiquidation": 100000.0, "_ccy": "USD"}
+        service.STATE["positions"] = {}
+        result = service.pnl_crosscheck()
+        check("ok is None", result["ok"], None)
+    finally:
+        _restore_db(old, path)
+
+
 if __name__ == "__main__":
     for t in (test_heal_series_bracketed_zero_spike, test_heal_series_real_sustained_jump_kept,
               test_heal_series_unresolved_anomaly_left_alone,
               test_heal_series_normal_fluctuations_untouched,
               test_heal_series_empty_and_singleton, test_is_nl_implausible,
-              test_pending_confirms, test_is_equity_jump_implausible, test_reconcile_due):
+              test_pending_confirms, test_is_equity_jump_implausible, test_reconcile_due,
+              test_hist_cash_gpv, test_detect_external_cash_flow,
+              test_pnl_crosscheck_agrees_when_clean,
+              test_pnl_crosscheck_flags_unrecorded_deposit,
+              test_pnl_crosscheck_not_enough_data):
         t()
     print()
     if _fails:

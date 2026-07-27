@@ -23,6 +23,7 @@ from dashboard.data.providers import get_ohlc
 from dashboard.core import store
 from dashboard.core import paper
 from dashboard.core import journal
+from dashboard.core import notable_events
 from dashboard.core import sleeve
 from dashboard.execution import executor
 from dashboard.execution import broker          # BROKER-aware dispatch (mt5 executor | ib_exec)
@@ -48,6 +49,8 @@ STATE: dict = {
     "cap": 200,
     "shared_calls_today": 0,       # cross-project (quant+study+events) usage of the shared key
     "shared_calls_by_project": {},
+    "pnl_crosscheck": {},          # Layer 2 (2026-07-27): equity-route vs trade-route P&L
+                                   # agreement -- see pnl_crosscheck()
 }
 
 
@@ -167,6 +170,126 @@ def is_equity_jump_implausible(new_val: float, prev_val: float, gpv: float | Non
         noise_band = max(100.0, prev_val * 0.005)   # generous vs typical interest/FX noise
         return abs(new_val - prev_val) > noise_band
     return not (0.5 <= new_val / prev_val <= 2.0)
+
+
+# ---- external cash-flow detection (deposits/withdrawals) -------------------
+# ADDED 2026-07-27, after a real HKD 30,000 monthly deposit landed on the LIVE account
+# while 9 ETF positions were open and was counted as trading profit (P&L displayed 32,071
+# HKD vs a true 2,066 -- a 15x overstatement). is_equity_jump_implausible() above only
+# tightens its band when the account is FLAT; with positions open it falls back to the wide
+# 0.5x-2.0x ratio band, and 132102/102120 = 1.29 sails straight through. Magnitude alone
+# CANNOT work here -- with positions open, a 29% deposit and a 29% market move are
+# indistinguishable by size.
+#
+# The structural signature is unambiguous, because NetLiq = cash + GPV holds exactly
+# (verified against the live account: 102,095.55 + 29,968.62 = 132,064.17):
+#
+#   event         | d_cash | d_gpv  | discriminator
+#   --------------|--------|--------|----------------------------------------
+#   deposit       |  +X    |  ~0    | cash moves, positions don't
+#   withdrawal    |  -X    |  ~0    | cash moves, positions don't
+#   buy fill      |  -X    |  +X    | cash <-> positions, they cancel
+#   sell fill     |  +X    |  -X    | cash <-> positions, they cancel
+#   market move   |   0    |  +/-   | cash untouched
+#
+# So: cash must move materially (rules out market moves), AND the move must not be
+# cancelled by an opposite GPV move (rules out our own fills). Size-independent -- catches
+# a 3k deposit as reliably as a 30k one.
+CASH_FLOW_MIN_ABS = 1000.0    # floor: below this it's dividends/interest/commission noise,
+CASH_FLOW_MIN_PCT = 0.005     # ...or 0.5% of NetLiq, whichever is LARGER. Deliberately set
+                              # above a plausible quarterly dividend credit (~500 HKD on a
+                              # ~100k book): a dividend is genuine strategy return and must
+                              # stay in P&L, NOT be netted out as if it were a deposit.
+                              # Layer 2 (broker P&L cross-check) catches whatever slips past.
+
+
+def hist_cash_gpv(entry) -> tuple[float | None, float | None]:
+    """(cash, gpv) from an equity_history entry. Returns (None, None) for the legacy
+    3-field [ts, netliq, ccy] entries written before 2026-07-27 -- callers must treat that
+    as "can't run the structural check here" and fall back to the magnitude heuristic,
+    NOT as "cash was zero"."""
+    if len(entry) >= 5 and entry[3] is not None and entry[4] is not None:
+        return float(entry[3]), float(entry[4])
+    return None, None
+
+
+def detect_external_cash_flow(prev_cash, prev_gpv, new_cash, new_gpv, netliq,
+                              tol: float | None = None) -> float | None:
+    """The signed external flow (+deposit / -withdrawal) between two account snapshots, or
+    None if this looks like ordinary trading/market movement. See the case table above.
+
+    Returns the CASH delta (not the NetLiq delta) when no simultaneous fill is detected, so
+    the amount excludes market drift on open positions -- verified on the 2026-07-27 deposit:
+    cash-derived gives exactly 30,000.00, while the NetLiq delta gives 29,981.95 (the -18.05
+    difference is real position drift over the 10-min snapshot window, which belongs in P&L,
+    not folded into the deposit)."""
+    if None in (prev_cash, prev_gpv, new_cash, new_gpv):
+        return None                       # legacy entry / broker didn't report the fields
+    if tol is None:
+        tol = max(CASH_FLOW_MIN_ABS, abs(netliq or 0.0) * CASH_FLOW_MIN_PCT)
+    d_cash = new_cash - prev_cash
+    d_gpv = new_gpv - prev_gpv
+    if abs(d_cash) <= tol:
+        return None                       # market-only move: cash untouched
+    if abs(d_gpv) <= tol:
+        return d_cash                     # no fill -- the cash change IS the external money
+    external = d_cash + d_gpv             # a fill moves cash and GPV opposite ways; they
+    if abs(external) <= tol:              # cancel, leaving only outside money behind
+        return None                       # ...nothing left over: it was purely a trade
+    return external
+
+
+# ---- Layer 2: independent P&L cross-check ---------------------------------
+# ADDED 2026-07-27 alongside detect_external_cash_flow(). Layer 1 is still a heuristic on
+# broker-reported balances; this is a genuinely INDEPENDENT second opinion, reached by a
+# different route entirely, so a misbooked cash flow can't hide in both at once.
+#
+#   equity route (what the dashboard shows) : deposit-adjusted NetLiq change since tracking
+#   trade route  (rebuilt from the journal)  : sum(closed trades' realized $) + broker unrealized
+#
+# These should agree to within cash interest + dividends + FX drift. A deposit wrongly booked
+# as profit inflates ONLY the equity route -- on 2026-07-27 that was a 30,000 HKD gap on a
+# 132k account (23%), which this would have surfaced within one tick.
+PNL_CROSSCHECK_MIN_ABS = 5000.0    # base-ccy floor; below this the gap is ordinary
+PNL_CROSSCHECK_MIN_PCT = 0.05      # interest/dividend/FX accumulation, not a misbooking
+
+
+def pnl_crosscheck() -> dict:
+    """{"ok", "gap", "equity_pl", "trade_pl", "ccy", "tol"} -- or {"ok": None, ...} when
+    there isn't enough data to judge (no history, no broker positions, no risk_money rows).
+    Never raises: this is a monitoring aid, and a failure here must not disturb a tick."""
+    out = {"ok": None, "gap": 0.0, "equity_pl": 0.0, "trade_pl": 0.0, "ccy": "", "tol": 0.0}
+    try:
+        from dashboard.data import ib_client
+        acct = STATE.get("account") or {}
+        nl, ccy = acct.get("NetLiquidation"), acct.get("_ccy", "")
+        hist, _ = store.cache_get("equity_history")
+        flows, _ = store.cache_get("cash_flows")
+        if not hist or len(hist) < 2 or nl is None:
+            return out
+        usd_to_base = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)
+        adj = paper.deposit_adjusted_series(hist, flows)
+        equity_pl = adj[-1] - adj[0]                       # base ccy, deposits netted out
+
+        # trade route: realized (journal x actual $ risked) + unrealized (broker truth)
+        with paper._LOCK, paper._conn() as c:
+            risk_by_id = dict(c.execute(
+                f"SELECT paper_id, risk_money FROM {broker.mirror_table()}").fetchall())
+        if not risk_by_id:
+            return out                                     # nothing funded yet -- can't judge
+        realized_usd = sum(t["realized_r"] * risk_by_id[t["id"]]
+                           for t in paper.all_trades()
+                           if t["status"] != "OPEN" and t["id"] in risk_by_id)
+        unrealized_usd = sum(p.get("profit", 0.0) for p in (STATE.get("positions") or {}).values())
+        trade_pl = (realized_usd + unrealized_usd) * usd_to_base
+
+        gap = equity_pl - trade_pl
+        tol = max(PNL_CROSSCHECK_MIN_ABS, abs(nl) * PNL_CROSSCHECK_MIN_PCT)
+        out.update({"ok": abs(gap) <= tol, "gap": gap, "equity_pl": equity_pl,
+                    "trade_pl": trade_pl, "ccy": ccy, "tol": tol})
+    except Exception as e:                                 # noqa: BLE001
+        log.debug("pnl_crosscheck error: %s", e)
+    return out
 
 
 def refresh_cheap() -> None:
@@ -291,8 +414,22 @@ def refresh_cheap() -> None:
             # account is big enough -- letting a real deposit get counted as fake trading P&L.
             # is_equity_jump_implausible() tightens this to catch ANY unexplained change while
             # flat (no open positions -- see its docstring).
-            implausible = bool(hist) and is_equity_jump_implausible(
-                new_val, hist[-1][1], acct.get("GrossPositionValue"))
+            # Root-caused a FIFTH time 2026-07-27: that 07-10 fix only closed the FLAT case;
+            # with positions open (the normal state -- this account holds 9-10 ETFs
+            # continuously) a real HKD 30,000 deposit still sailed through the wide ratio band
+            # and was booked as profit. detect_external_cash_flow() replaces the magnitude
+            # guess with the structural cash-vs-position-value signature (see its case table),
+            # which is size-independent and works with positions open. The magnitude heuristic
+            # stays as a FALLBACK for legacy history entries that predate cash/GPV being
+            # recorded, and for any broker that doesn't report those fields.
+            _ccy = acct.get("_ccy", "")
+            _cash, _gpv = acct.get("TotalCashValue"), acct.get("GrossPositionValue")
+            _prev_cash, _prev_gpv = hist_cash_gpv(hist[-1]) if hist else (None, None)
+            ext_flow = (detect_external_cash_flow(_prev_cash, _prev_gpv, _cash, _gpv, new_val)
+                        if hist else None)
+            implausible = bool(hist) and (
+                ext_flow is not None
+                or is_equity_jump_implausible(new_val, hist[-1][1], _gpv))
             if implausible:
                 pending, _pts = store.cache_get("equity_pending_jump")
                 _pv = pending.get("val") if pending else None
@@ -303,14 +440,22 @@ def refresh_cheap() -> None:
                                           else new_val == 0)):
                     flows, _fts = store.cache_get("cash_flows")
                     flows = flows or []
-                    flows.append([now_s, new_val - hist[-1][1], acct.get("_ccy", "")])
+                    # Prefer the cash-derived amount -- it isolates the external money and
+                    # leaves market drift in P&L where it belongs (see the function docstring).
+                    amount = ext_flow if ext_flow is not None else (new_val - hist[-1][1])
+                    flows.append([now_s, round(amount, 2), _ccy])
                     store.cache_set("cash_flows", flows[-500:])
-                    hist.append([now_s, new_val, acct.get("_ccy", "")])
+                    hist.append([now_s, new_val, _ccy, _cash, _gpv])
                     store.cache_set("equity_history", hist[-3000:])
                     store.cache_set("equity_pending_jump", None)
                     log.warning("equity_history: CONFIRMED sustained jump %.2f -> %.2f -- "
-                               "recorded as a cash flow, not P&L", hist[-2][1] if len(hist) > 1
-                               else 0.0, new_val)
+                               "recorded %+.2f as a cash flow (%s), not P&L",
+                               hist[-2][1] if len(hist) > 1 else 0.0, new_val, amount,
+                               "cash signature" if ext_flow is not None else "magnitude fallback")
+                    notable_events.record(
+                        f"cash flow {amount:+,.2f} {_ccy} detected and excluded from P&L "
+                        f"({'cash signature' if ext_flow is not None else 'magnitude fallback'})",
+                        level="info")
                 else:
                     store.cache_set("equity_pending_jump", {"val": new_val, "ts": now_s})
                     log.warning("equity_history: implausible snapshot %.2f (prev %.2f) -- "
@@ -318,7 +463,7 @@ def refresh_cheap() -> None:
             else:
                 store.cache_set("equity_pending_jump", None)  # back to normal: clear any pending
                 if not hist or now_s - hist[-1][0] >= 600:
-                    hist.append([now_s, new_val, acct.get("_ccy", "")])
+                    hist.append([now_s, new_val, _ccy, _cash, _gpv])
                     store.cache_set("equity_history", hist[-3000:])
     except Exception as e:
         log.debug("equity_history error: %s", e)
@@ -328,6 +473,22 @@ def refresh_cheap() -> None:
                     STATE["conn"]["ping_ms"])
     STATE["calls_today"] = store.calls_today()
     _calibrate_mt5_offset()
+    # Layer 2 (2026-07-27): independent P&L cross-check -- see pnl_crosscheck(). Runs on the
+    # cheap-refresh cadence (all local reads: SQLite + STATE, no broker round-trip), and
+    # alerts ONCE per transition into a divergent state rather than every tick.
+    try:
+        _xc = pnl_crosscheck()
+        _was_ok = (STATE.get("pnl_crosscheck") or {}).get("ok")
+        STATE["pnl_crosscheck"] = _xc
+        if _xc["ok"] is False and _was_ok is not False:
+            notable_events.record(
+                f"P&L cross-check DIVERGED: equity route {_xc['equity_pl']:+,.0f} vs trade "
+                f"route {_xc['trade_pl']:+,.0f} {_xc['ccy']} (gap {_xc['gap']:+,.0f}, "
+                f"tolerance {_xc['tol']:,.0f}) -- most likely an unrecorded deposit/withdrawal "
+                f"being counted as trading profit; check the Cash flows dialog",
+                level="warning")
+    except Exception as e:                                 # noqa: BLE001
+        log.debug("pnl_crosscheck wiring error: %s", e)
     STATE["last_cheap"] = _now()
     live = STATE["live"]
     n_mt5 = sum(1 for v in live.values() if v.get("src") == "mt5-tick")
