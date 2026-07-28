@@ -90,15 +90,22 @@ CONVICTION_SIZE: bool = False    # --conviction-size: scale risk by 20d-momentum
                                  # itself has zero variance among gate-passing trades (MIN_STRENGTH
                                  # ==5 is the max), so this uses the continuous signal underlying
                                  # it instead. No look-ahead: uses only the entry bar's own facts.
-RET_FILTER: bool = False        # --ret-filter (2026-07-28): require BOTH 5d and 20d returns to
-                                 # agree with direction before entry, checked fresh each bar (no
-                                 # look-ahead -- same facts already computed for this bar's score).
-                                 # NOTE: the 20d leg is already implicit in score_from_facts()'s
-                                 # own BUY/SELL classification (`mom20 > 0` for a BUY, `< 0` for a
-                                 # SELL is REQUIRED before signal ever reaches "BUY"/"SELL" at
-                                 # all) -- so this flag's only genuinely NEW constraint is the 5d
-                                 # leg. Kept explicit (checking both) rather than assuming the 20d
-                                 # redundancy holds forever, since score_from_facts() could change.
+RET_FILTER_DAYS: int | None = None    # --ret-filter-days N: require the return over the last N
+                                 # CALENDAR days (not bars) to also agree with direction before
+                                 # entry, on top of the 20-BAR leg score_from_facts() already
+                                 # implicitly requires (mom20>0 gates BUY, <0 gates SELL before a
+                                 # signal ever reaches "BUY"/"SELL" at all). Computed by DATE
+                                 # lookback (_return_over_days below), not close.pct_change(N) --
+                                 # this system scores on native WEEKLY bars (live and
+                                 # --longweekly backtest both, see providers.py::get_history()),
+                                 # so compute_facts()'s "5d"/"20d" fields are actually 5-BAR/20-BAR
+                                 # (~5-week/~20-week, i.e. ~35/~140 CALENDAR days) returns --
+                                 # mislabeled as calendar days throughout (including in the LLM's
+                                 # own rationale text). 2026-07-28: first tried the mislabeled 5-
+                                 # BAR leg (~35 real days) as --ret-filter -- REJECTED (see
+                                 # HANDOFF, worse on every OOS dimension). This flag instead lets
+                                 # a genuinely calendar-day-accurate lookback be tested (e.g. 60,
+                                 # 90 real days), independent of bar frequency.
 CONVICTION_LO, CONVICTION_HI = 0.85, 1.15     # risk multiplier band (matches the class-tilt
                                               # test's magnitude for a comparable result)
 CONVICTION_MOM_LO, CONVICTION_MOM_HI = 0.03, 0.10   # 20d |momentum| mapped linearly to the band
@@ -106,6 +113,19 @@ CONVICTION_MOM_LO, CONVICTION_MOM_HI = 0.03, 0.10   # 20d |momentum| mapped line
 CLUSTER: bool = False            # --cluster: de-correlate by ASSET CLASS (one open
                                  # position per metal/index/rate) -- caps correlated risk
                                  # (the legacy _risk_buckets is empty for futures/ETF keys)
+
+
+def _return_over_days(df: pd.DataFrame, i: int, days: int) -> float:
+    """Genuine CALENDAR-day return ending at bar i, no look-ahead -- finds the closest bar
+    at-or-before (date[i] - days) by DATE, not by bar count, so it means the same real-world
+    window regardless of bar frequency (weekly bars here -- see RET_FILTER_DAYS). NaN if there
+    isn't enough history yet to look back that far."""
+    target = df.index[i] - pd.Timedelta(days=days)
+    idx = df.index[: i + 1].searchsorted(target, side="right") - 1
+    if idx < 0:
+        return float("nan")
+    base = df["close"].iloc[idx]
+    return (df["close"].iloc[i] / base - 1.0) if base else float("nan")
 
 
 def _adx(df, n=14):
@@ -181,11 +201,10 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                 (direction == "long" and rsi > paper.OVEREXT_HI) or
                 (direction == "short" and rsi < paper.OVEREXT_LO)):
             i += 1; continue
-        if RET_FILTER:
-            ret5, ret20 = facts["returns"].get("5d"), facts["returns"].get("20d")
-            agrees = (lambda r: r is not None and r == r and
-                     (r > 0 if direction == "long" else r < 0))
-            if not (agrees(ret5) and agrees(ret20)):
+        if RET_FILTER_DAYS is not None:
+            ret_n = _return_over_days(df, i, RET_FILTER_DAYS)
+            ok_n = ret_n == ret_n and (ret_n > 0 if direction == "long" else ret_n < 0)
+            if not ok_n:
                 i += 1; continue
         if reentry_gate and last_loss_direction == direction:
             bars_since_loss = i - last_loss_exit_i
@@ -786,14 +805,16 @@ def main():
                     help="scale risk by 20d-momentum magnitude WITHIN the already-qualifying "
                          "strength==5 band (0.85x-1.15x) -- strength itself has zero variance "
                          "among gate-passing trades")
-    ap.add_argument("--ret-filter", action="store_true",
-                    help="require BOTH 5d and 20d returns to agree with direction before entry "
-                         "(the 20d leg is already implicit in score_from_facts(); this adds a "
-                         "genuinely new 5d requirement)")
+    ap.add_argument("--ret-filter-days", type=int, default=None, metavar="N",
+                    help="require the return over the last N CALENDAR days to agree with "
+                         "direction before entry (date-based lookback, not bar count -- see "
+                         "RET_FILTER_DAYS docstring for why that distinction matters on "
+                         "weekly bars)")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT, RET_FILTER
-    if args.ret_filter:
-        RET_FILTER = True
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT, RET_FILTER_DAYS
+    if args.ret_filter_days is not None:
+        RET_FILTER_DAYS = args.ret_filter_days
+        print(f"[RET-FILTER: require the {RET_FILTER_DAYS}-calendar-day return to agree with direction]")
     if args.meanrev_budget is not None:
         MR_RISK_MULT = args.meanrev_budget
         args.meanrev_blend = True

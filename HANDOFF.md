@@ -43,6 +43,61 @@ and the pending-signal re-check in `ib_exec.py` were deliberately NOT modified, 
 building the "dynamic re-check for pending trades" half of the original ask on top of a
 filter the backtest just showed destroys edge would only compound the mistake.
 
+### 🔬 FOLLOW-UP 2026-07-28: same idea with genuine calendar-day windows (60d, 90d) -- MIXED, not adopted
+
+Correction found while building this: the system scores on native WEEKLY bars (live AND
+`--longweekly` backtest both -- see `providers.py::get_history()`), so `compute_facts()`'s
+"5d"/"20d" fields are actually 5-BAR/20-BAR (~5-week/~20-week, ~35/~140 CALENDAR days)
+returns -- mislabeled as calendar days throughout, including in the LLM's own rationale text
+("20d +14.3%" is really a ~140-day figure). The rejected test above was really testing a
+~35-day leg, not literally 5 days. Re-implemented as `--ret-filter-days N` with a genuine
+DATE-based lookback (`_return_over_days()`, independent of bar frequency) and tried real 60-
+and 90-calendar-day windows:
+
+| | Baseline | 60d | 90d |
+|---|---|---|---|
+| Signals | 1,293 | 1,091 | 1,189 |
+| Expectancy | +0.299R | +0.301R | **+0.316R** |
+| Profit factor | 1.58 | 1.58 | **1.62** |
+| Full CAGR @0.5% | +5.6% | +4.7% | +5.4% |
+| Full maxDD @0.5% | −12.3% | −10.3% | **−10.1%** |
+| Full CAGR/DD ratio | 0.455 | 0.456 | **0.535** |
+| OOS CAGR | +13.9% | +10.7% | +12.5% |
+| OOS maxDD | −6.9% | −8.8% | −7.5% |
+| OOS expR | +0.406 | +0.368 | +0.389 |
+
+60d is a wash-to-worse, same shape as the rejected 35d leg. 90d is genuinely more interesting:
+full-history expectancy, profit factor, maxDD, and CAGR/DD ratio all IMPROVE -- but OOS expR
+and OOS CAGR are both still below baseline. DSR at n_trials=3 (correcting for the 3 lookback
+windows tried: 35d/60d/90d) stays 100% either way -- not informative here, the sample (n≈1200
+full-history, n≈750 OOS) is just too large for DSR to discriminate between these variants; it
+only confirms the underlying edge itself isn't noise, not that 90d specifically beats
+baseline. **Does not clear this project's own adoption bar** (established for exit/re-entry-
+gate research: must beat baseline on OOS expR, OOS CAGR/DD, AND IS CAGR/DD -- 90d fails the
+OOS expR leg). **Not adopted**, but flagged as the most promising variant in this family, not
+a clean rejection like 35d/60d -- worth revisiting if the case needs strengthening (e.g. a
+proper walk-forward re-selection rather than one fixed 60/40 IS/OOS split). Kept as
+`--ret-filter-days N`, off by default.
+
+**Checked against the actual QQQ trade this whole investigation started from** (entry
+2026-07-17, using the same-week bar the live system itself used): 35d return **−3.50%**, 60d
+**−1.81%**, 90d **+7.28%**, 140d(~20-bar) **+14.77%**. So the 35d/60d filters (both net-harm
+the book) WOULD have blocked this specific entry; the 90d filter (the only variant with a
+genuine full-history case) would NOT have -- QQQ's longer trend was still real. No filter
+that's actually shown to help would have stopped this trade.
+
+**Separately confirmed while checking this trade's sizing**: `entry_facts` shows QQQ's ATR at
+entry was 20.41 vs its own 60-bar median of 11.37 -- 1.8x its typical range, matching the
+LLM's repeated "elevated realized vol" flag. The existing ATR-based stop sizing
+(`qty = risk_$ / (SL_ATR_MULT * ATR)`) responds to this by reducing SHARE COUNT, but the
+DOLLAR risk stayed the fixed 1% ($169.36) regardless -- identical risk-in-dollars to a calm,
+unambiguous setup. This is a DIFFERENT, not-yet-tested mechanism from conviction-sizing
+(2026-07-09, rejected -- scaled by momentum MAGNITUDE) or `--voltarget` (rejected -- scales by
+the STRATEGY's own realized-R vol): scaling dollar risk down when a specific INSTRUMENT's own
+relative ATR is elevated. Already flagged as an open question in this doc's 2026-07-11
+critique-evaluation entry ("Flagged for a dedicated test if pursued further, not dismissed
+outright") -- still not tested as of this entry.
+
 ---
 
 ### 🚨 2026-07-27: a real HKD 30,000 deposit was counted as trading profit -- 3-layer fix
