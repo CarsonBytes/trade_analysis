@@ -90,6 +90,15 @@ CONVICTION_SIZE: bool = False    # --conviction-size: scale risk by 20d-momentum
                                  # itself has zero variance among gate-passing trades (MIN_STRENGTH
                                  # ==5 is the max), so this uses the continuous signal underlying
                                  # it instead. No look-ahead: uses only the entry bar's own facts.
+RET_FILTER: bool = False        # --ret-filter (2026-07-28): require BOTH 5d and 20d returns to
+                                 # agree with direction before entry, checked fresh each bar (no
+                                 # look-ahead -- same facts already computed for this bar's score).
+                                 # NOTE: the 20d leg is already implicit in score_from_facts()'s
+                                 # own BUY/SELL classification (`mom20 > 0` for a BUY, `< 0` for a
+                                 # SELL is REQUIRED before signal ever reaches "BUY"/"SELL" at
+                                 # all) -- so this flag's only genuinely NEW constraint is the 5d
+                                 # leg. Kept explicit (checking both) rather than assuming the 20d
+                                 # redundancy holds forever, since score_from_facts() could change.
 CONVICTION_LO, CONVICTION_HI = 0.85, 1.15     # risk multiplier band (matches the class-tilt
                                               # test's magnitude for a comparable result)
 CONVICTION_MOM_LO, CONVICTION_MOM_HI = 0.03, 0.10   # 20d |momentum| mapped linearly to the band
@@ -172,6 +181,12 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
                 (direction == "long" and rsi > paper.OVEREXT_HI) or
                 (direction == "short" and rsi < paper.OVEREXT_LO)):
             i += 1; continue
+        if RET_FILTER:
+            ret5, ret20 = facts["returns"].get("5d"), facts["returns"].get("20d")
+            agrees = (lambda r: r is not None and r == r and
+                     (r > 0 if direction == "long" else r < 0))
+            if not (agrees(ret5) and agrees(ret20)):
+                i += 1; continue
         if reentry_gate and last_loss_direction == direction:
             bars_since_loss = i - last_loss_exit_i
             if reentry_gate == "reclaim":
@@ -771,8 +786,14 @@ def main():
                     help="scale risk by 20d-momentum magnitude WITHIN the already-qualifying "
                          "strength==5 band (0.85x-1.15x) -- strength itself has zero variance "
                          "among gate-passing trades")
+    ap.add_argument("--ret-filter", action="store_true",
+                    help="require BOTH 5d and 20d returns to agree with direction before entry "
+                         "(the 20d leg is already implicit in score_from_facts(); this adds a "
+                         "genuinely new 5d requirement)")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT, RET_FILTER
+    if args.ret_filter:
+        RET_FILTER = True
     if args.meanrev_budget is not None:
         MR_RISK_MULT = args.meanrev_budget
         args.meanrev_blend = True

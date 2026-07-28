@@ -1,7 +1,47 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-27.
+Last updated 2026-07-28.
+
+---
+
+### 🔬 TESTED 2026-07-28: require 5d AND 20d returns positive before entry — REJECTED
+
+Prompted by a live QQQ position entered right after the LLM had flagged "recent 1d/5d
+weakness" repeatedly (see the flip-flop investigation earlier the same day). Proposal:
+require BOTH the 5-day and 20-day return to agree with direction before entry, not just
+20d (which `score_from_facts()` already implicitly requires for a BUY/SELL classification --
+the 20d leg of this filter was always going to be a no-op; the 5d leg was the genuinely new
+constraint). Implemented as `--ret-filter` in `research/backtest.py` (`RET_FILTER`, off by
+default, zero effect on live/paper).
+
+**Full 32-year backtest, 22-ETF universe, `BROKER=ib UNIVERSE=etf --longweekly`:**
+
+| | Baseline | +ret-filter | Δ |
+|---|---|---|---|
+| Signals | 1,293 | 959 | −26% |
+| Win rate | 46% | 46% | flat |
+| Expectancy | +0.299R | +0.273R | worse |
+| Profit factor | 1.58 | 1.54 | worse |
+| Full CAGR @0.5% | +5.6% | +3.8% | worse |
+| Full maxDD @0.5% | −12.3% | −11.5% | slightly better |
+| OOS CAGR | +13.9% | +9.4% | worse |
+| OOS maxDD | −6.9% | −9.0% | **worse** -- backwards from the intent |
+| OOS expR | +0.406 | +0.367 | worse |
+
+Worse on every dimension that matters, including OOS drawdown getting BIGGER despite the
+filter's whole point being risk reduction. IWM and VNQ flip to negative expectancy under the
+filter. Mechanism: trend-following inherently buys into strength that includes normal
+short-term pullbacks -- "1d/5d weakness while the trend stays intact" is exactly the pattern
+this system is designed to buy, not avoid. Requiring 5d to also be positive filters out real
+continuation trades along with noise. Same failure class as conviction-sizing (2026-07-09)
+and VIX-regime sizing: an extra momentum-confirmation requirement that sounds prudent but
+empirically removes edge. **Not adopted.** Kept as a re-runnable flag (`--ret-filter`,
+defaults off) in case future data changes the picture, same policy as
+`--conviction-size`/`--class-weight`. No live code touched -- `paper.py::evaluate_signal()`
+and the pending-signal re-check in `ib_exec.py` were deliberately NOT modified, since
+building the "dynamic re-check for pending trades" half of the original ask on top of a
+filter the backtest just showed destroys edge would only compound the mistake.
 
 ---
 
