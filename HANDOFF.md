@@ -98,6 +98,38 @@ relative ATR is elevated. Already flagged as an open question in this doc's 2026
 critique-evaluation entry ("Flagged for a dedicated test if pursued further, not dismissed
 outright") -- still not tested as of this entry.
 
+### 🔬 TESTED 2026-07-28: per-instrument relative-ATR dollar-risk scaling -- REJECTED
+
+Closes the open question directly above. Implemented `VOL_RISK_SCALE_HI`/`VOL_RISK_SCALE_FLOOR`
+(`--vol-risk-scale-hi`/`--vol-risk-scale-floor` in `research/backtest.py`): scale each trade's
+DOLLAR risk down (via the existing `risk_mult` hook already used by `CONVICTION_SIZE`) as this
+instrument's own `atr14/atr14_med60` ratio rises from 1.0 (no scaling) toward a threshold
+(risk_mult floors out there), linear between. Swept HI in {1.3, 1.5, 1.8, 2.0} x FLOOR in
+{0.5, 0.7}, full 32-year 22-ETF universe:
+
+| variant | full CAGR/DD ratio | OOS CAGR/DD ratio |
+|---|---|---|
+| baseline | 0.502 | 0.927 |
+| hi=1.3 floor=0.5 (most aggressive) | 0.424 | 0.829 |
+| hi=1.5 floor=0.5 | 0.458 | 0.888 |
+| hi=1.8 floor=0.5 | 0.495 | 0.946 |
+| hi=2.0 floor=0.7 (mildest) | 0.502 | 0.942 |
+
+(win rate / expectancy_R / profit factor are IDENTICAL across every row -- `risk_mult` scales
+dollar sizing only, R-multiples are size-independent by construction, exactly as designed.)
+Monotonic: the more aggressively this scales risk down, the worse the full-history ratio gets;
+only the mildest setting (barely triggers) is statistically a no-op vs baseline. **Checked WHY
+directly** -- does elevated relative-ATR at entry actually predict a worse trade? Bucketed the
+real 1,293 signals by their own atr-ratio at entry: normal (<1.3x) win 44% meanR +0.307,
+elevated (1.3-1.8x) win **51%** meanR +0.305, very elevated (>1.8x) win 58% meanR +0.200. Elevated
+relative-ATR is NOT associated with worse outcomes in this system -- if anything the opposite at
+the win-rate level. Cutting size on these trades shrinks both return and risk in lockstep with
+no real quality signal behind the cut, which is exactly why the ratio doesn't improve. **Not
+adopted.** Kept as `--vol-risk-scale-hi`/`--vol-risk-scale-floor`, off by default, zero live
+effect. This also means the actual QQQ trade that prompted this whole investigation (atr ratio
+1.8x) was NOT mis-sized by any standard this project can currently validate -- the fixed 1% risk
+it got was appropriate, not an oversight.
+
 ---
 
 ### 🚨 2026-07-27: a real HKD 30,000 deposit was counted as trading profit -- 3-layer fix

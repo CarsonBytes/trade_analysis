@@ -110,6 +110,22 @@ CONVICTION_LO, CONVICTION_HI = 0.85, 1.15     # risk multiplier band (matches th
                                               # test's magnitude for a comparable result)
 CONVICTION_MOM_LO, CONVICTION_MOM_HI = 0.03, 0.10   # 20d |momentum| mapped linearly to the band
                                                      # (0.03 = paper.py's own strength=5 threshold)
+VOL_RISK_SCALE_HI: float | None = None   # --vol-risk-scale-hi X: scale DOLLAR risk down (not
+                                 # just share count) when THIS INSTRUMENT's own atr14/
+                                 # atr14_med60 ratio is elevated -- a genuinely different
+                                 # mechanism from CONVICTION_SIZE (scales by momentum
+                                 # MAGNITUDE, tested+rejected 2026-07-09) and --voltarget
+                                 # (scales by the STRATEGY's own realized-R vol, tested+
+                                 # rejected). The existing ATR-based stop sizing already cuts
+                                 # SHARE COUNT for a wide stop, but dollar risk stays the fixed
+                                 # base % regardless -- flagged as an open, untested question
+                                 # in this doc's 2026-07-11 entry (confirmed live 2026-07-28:
+                                 # the QQQ trade that prompted this had atr14 at 1.8x its own
+                                 # 60-bar median, sized to the same fixed dollar risk as any
+                                 # calm setup). ratio<=1.0 -> risk_mult=1.0 (no change);
+                                 # ratio>=VOL_RISK_SCALE_HI -> risk_mult=VOL_RISK_SCALE_FLOOR;
+                                 # linear between. None (default) = disabled, zero effect.
+VOL_RISK_SCALE_FLOOR: float = 0.5   # --vol-risk-scale-floor Y: risk_mult at/beyond the HI ratio
 CLUSTER: bool = False            # --cluster: de-correlate by ASSET CLASS (one open
                                  # position per metal/index/rate) -- caps correlated risk
                                  # (the legacy _risk_buckets is empty for futures/ETF keys)
@@ -290,6 +306,12 @@ def _signals(df: pd.DataFrame, key: str, horizon: int | None = None,
             frac = (mom20 - CONVICTION_MOM_LO) / (CONVICTION_MOM_HI - CONVICTION_MOM_LO)
             frac = max(0.0, min(1.0, frac))
             risk_mult = CONVICTION_LO + (CONVICTION_HI - CONVICTION_LO) * frac
+        if VOL_RISK_SCALE_HI is not None:
+            atr, atr_med = facts.get("atr14") or 0.0, facts.get("atr14_med60") or 0.0
+            atr_ratio = (atr / atr_med) if atr_med > 0 else 1.0
+            frac = (atr_ratio - 1.0) / (VOL_RISK_SCALE_HI - 1.0)
+            frac = max(0.0, min(1.0, frac))
+            risk_mult *= 1.0 - frac * (1.0 - VOL_RISK_SCALE_FLOOR)
         out.append({"key": key, "entry_i": entry_i, "entry_date": df.index[entry_i],
                     "exit_date": df.index[min(entry_i + used, n - 1)],
                     "direction": direction, "r": r, "risk_mult": risk_mult,
@@ -810,11 +832,22 @@ def main():
                          "direction before entry (date-based lookback, not bar count -- see "
                          "RET_FILTER_DAYS docstring for why that distinction matters on "
                          "weekly bars)")
+    ap.add_argument("--vol-risk-scale-hi", type=float, default=None, metavar="RATIO",
+                    help="scale DOLLAR risk down (not just share count) when this instrument's "
+                         "own atr14/atr14_med60 ratio reaches RATIO (e.g. 1.8) -- 1.0 or below "
+                         "means no scaling, linear down to --vol-risk-scale-floor at RATIO")
+    ap.add_argument("--vol-risk-scale-floor", type=float, default=0.5, metavar="X",
+                    help="risk_mult at/beyond --vol-risk-scale-hi (default 0.5)")
     args = ap.parse_args()
-    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT, RET_FILTER_DAYS
+    global _DIRECTIONS, CONCENTRATED, CIRCUIT_DD, CLUSTER, CLASS_WEIGHT, CONVICTION_SIZE, VOLTARGET_FACTOR_CAP, PULLBACK, MR_RISK_MULT, RET_FILTER_DAYS, VOL_RISK_SCALE_HI, VOL_RISK_SCALE_FLOOR
     if args.ret_filter_days is not None:
         RET_FILTER_DAYS = args.ret_filter_days
         print(f"[RET-FILTER: require the {RET_FILTER_DAYS}-calendar-day return to agree with direction]")
+    if args.vol_risk_scale_hi is not None:
+        VOL_RISK_SCALE_HI = args.vol_risk_scale_hi
+        VOL_RISK_SCALE_FLOOR = args.vol_risk_scale_floor
+        print(f"[VOL-RISK-SCALE: risk_mult 1.0 -> {VOL_RISK_SCALE_FLOOR} as atr14/atr14_med60 "
+              f"goes 1.0 -> {VOL_RISK_SCALE_HI}]")
     if args.meanrev_budget is not None:
         MR_RISK_MULT = args.meanrev_budget
         args.meanrev_blend = True
