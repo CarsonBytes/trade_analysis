@@ -1033,7 +1033,13 @@ def portfolio_panel() -> None:
         _save_settings()
         portfolio_panel.refresh()
     with ui.row().classes("items-center justify-between w-full mt-2"):
-        ui.label(f"Account value over time ({ccy})").classes("text-sm font-bold")
+        # FIXED 2026-07-29: this heading said "Account value over time" unconditionally, but
+        # the chart itself switches between P&L (ex-deposits) and raw Account value based on
+        # the View toggle right below it -- and P&L is the DEFAULT (SETTINGS["chart_view"]),
+        # so most views showed a P&L line under an "Account value" label.
+        _chart_title = ("P&L over time (ex-deposits)" if SETTINGS["chart_view"] == "P&L (ex-deposits)"
+                        else "Account value over time")
+        ui.label(f"{_chart_title} ({ccy})").classes("text-sm font-bold")
         # 2026-07-24: View + Scale used to sit inline as 2 more labeled toggle groups right
         # next to Period (3 labeled controls crowding one chart heading). Period is the one
         # actually changed often; View/Scale are rarer, more advanced choices -- moved behind
@@ -2500,4 +2506,4 @@ if not _bk0.is_ib():
 _DASH_PORT = int(os.environ.get("DASH_PORT", "8080"))
 _LIVE = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 _MODE = "LIVE" if _LIVE else "PAPER"
-ui.run(title=f"Quantitative Trading System [{_MODE}]", port=_DASH_PORT, reload=False, show=False)
+ui.run(title=f"Quantitative Trading System [{_MODE}]", favicon="📈", port=_DASH_PORT, reload=False, show=False)
