@@ -290,6 +290,24 @@ def mirror_new() -> list[str]:
     for t in paper.open_trades():
         if t["id"] in done:
             continue
+        # Manual tech pause -- checked FIRST, ahead of core/sleeve dispatch. Covers BOTH
+        # methods in one place (core ATR trades and sleeve dipbuy trades both flow through
+        # this same loop) since pending==unfunded regardless of which method logged it.
+        # Actively CANCELS a pending tech signal rather than just leaving it queued forever --
+        # see paper.TECH_PAUSED's docstring for why (a deliberate user override, not a
+        # backtested change). Already-FILLED tech positions are untouched -- this loop only
+        # ever sees not-yet-mirrored (pending) trades in the first place.
+        if paper.TECH_PAUSED and t["instrument"] in paper.TECH_TICKERS:
+            paper._update_resolution(
+                t["id"], "CANCELLED",
+                dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                float(t["entry"]), 0.0, exit_reason="tech investment paused")
+            msg = f"{t['instrument']}: cancelled -- tech investment paused"
+            log.warning("ib_exec: %s", msg)
+            from dashboard.core import notable_events
+            notable_events.record(msg)
+            logs.append(msg)
+            continue
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
                 continue

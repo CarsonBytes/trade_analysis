@@ -269,6 +269,10 @@ def place_sleeve_signals(equity_usd: float | None) -> list[str]:
         return logs
     now = dt.datetime.now(dt.timezone.utc)
     for ticker in active_sleeve_universe():
+        # Manual tech pause -- checked FIRST, ahead of every other gate, same as the core
+        # funnel's evaluate_signal(). See paper.TECH_PAUSED's docstring.
+        if paper.TECH_PAUSED and ticker in paper.TECH_TICKERS:
+            continue
         if paper._has_open(ticker, SLEEVE_METHOD) or paper._recent_close(ticker):
             continue
         tripped = _ticker_breaker_tripped(ticker)

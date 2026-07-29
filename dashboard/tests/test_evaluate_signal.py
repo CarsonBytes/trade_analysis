@@ -11,6 +11,7 @@ Run:  uv run python -m dashboard.tests.test_evaluate_signal
 """
 from __future__ import annotations
 
+from dashboard.core import paper
 from dashboard.core.paper import evaluate_signal
 from dashboard.core.scoring import Score
 from dashboard.web.board_scan import InstrumentSignal
@@ -103,6 +104,62 @@ def test_llm_agrees_buy_passes_the_action_gate():
     check("direction resolved to long", direction, "long")
 
 
+# ADDED 2026-07-30: manual tech pause (paper.TECH_PAUSED/TECH_TICKERS), user-requested after
+# the QQQ investigation this same session. Checked FIRST in evaluate_signal(), ahead of every
+# other gate -- a deliberate override, not a strategy finding.
+def test_tech_paused_blocks_a_strong_qqq_buy():
+    print("\nTECH_PAUSED=True: blocks QQQ even with a perfect deterministic+LLM BUY setup, "
+          "checked BEFORE any other gate:")
+    old = paper.TECH_PAUSED
+    paper.TECH_PAUSED = True
+    try:
+        ok, reasons, direction = evaluate_signal("QQQ", _score("BUY", strength=5), _llm("BUY"))
+        check("rejected", ok, False)
+        check("exactly one reason (short-circuits before any other gate runs)",
+              reasons, ["tech investment paused"])
+        check("direction not resolved", direction, "")
+    finally:
+        paper.TECH_PAUSED = old
+
+
+def test_tech_paused_blocks_xlk_too():
+    print("\nTECH_PAUSED=True: blocks XLK (the sleeve-only tech ticker) the same way:")
+    old = paper.TECH_PAUSED
+    paper.TECH_PAUSED = True
+    try:
+        ok, reasons, _ = evaluate_signal("XLK", _score("BUY", strength=5), _llm("BUY"))
+        check("rejected", ok, False)
+        check("tech-pause reason", reasons, ["tech investment paused"])
+    finally:
+        paper.TECH_PAUSED = old
+
+
+def test_tech_paused_does_not_affect_non_tech_instruments():
+    print("\nTECH_PAUSED=True: a non-tech instrument (SPY) is completely unaffected:")
+    old = paper.TECH_PAUSED
+    paper.TECH_PAUSED = True
+    try:
+        ok, reasons, direction = evaluate_signal("SPY", _score("BUY", strength=5), _llm("BUY"))
+        check("not rejected by the tech gate",
+              "tech investment paused" in reasons, False)
+        check("direction resolved to long", direction, "long")
+    finally:
+        paper.TECH_PAUSED = old
+
+
+def test_tech_resumed_lets_qqq_through_again():
+    print("\nTECH_PAUSED=False (resumed): QQQ reaches the normal gates again:")
+    old = paper.TECH_PAUSED
+    paper.TECH_PAUSED = False
+    try:
+        ok, reasons, direction = evaluate_signal("QQQ", _score("BUY", strength=5), _llm("BUY"))
+        check("not rejected by the tech gate",
+              "tech investment paused" in reasons, False)
+        check("direction resolved to long", direction, "long")
+    finally:
+        paper.TECH_PAUSED = old
+
+
 if __name__ == "__main__":
     test_no_llm_sig_watch_is_plain_noise()
     test_llm_agrees_watch_is_plain_noise()
@@ -111,6 +168,10 @@ if __name__ == "__main__":
     test_llm_rationale_semicolons_are_sanitized()
     test_journal_canonicalizes_the_new_reason()
     test_llm_agrees_buy_passes_the_action_gate()
+    test_tech_paused_blocks_a_strong_qqq_buy()
+    test_tech_paused_blocks_xlk_too()
+    test_tech_paused_does_not_affect_non_tech_instruments()
+    test_tech_resumed_lets_qqq_through_again()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

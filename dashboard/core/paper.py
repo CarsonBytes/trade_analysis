@@ -43,6 +43,20 @@ HORIZON_CAL = 35           # live horizon window in calendar days (5 weeks) -- m
 RISK_PER_TRADE = 0.01      # 1% risk/trade -- with ETF_POS_CAP=0.25 this "fills" the cap on
                            # the high-vol names; the cap (not risk%) is the real return/DD dial.
 ACCOUNT = 10_000.0
+# ADDED 2026-07-30, user-requested manual pause/resume for tech exposure specifically (QQQ
+# core+sleeve, XLK sleeve-only -- the only two tech-flavored tickers in the tradeable
+# universe). A deliberate, explicit override, NOT a backtested strategy change -- it exists
+# to let the user manually sit out tech regardless of what any gate (deterministic edge, LLM,
+# objective confidence) says, so it's checked FIRST, ahead of every other entry condition, in
+# both evaluate_signal() (core) and sleeve.py::place_sleeve_signals(). Also actively CANCELS
+# any already-pending (not-yet-funded) tech signal while paused (ib_exec.py::mirror_new()) --
+# existing FILLED positions are deliberately left untouched, same "new entries only" scope as
+# every other pause-type gate here (DD_HALT_PCT etc.), their own broker-side SL/TP brackets
+# keep protecting them regardless of this setting.
+TECH_PAUSED = True         # set True 2026-07-30 per explicit user request ("for the moment
+                           # set tech investment to pause") -- toggle from the dashboard
+                           # Settings panel to resume.
+TECH_TICKERS = {"QQQ", "XLK"}
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
                            # for calibration but no longer gates entries
 MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
@@ -595,6 +609,11 @@ def _update_resolution(trade_id: int, status: str, exit_ts: str,
 def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
     """Apply the entry gates. Returns (passed, reasons, direction)."""
     reasons: list[str] = []
+    # Manual tech pause -- checked FIRST, ahead of every other gate (deterministic edge, LLM,
+    # overextension, objective confidence), since it's a deliberate user override that should
+    # win regardless of what any strategy signal says. See TECH_PAUSED's docstring above.
+    if TECH_PAUSED and key in TECH_TICKERS:
+        return False, ["tech investment paused"], ""
     action = (llm_sig.action if llm_sig else score.signal)
     if action not in ("BUY", "SELL"):
         # Two different things collapse to the same WAIT/WATCH action, and only one of

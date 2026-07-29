@@ -5,6 +5,47 @@ Last updated 2026-07-30.
 
 ---
 
+### 🎛️ ADDED 2026-07-30: manual tech pause/resume (QQQ/XLK), user-requested -- currently PAUSED
+
+A deliberate, explicit user override, NOT a backtested strategy finding -- exists to let the
+user manually sit out tech exposure regardless of what any gate (deterministic edge, LLM,
+objective confidence) says. `paper.TECH_PAUSED` (bool) + `paper.TECH_TICKERS = {"QQQ", "XLK"}`
+-- confirmed via the full instrument list these are the ONLY two tech-flavored tickers in the
+tradeable universe (QQQ trades both core `ATR rr3.0` and the sleeve; XLK is sleeve-only, never
+in `ETF_UNIVERSE`/`ETF_CANDIDATES`).
+
+**Checked FIRST, ahead of every other gate**, per explicit user instruction ("no matter what
+strategy, this pause manual setting should be prioritized first") -- in three places:
+1. `paper.py::evaluate_signal()` -- new core entries, single-line early return.
+2. `sleeve.py::place_sleeve_signals()` -- new sleeve entries, first check in the per-ticker loop.
+3. `ib_exec.py::mirror_new()` -- **actively CANCELS** any already-pending (not-yet-funded)
+   QQQ/XLK signal (both methods, same loop) rather than just leaving it queued forever, per
+   explicit user request ("all relevant pending position of tech related etfs should be
+   removed"). Marked `CANCELLED`, `realized_r=0` (never funded, no real gain/loss), reason
+   `"tech investment paused"`.
+
+**Scope, matching every other pause-type gate in this codebase (DD_HALT_PCT etc.): NEW entries
+and PENDING signals only. Already-FILLED tech positions are deliberately left untouched** --
+their own broker-side SL/TP brackets keep protecting them regardless of this setting. This was
+a conscious choice, not an oversight -- the user asked to "pause tech investment," not liquidate
+existing tech holdings.
+
+**Persisted setting**, not just an in-memory toggle -- `SETTINGS`'s existing
+`_save_settings()`/`_load_settings()` mechanism (same one `RISK_PER_TRADE`/`OVEREXT_FILTER`
+already use, mutating `paper.py`'s module globals directly) now also covers `tech_paused`, so
+it survives a restart. UI: new checkbox in the Settings panel, "Pause tech investment
+(QQQ/XLK)", next to the existing overextension controls.
+
+**Currently set to PAUSED** (`TECH_PAUSED = True`, the module-level default) per explicit user
+request ("for the moment set tech investment to pause") -- toggle from the dashboard to resume.
+8 new tests (4 in `test_evaluate_signal.py`, 2 in `test_ib_exec.py`, plus fixed one pre-existing
+`test_sleeve.py` test whose "clean ticker" fixture happened to be XLK, now isolated with
+`TECH_PAUSED` patched off since it's testing unrelated breaker logic). Deployed to both
+instances -- any live pending QQQ/XLK signal at deploy time gets cancelled on the first
+post-deploy cycle; verify this actually happened, not just that the code shipped.
+
+---
+
 ### 🐞 FIXED 2026-07-30: open-position price/unrealized-R stale by up to a week (BROKER=ib)
 
 User noticed a trade card showing an inaccurate current price (QQQ 675.49) while account-level

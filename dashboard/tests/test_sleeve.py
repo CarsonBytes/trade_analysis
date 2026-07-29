@@ -74,8 +74,13 @@ def test_ticker_breaker_isolated():
               sleeve._ticker_breaker_tripped("DIA"), None)
 
         print("\nplace_sleeve_signals end-to-end (breaker actually skips the ticker):")
+        # NOTE 2026-07-30: TECH_PAUSED defaults True and would ALSO block XLK (a tech
+        # ticker) -- patched off here since this test is isolating the BREAKER mechanism
+        # specifically, not the (separately tested, see test_tech_paused_* below) manual
+        # tech-pause gate.
         with mock.patch.object(sleeve, "sleeve_enabled", return_value=True), \
              mock.patch.object(sleeve.paper, "sleeve_active", return_value=True), \
+             mock.patch.object(sleeve.paper, "TECH_PAUSED", False), \
              mock.patch.object(sleeve, "active_sleeve_universe", return_value=["SPY", "XLK"]), \
              mock.patch.object(sleeve, "_record_first_active_if_needed"), \
              mock.patch.object(sleeve, "_throttled", return_value=False), \

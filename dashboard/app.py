@@ -73,7 +73,8 @@ def _save_settings() -> None:
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "risk_per_trade": _p.RISK_PER_TRADE,
-            "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI})
+            "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
+            "tech_paused": _p.TECH_PAUSED})
     except Exception:                                  # noqa: BLE001 -- settings are non-critical
         pass
 
@@ -97,6 +98,11 @@ def _load_settings() -> None:
         if "overext_hi" in saved:
             _p.OVEREXT_HI = float(saved["overext_hi"])
             _p.OVEREXT_LO = float(100 - saved["overext_hi"])
+        if "tech_paused" in saved:
+            _p.TECH_PAUSED = bool(saved["tech_paused"])
+        # else: leaves TECH_PAUSED at its module-level default (True as of 2026-07-30) --
+        # correct for the FIRST deploy after this setting was added, where no prior value
+        # has ever been saved yet.
     except Exception:                                  # noqa: BLE001
         pass
 
@@ -2461,6 +2467,18 @@ def main_page() -> None:
                     .tooltip("skip longs above / shorts below the RSI band (don't chase)")
                 ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
                           value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
+
+                def _set_tech_paused(e) -> None:
+                    _paper.TECH_PAUSED = bool(e.value)
+                    _save_settings()
+                    gate_panel.refresh(); active_panel.refresh()
+                ui.checkbox("Pause tech investment (QQQ/XLK)", value=_paper.TECH_PAUSED,
+                            on_change=_set_tech_paused)\
+                    .tooltip("Manual override, checked before every other gate. Blocks new "
+                             "QQQ/XLK entries (core + sleeve) and actively cancels any "
+                             "already-pending, not-yet-funded QQQ/XLK signal. Existing FILLED "
+                             "positions are never touched -- their own broker-side SL/TP "
+                             "brackets keep protecting them regardless of this setting.")
                 ui.label("Risk/trade:").classes("text-sm")
                 def _set_risk(e) -> None:
                     setattr(_paper, "RISK_PER_TRADE", e.value)

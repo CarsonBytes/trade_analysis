@@ -547,6 +547,121 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
             pass
 
 
+# ADDED 2026-07-30: manual tech pause (paper.TECH_PAUSED/TECH_TICKERS), user-requested. Covers
+# the THIRD of the three places this gate applies (evaluate_signal() and place_sleeve_signals()
+# are tested in test_evaluate_signal.py / test_sleeve.py) -- an already-pending, not-yet-funded
+# tech signal must be actively CANCELLED here, not just left queued, and this must happen
+# BEFORE either the core or sleeve placement path is ever reached.
+def test_mirror_new_cancels_pending_tech_signal_when_paused():
+    print("\nmirror_new(): TECH_PAUSED=True actively cancels an already-pending QQQ signal "
+          "-- neither _place_etf_bracket() nor _place_sleeve_bracket() is ever called for it:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old_db = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    old_tech_paused = paper.TECH_PAUSED
+    paper.TECH_PAUSED = True
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-29T23:48:00','QQQ','long','dipbuy-sleeve',666.65,633.32,"
+                     "686.65,3.0,1,'OPEN')")
+
+        etf_calls, sleeve_calls = [], []
+
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "_place_etf_bracket",
+                              side_effect=lambda *a, **kw: etf_calls.append(1)), \
+             mock.patch.object(ib_exec, "_place_sleeve_bracket",
+                              side_effect=lambda *a, **kw: sleeve_calls.append(1)):
+            logs = ib_exec.mirror_new()
+
+        check("_place_sleeve_bracket never called", len(sleeve_calls), 0)
+        check("_place_etf_bracket never called", len(etf_calls), 0)
+        check("mirror_new() logged the cancellation",
+              any("tech investment paused" in l for l in logs), True)
+        with ib_exec._conn() as c:
+            status, exit_reason, realized_r = c.execute(
+                "SELECT status, exit_reason, realized_r FROM paper_trades WHERE id=1").fetchone()
+        check("paper_trades row marked CANCELLED", status, "CANCELLED")
+        check("exit_reason explains why", exit_reason, "tech investment paused")
+        check("realized_r is flat (0) -- never funded, no real gain/loss", realized_r, 0.0)
+    finally:
+        paper.TECH_PAUSED = old_tech_paused
+        if old_db is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old_db
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_mirror_new_does_not_cancel_tech_signals_when_resumed():
+    print("\nmirror_new(): TECH_PAUSED=False (resumed) -- a pending QQQ signal reaches "
+          "normal placement, is NOT cancelled:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old_db = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    old_tech_paused = paper.TECH_PAUSED
+    paper.TECH_PAUSED = False
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-29T23:48:00','QQQ','long','dipbuy-sleeve',666.65,633.32,"
+                     "686.65,3.0,1,'OPEN')")
+
+        sleeve_calls = []
+
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "_place_sleeve_bracket",
+                              side_effect=lambda *a, **kw: (sleeve_calls.append(1), "placed")[1]):
+            ib_exec.mirror_new()
+
+        check("_place_sleeve_bracket WAS called (not blocked)", len(sleeve_calls), 1)
+        with ib_exec._conn() as c:
+            status = c.execute("SELECT status FROM paper_trades WHERE id=1").fetchone()[0]
+        check("paper_trades row still OPEN (not cancelled)", status, "OPEN")
+    finally:
+        paper.TECH_PAUSED = old_tech_paused
+        if old_db is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old_db
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 # ADDED 2026-07-20: PORTFOLIO_CAP's "scale down, never skip" can compress a signal to 1-2
 # shares when the account is near-fully deployed -- the position still funds, but its
 # realized dollar risk shrinks with it while IBKR's per-order commission floor does NOT,
@@ -751,6 +866,8 @@ if __name__ == "__main__":
     test_stale_signal_check_leaves_fresh_signals_alone()
     test_stale_signal_check_fails_open_on_no_live_price()
     test_mirror_new_cancels_stale_signal_instead_of_funding()
+    test_mirror_new_cancels_pending_tech_signal_when_paused()
+    test_mirror_new_does_not_cancel_tech_signals_when_resumed()
     test_commission_estimate_usd()
     test_is_commission_viable()
     test_place_etf_bracket_skips_commission_not_viable_crumb()
