@@ -46,6 +46,19 @@ spread guard already treats a None tick as routine) -- when it returns None the 
 through to the existing weekly-bar price unchanged, same "missing quote isn't a hard failure"
 philosophy used everywhere else in this codebase.
 
+**VERIFIED LIVE, then root-caused further the SAME session:** deployed and watched the new
+`pending-tick refresh: N/M instrument(s) got a fresh IB quote` log line in real time -- one
+early success (QQQ), then consistently `0/3` on every cycle after. Traced why: NOTHING in
+`ib_client.py` ever calls `ib.reqMarketDataType(...)`, so every `reqTickersAsync` request
+implicitly asks for LIVE (type 1) data, which silently returns empty/NaN (not an exception) for
+any symbol without a real-time subscription -- it was never actually "falling back gracefully,"
+it was failing the SAME way on every single call. **Real fix:** call `ib.reqMarketDataType(3)`
+(delayed, ~15-20min lag, free on IBKR, no subscription needed) once per fresh connection in
+`_ensure_conn()`. Full test suite still green (no test exercises `_ensure_conn()`'s internals,
+all mock it out entirely). Deployed; still needs a fresh live observation cycle to confirm the
+`0/3` pattern actually turns around now that delayed-mode is requested -- check the
+`pending-tick refresh` log line next session if this comes up again.
+
 ---
 
 ### 🚨 2026-07-29: LIVE dashboard down ~80+ min, undetected -- a THIRD orphan-class gap (FIXED 07-30, see below)

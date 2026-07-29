@@ -151,6 +151,18 @@ def _ensure_conn():
         _S["ib"], _S["connected"] = ib, True
         _S["needs_reconcile"] = True    # a FRESH connect (not a reuse) -- flag for the next
                                          # refresh_cheap() cycle to run a broker reconciliation
+        # ADDED 2026-07-30: without this, every reqTickersAsync/reqMktData call implicitly
+        # requests LIVE (type 1) data, which silently fails (empty/NaN, not an exception) for
+        # any symbol this account doesn't have a real-time subscription for -- confirmed live:
+        # get_stock_tick() returned None for QQQ/SPY/XLK on ~5 consecutive cheap-refresh
+        # cycles in a row. Delayed data (type 3, ~15-20min lag) is free on IBKR, no
+        # subscription needed, and still far fresher than the week-old weekly-bar fallback
+        # this was meant to fix. Best-effort: a failure here shouldn't break the connection
+        # itself, just leaves ticks silently falling back to live-mode (today's behavior).
+        try:
+            ib.reqMarketDataType(3)
+        except Exception as e:                          # noqa: BLE001
+            log.info("ib_client: reqMarketDataType(3) failed: %s", e)
         log.info("ib_client: connected %s:%s clientId=%s", host, port, client_id)
         return ib
     log.info("ib_client: connect to %s:%s failed (%s) -- falling back", host, port, last_err)
