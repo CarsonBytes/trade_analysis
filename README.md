@@ -10,7 +10,7 @@ A research + trading platform for a diversified multi-asset ETF book, with three
 
 ---
 
-## Key research findings (as of 2026-07-23)
+## Key research findings (as of 2026-07-30)
 
 Exhaustive out-of-sample, deflated-Sharpe-penalised study, continuously re-verified as the
 system moved from paper to **real live trading** (IBKR account U12991898, first real fills
@@ -60,10 +60,16 @@ the full project; the honest conclusions:
   relative-strength filters; regime overlays (SPY-MA, VIX-ladder, correlation penalty — all
   redundant, a long-only trend book already de-risks itself in crashes); pairs/stat-arb (DSR
   ≤17%); all option sleeves (LEAPS, debit spreads, iron condors, earnings strangles — either
-  -EV or tail-uncontrollable); sector-rotation MR; VIX-timed contributions; and, as of
-  2026-07-14, **dynamic SL/TP trailing based on support/resistance** — the 23rd tested exit
-  alternative and the 23rd to fail to beat the fixed baseline cleanly on IS+OOS (see
-  `HANDOFF.md` for the full IS/OOS table).
+  -EV or tail-uncontrollable); sector-rotation MR; VIX-timed contributions; **dynamic SL/TP
+  trailing based on support/resistance** (2026-07-14, the 23rd tested exit alternative and the
+  23rd to fail to beat the fixed baseline cleanly on IS+OOS); and, as of 2026-07-28, two more
+  momentum-confirmation ideas that sound prudent but empirically remove edge — **requiring
+  recent (5d/60d) returns to also be positive before entry** (filters out exactly the
+  short-term-pullback-within-a-trend continuation trades this system profits from) and
+  **scaling dollar risk down on a per-instrument's own elevated relative ATR** (elevated
+  relative-ATR turned out NOT to predict worse trades in this book — 51% win rate at 1.3-1.8×
+  ATR vs 44% at normal, so the "cut size on it" premise didn't hold) (see `HANDOFF.md` for
+  both full sweeps).
 - **Execution layer, hardened for real money:** `PORTFOLIO_CAP` accounts for BOTH filled
   positions and pending (not-yet-filled) broker orders (fixed 2026-07-13, after confirming
   live pending orders alone had reached ~125% of equity — `GrossPositionValue` alone only
@@ -285,22 +291,29 @@ and dated to when they were computed (2026-07 unless stated). Where a figure is 
 estimate rather than a rigorously re-run backtest, it's marked as such — mixing rigor levels
 without saying so is exactly the kind of self-deception this whole project tries to avoid.
 
-| Approach | After-tax CAGR | Max drawdown | Calmar | Basis |
+| Approach | CAGR | Max drawdown | Calmar | Basis |
 |---|---|---|---|---|
-| **This system (core-only)** | **6.06%** (median 6.75%, 90% CI 4.82–8.93%) | **-6.83%** | **0.887** (90% CI 0.536–1.355) | Real 30-year weekly backtest, bootstrapped |
-| **This system (core+sleeve@10%, OOS)** | 13.08% | -7.73% | 1.693 | Real backtest, recent-decade window (bull-flattered, upside case not the anchor) |
+| **This system (core-only, after-tax)** | **6.06%** (median 6.75%, 90% CI 4.82–8.93%) | **-6.83%** | **0.887** (90% CI 0.536–1.355) | Real 30-year weekly backtest, block-bootstrapped (500 draws) |
+| **This system (DEPLOYED: core+reentry-gate+sleeve, pos_cap=30%, FULL 32y, pre-tax)** | 9.78% | -8.83% | 1.11 | Real 32-year backtest, point estimate + 100% DSR (n_trials=19) + true-holdout validation — see "Update 2026-07-18" above. **NOT YET block-bootstrapped** with this exact config (the 6.06% row above predates the 2026-07-18 pos_cap/gate change) — treat as less uncertainty-quantified than the core-only row, though more representative of what's actually live today |
+| **This system (DEPLOYED, OOS ~13y, pre-tax)** | 12.53% | -4.61% | 2.72 | Same config, recent-decade window — Sharpe 1.97, Sortino 6.83 |
+| **This system (core+sleeve@10%, OOS)** | 13.08% | -7.73% | 1.693 | Real backtest, recent-decade window, predates the 2026-07-18 pos_cap change (bull-flattered, upside case not the anchor) |
 | SPY buy-and-hold | 10.08% | -54.6% | 0.185 | Real 1996–2026 data, pulled and verified this session |
-| Risk-matched SPY + cash (12.5% SPY / 87.5% cash, sized to match this system's -6.83% DD) | 5.02% | -6.83% | 0.735 | Real data; this system beats it by +20.6% relative Calmar at today's ~4.3% cash rate (breakeven rate ~5.5%) |
+| Risk-matched SPY + cash (12.5% SPY / 87.5% cash, sized to match this system's -6.83% DD) | 5.02% | -6.83% | 0.735 | Real data; the core-only row above beats it by +20.6% relative Calmar at today's ~4.3% cash rate (breakeven rate ~5.5%) |
 | 60/40 (SPY/AGG) | ~7% | ~-22% | ~0.32 | Rough estimate, not re-run this project |
 | All-weather (25% equity/25% long bonds/25% short-duration/25% commodities) | ~6% | ~-15% | ~0.40 | Rough estimate, not re-run this project |
 | 100% cash (SGOV) | ~4.3% | ~0% | n/a | Current rate, no drawdown risk but no growth engine either |
 
 **The honest reading**: at today's interest rates, this system's core-only Calmar (0.887,
-reconciled) beats a naive risk-matched passive alternative (0.735) by a real, verified margin
-— but the margin isn't enormous, and it would flip if cash rates rose much above ~5.5%. The
-sleeve adds a genuine, measured diversification benefit on top. Against a full portfolio
-context (60/40, all-weather), this system's edge is real but has not been tested with the same
-rigor against those specific benchmarks — that's a fair gap to name, not paper over.
+reconciled, after-tax) beats a naive risk-matched passive alternative (0.735) by a real,
+verified margin — but the margin isn't enormous, and it would flip if cash rates rose much
+above ~5.5%. The actually-deployed config (re-entry gate + sleeve + `pos_cap=30%`) scores
+higher still (Calmar 1.11 full-history, 2.72 OOS) but on a **pre-tax point estimate**, not the
+same 500-draw bootstrap the core-only figure got — don't read the two CAGR numbers as
+directly comparable without accounting for that gap in rigor, and plan around the full-history
+row (1.11), not the rosier OOS row (2.72), per this project's own standing caution elsewhere in
+this doc about OOS windows looking better than they'll repeat. Against a full portfolio context
+(60/40, all-weather), this system's edge is real but has not been tested with the same rigor
+against those specific benchmarks — that's a fair gap to name, not paper over.
 
 ---
 
@@ -313,7 +326,7 @@ uncertainty — not on marketing appeal:
 |---|---|---|
 | Research methodology | 9/10 | DSR-checked at 82 trials, bootstrap CI, real crisis stress tests — genuinely rigorous, rare for a retail-scale system |
 | Real-money safety engineering | 8/10 | Multiple real incidents found and fixed with regression tests (portfolio-cap blind spot, orphaned orders, tick-loop dormancy); the guard rails are real, but so was the list of things that needed guarding against |
-| Performance (risk-adjusted) | 6/10 | Calmar ~0.9 core-only, ~1.3–1.7 with the sleeve — solidly above cash and a naive passive alternative at current rates, not a dramatic outperformer |
+| Performance (risk-adjusted) | 6/10 | Calmar ~0.9 core-only (bootstrapped); ~1.1 full-history / ~2.7 OOS for the actually-deployed gate+sleeve config (point estimate, plan around the full-history number) — solidly above cash and a naive passive alternative at current rates, not a dramatic outperformer |
 | Operational complexity / maintainability | 5/10 | Two live dashboards, a broker gateway, a tunnel, and several watchdogs is a real ongoing burden for one person; multiple bugs this project traced directly to that complexity |
 | Transparency / auditability | 8/10 | Every signal has a rationale, invalidation level, and macro linkage; every fix this project has its own regression test and a HANDOFF.md entry explaining why |
 | **Overall** | **7/10** | A genuinely rigorous, real-money-safe system with a real but modest edge — its biggest risk is operational complexity, not the strategy logic itself |
