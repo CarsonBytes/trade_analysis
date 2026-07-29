@@ -1261,7 +1261,16 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
                 status: str | None = None) -> None:
     key = t["instrument"]
     live = service.STATE.get("live", {}).get(key)
-    price = live["price"] if live else t["entry"]
+    # FIXED 2026-07-30: for an open position, STATE["live"]'s price is only genuinely fresh
+    # under MT5 (real tick data); for BROKER=ib it falls back to get_history()'s WEEKLY
+    # yfinance bars (scoring interval=1wk), stale by up to a week -- confirmed live: showed
+    # QQQ at 675.49 (last Tuesday's close) vs a real 664.37, silently wrong unrealized-R too.
+    # ib_exec.live_positions() now reports the broker's own live mark (ib.portfolio()'s
+    # marketPrice) as "current_price" -- prefer that whenever a real position exists; only
+    # fall back to STATE["live"] for PENDING signals (no broker position yet) or under MT5
+    # (which never sets current_price -- its STATE["live"] price is already tick-fresh).
+    price = (pos.get("current_price") if pos and pos.get("current_price") else
+             (live["price"] if live else t["entry"]))
     # prefer the REAL MT5 fill price when this trade is on the demo, so
     # the card matches what the MT5 terminal shows (not the paper entry).
     entry = pos["open"] if pos else t["entry"]

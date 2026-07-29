@@ -615,6 +615,129 @@ def test_place_etf_bracket_skips_commission_not_viable_crumb():
     check("deployed room was NOT reserved for a skipped order", deployed[0], 12900.0 - 64.0)
 
 
+# ADDED 2026-07-30: live_positions() now reports the broker's own live mark as
+# "current_price" -- confirmed live the dashboard had no fresh per-instrument price for a
+# pure IB deployment (STATE["live"] falls back to WEEKLY yfinance bars under BROKER=ib,
+# stale by up to a week -- QQQ showed 675.49, last Tuesday's close, vs a real 664.37) and
+# silently fed a wrong unrealized-R figure too. See app.py::_trade_card()'s matching fix.
+def test_live_positions_reports_current_price_from_broker():
+    print("live_positions(): reports the broker's own live mark (portfolio marketPrice) as "
+          "current_price, not just avgCost/unrealizedPNL:")
+    from dashboard.execution import ib_exec
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _Position:
+        def __init__(self, con_id, position, avg_cost):
+            self.contract = _Contract(con_id)
+            self.position = position
+            self.avgCost = avg_cost
+
+    class _PortfolioItem:
+        def __init__(self, con_id, unrealized_pnl, market_price):
+            self.contract = _Contract(con_id)
+            self.unrealizedPNL = unrealized_pnl
+            self.marketPrice = market_price
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'QQQ',10.0,1000.0,'','2026-07-17T00:00:00','OPEN','etf')")
+
+        class _FakeIB:
+            def positions(self):
+                return [_Position(111, 10, 692.42)]
+            def portfolio(self):
+                return [_PortfolioItem(111, -139.6, 664.37)]
+
+        with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+             mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, acct: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            out = ib_exec.live_positions()
+        check("position present", 1 in out, True)
+        check("current_price comes from the broker's live mark, not avgCost",
+              out[1]["current_price"], 664.37)
+        check("open (entry) is still avgCost, unchanged", out[1]["open"], 692.42)
+        check("profit still comes from unrealizedPNL, unchanged", out[1]["profit"], -139.6)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_live_positions_current_price_none_when_broker_omits_it():
+    print("\nlive_positions(): missing/zero marketPrice -> current_price is None, not a "
+          "silently wrong 0.0 (caller must fall back, not trust a fake price):")
+    from dashboard.execution import ib_exec
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _Position:
+        def __init__(self, con_id, position, avg_cost):
+            self.contract = _Contract(con_id)
+            self.position = position
+            self.avgCost = avg_cost
+
+    class _PortfolioItem:
+        def __init__(self, con_id, unrealized_pnl, market_price):
+            self.contract = _Contract(con_id)
+            self.unrealizedPNL = unrealized_pnl
+            self.marketPrice = market_price
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'QQQ',10.0,1000.0,'','2026-07-17T00:00:00','OPEN','etf')")
+
+        class _FakeIB:
+            def positions(self):
+                return [_Position(111, 10, 692.42)]
+            def portfolio(self):
+                return [_PortfolioItem(111, 0.0, 0.0)]  # marketPrice 0.0 -- broker didn't report one
+
+        with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+             mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, acct: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            out = ib_exec.live_positions()
+        check("current_price is None, not the misleading 0.0", out[1]["current_price"], None)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     test_cap_qty_to_portfolio_room()
     test_mirror_new_dd_halt_end_to_end()
@@ -631,6 +754,8 @@ if __name__ == "__main__":
     test_commission_estimate_usd()
     test_is_commission_viable()
     test_place_etf_bracket_skips_commission_not_viable_crumb()
+    test_live_positions_reports_current_price_from_broker()
+    test_live_positions_current_price_none_when_broker_omits_it()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

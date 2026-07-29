@@ -961,9 +961,19 @@ def live_positions() -> dict | None:
         if p is None or p.position == 0:
             continue
         pf = portfolio.get(con_id)
+        # ADDED 2026-07-30: current_price (IBKR's own live mark on this position, from
+        # ib.portfolio()'s marketPrice) -- found live: the dashboard had NO fresh per-
+        # instrument price source for a pure IB deployment (no MT5 attached), so
+        # app.py::_trade_card() fell back to STATE["live"], whose price ultimately comes
+        # from get_history()'s WEEKLY yfinance bars (BROKER=ib scoring uses interval=1wk) --
+        # stale by up to a week, confirmed live: displayed QQQ at 675.49 (last Tuesday's
+        # close) while the real price was 664.37, a $11/1.65% gap, silently feeding a wrong
+        # unrealized-R figure too. The broker already reports a fresh mark on every open
+        # position; this was simply never read.
         out[paper_id] = {
             "ticket": con_id, "open": float(p.avgCost or 0),
             "profit": float(pf.unrealizedPNL) if pf else 0.0,
+            "current_price": float(pf.marketPrice) if pf and pf.marketPrice else None,
             "volume": float(abs(p.position)),
             "direction": "long" if p.position > 0 else "short"}
     return out

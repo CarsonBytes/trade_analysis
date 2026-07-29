@@ -1,7 +1,31 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-29.
+Last updated 2026-07-30.
+
+---
+
+### 🐞 FIXED 2026-07-30: open-position price/unrealized-R stale by up to a week (BROKER=ib)
+
+User noticed a trade card showing an inaccurate current price (QQQ 675.49) while account-level
+HKD figures updated normally. Root cause: `app.py::_trade_card()`'s `price` came from
+`STATE["live"][key]["price"]`, which `service.py::_score_one()` only sets from real tick data
+when MT5 is attached (`mt5_client.get_tick()`) -- for a pure IB deployment (no MT5) it falls
+back to `float(series.iloc[-1])`, and `series` comes from `get_history()`'s **WEEKLY** yfinance
+bars (`interval="1wk"`, the scoring resolution). Confirmed live: displayed 675.49 was literally
+last Tuesday's weekly close; the real price was 664.37 -- an $11 / 1.65% gap, silently feeding a
+wrong unrealized-R too (account-level HKD figures were fine because those come from a separate,
+frequently-refreshed `account_summary()` call, unaffected by this).
+
+**Fix:** `ib.portfolio()` (already called by `ib_exec.py::live_positions()` for `unrealizedPNL`)
+also carries `marketPrice` -- IBKR's own live mark on the position -- and it was simply never
+read. Added `current_price` to each position dict; `_trade_card()` now prefers
+`pos.get("current_price")` over `STATE["live"]` whenever a real broker position exists, falling
+back to the old path only for PENDING signals (no broker position yet) or under MT5 (whose
+`STATE["live"]` was already tick-fresh and never sets `current_price`). 5 new tests (2 for the
+broker-price extraction incl. a fails-safe-to-None case, matching the existing `live_positions()`
+coverage style). Display-only fix -- order placement/exit logic uses SL/TP levels set at entry
+and broker-side bracket orders, untouched by this; no backtest needed, deployed directly.
 
 ---
 
