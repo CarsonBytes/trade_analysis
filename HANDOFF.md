@@ -5,6 +5,48 @@ Last updated 2026-07-29.
 
 ---
 
+### 🚨 2026-07-29: LIVE dashboard down ~80+ min, undetected -- a THIRD orphan-class gap, still open
+
+Routine "verify live site" check found port 8081 not listening and `DashboardAppLive`'s task
+state "Ready" (stopped). `Get-ScheduledTaskInfo` showed `LastRunTime` 08:24 that morning,
+`LastTaskResult 0` (success) -- looked at first like it had been down 15+ hours. It hadn't:
+`dashboard.log` (shared between instances) showed real "LIVE trading ENABLED for U12991898"
+activity as recently as 22:26, ~80 min before the check. Resolved by checking established
+outbound connections to the live gateway (port 4001, the same disambiguation technique from
+the 2026-07-24 incident): zero python.exe processes connected -- the process really was dead,
+just much more recently than the stale task metadata suggested.
+
+**Root cause, a NEW variant of the orphan class (distinct from 2026-07-21's healthy-orphan and
+2026-07-24's hung-process-releases-port):** the wrapper script (`run_dashboard_live.ps1`)
+completed and exited normally hours before the ACTUAL failure -- its spawned python.exe child
+process (detached via `Start-Process`) kept running autonomously for ~14 more hours before
+genuinely dying (crash or otherwise; cause not yet identified). Because the wrapper's own exit
+code was 0 (success, not failure), Task Scheduler's `RestartCount`/`RestartInterval` (retry-on-
+FAILURE settings) never triggered -- and the existing port-based self-healing guard only runs
+at the START of a NEW invocation of the launch script, which nothing was triggering. **Result:
+once a long-orphaned child eventually dies for real, nothing in the current design notices or
+recovers -- the gap is open-ended until a human happens to check.** No adverse trading impact
+this time (checked directly: zero trades opened or closed during the outage window; existing
+positions stayed protected by their own already-placed IBKR bracket SL/TP orders, which live at
+the broker independent of the dashboard process) -- but this was luck of timing, not a designed
+safety property.
+
+**Immediate fix:** `Start-ScheduledTask "DashboardAppLive"` -- fresh PID confirmed (own
+outbound connection to gateway 4001), HTTP 200, clean reconcile ("broker/local positions match
+(8 open)"), no errors. A new QQQ signal (id=31) placed itself normally ~2min post-restart --
+the system re-evaluates and acts immediately once alive again, nothing was "stuck."
+
+**NOT YET FIXED -- the actual root-cause gap remains open.** What's needed is an INDEPENDENT
+periodic watchdog that checks "is something actually listening on 8081/8080" and proactively
+calls `Start-ScheduledTask` if not, completely decoupled from Task Scheduler's own restart-on-
+failure logic (which this incident just showed is insufficient on its own). [[project-event-
+radar]] already has exactly this pattern (`deploy/watchdog.ps1`, 20s poll loop, Startup-VBS +
+PID-lock-guarded against duplicates) -- the natural fix here is the same pattern applied to
+quant's two dashboard instances, not a new design. Until built, this class of failure can
+recur and go undetected for an unbounded time.
+
+---
+
 ### 🔬 TESTED 2026-07-28: require 5d AND 20d returns positive before entry — REJECTED
 
 Prompted by a live QQQ position entered right after the LLM had flagged "recent 1d/5d
