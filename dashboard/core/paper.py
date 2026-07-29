@@ -56,7 +56,14 @@ ACCOUNT = 10_000.0
 TECH_PAUSED = True         # set True 2026-07-30 per explicit user request ("for the moment
                            # set tech investment to pause") -- toggle from the dashboard
                            # Settings panel to resume.
-TECH_TICKERS = {"QQQ", "XLK"}
+# EXPANDED 2026-07-30: user asked to evaluate SPY/EEM against real (not guessed) sector
+# weights. Verified via live web search that day -- Information Technology (GICS) share of
+# each fund: QQQ ~55%, XLK ~100%, EEM 45.15%, SPY 38.03%, ASHR 31.11%, DIA 18.38%,
+# IWM 14.82%, EFA 9.33%. Drew the line at the natural break just above 30%: EEM/SPY/ASHR
+# are all genuinely tech-plurality funds (IT is each one's single largest GICS sector, by a
+# wide margin) same as QQQ/XLK; DIA/IWM/EFA drop off sharply and stay genuinely diversified,
+# so were deliberately left OUT despite also holding some tech names.
+TECH_TICKERS = {"QQQ", "XLK", "SPY", "EEM", "ASHR"}
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
                            # for calibration but no longer gates entries
 MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of
@@ -445,6 +452,11 @@ class Trade:
                               # macro_note actually applies to THIS instrument (e.g. a
                               # USD-strength headwind), not just the general backdrop --
                               # see board_scan.py's InstrumentSignal.macro_linkage
+    manual_paused: int = 0    # ADDED 2026-07-30: per-trade manual hold, set from the
+                              # dashboard's pending-card "Pause" button. mirror_new() skips
+                              # funding while set (soft, reversible -- unlike "Withdraw",
+                              # which CANCELS the trade outright). Never touched by any
+                              # strategy logic, only the two new UI buttons.
 
 
 def _conn() -> sqlite3.Connection:
@@ -465,6 +477,7 @@ def _conn() -> sqlite3.Connection:
         ("entry_facts", "TEXT DEFAULT ''"),
         ("exit_reason", "TEXT DEFAULT ''"),
         ("macro_linkage", "TEXT DEFAULT ''"),
+        ("manual_paused", "INTEGER DEFAULT 0"),
     ]
     for table in ("paper_trades", "paper_trades_archive"):
         if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -602,6 +615,28 @@ def _update_resolution(trade_id: int, status: str, exit_ts: str,
         c.execute("UPDATE paper_trades SET status=?, exit_ts=?, exit_price=?, "
                   "realized_r=?, exit_reason=? WHERE id=?",
                   (status, exit_ts, exit_price, realized_r, exit_reason, trade_id))
+
+
+# ADDED 2026-07-30: per-trade manual controls for a PENDING (not-yet-funded) trade, from the
+# dashboard's new pending-card buttons. Two distinct actions, matching how the QQQ/XLK
+# tech-pause gate already distinguishes "skip funding this cycle" from "cancel outright":
+#   - pause:    reversible hold. mirror_new() leaves it queued and keeps re-checking it.
+#   - withdraw: permanent. Same CANCELLED path as every other auto-cancel reason.
+def set_trade_paused(trade_id: int, paused: bool) -> None:
+    with _LOCK, _conn() as c:
+        c.execute("UPDATE paper_trades SET manual_paused=? WHERE id=? AND status='OPEN'",
+                  (1 if paused else 0, trade_id))
+
+
+def withdraw_trade(trade_id: int) -> None:
+    with _LOCK, _conn() as c:
+        row = c.execute("SELECT entry FROM paper_trades WHERE id=? AND status='OPEN'",
+                        (trade_id,)).fetchone()
+    if row is None:
+        return
+    _update_resolution(trade_id, "CANCELLED",
+                       dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                       float(row[0]), 0.0, exit_reason="manually withdrawn")
 
 
 # ---- forward funnel: turn a live signal into trades ------------------------

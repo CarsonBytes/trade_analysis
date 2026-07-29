@@ -308,6 +308,13 @@ def mirror_new() -> list[str]:
             notable_events.record(msg)
             logs.append(msg)
             continue
+        # Per-trade manual pause -- from the pending card's own "Pause" button (see
+        # paper.set_trade_paused()). Reversible: unlike the tech-pause block above, this just
+        # skips funding THIS cycle and leaves the trade queued, so it's picked up normally
+        # again the moment the user un-pauses it. Checked before core/sleeve dispatch, same as
+        # the tech-pause gate.
+        if t.get("manual_paused"):
+            continue
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
                 continue
@@ -738,6 +745,45 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
     if sent is None:
         return None
     return f"{trade['instrument']}: sleeve DYNAMIC EXIT ({reason}) -- flatten order sent"
+
+
+# ADDED 2026-07-30: called from the dashboard's per-trade "Withdraw" button (app.py's
+# _trade_card()), BEFORE the paper trade itself is marked CANCELLED (paper.withdraw_trade()).
+# Most pending trades were never sent to the broker at all (still waiting on the risk budget
+# or account size) -- for those this is a safe no-op. But some are already resting, unfilled
+# orders at IB (the "placed" pending group) -- for those, cancelling only the LOCAL paper
+# journal would leave a real working order at the broker with nothing tracking it anymore,
+# the exact orphaned-order failure mode sync_closures() already has to clean up elsewhere in
+# this file (see its 2026-07-13 fix note above) -- so cancel the broker order first here too.
+def cancel_pending_order(trade_id: int) -> str | None:
+    ib = _guard()
+    if ib is None:
+        return None
+    with paper._LOCK, _conn() as c:
+        row = c.execute("SELECT con_id, status FROM ib_mirror WHERE paper_id=?",
+                        (trade_id,)).fetchone()
+    if row is None or row[1] != "OPEN":
+        return None                                     # never reached the broker -- nothing to cancel
+    con_id, _ = row
+
+    def _do():
+        n = 0
+        for o in (ib.openTrades() or []):               # passive cache -- see manual_close_sleeve()
+            if o.contract.conId == con_id:
+                ib.cancelOrder(o.order)
+                n += 1
+        return n
+    try:
+        n = ib_client.call(_do, timeout=15)
+    except Exception as e:                    # noqa: BLE001
+        log.warning("ib_exec: cancel_pending_order(%s) failed: %s", trade_id, e)
+        return None
+    if not n:
+        return None
+    with paper._LOCK, _conn() as c:
+        c.execute("UPDATE ib_mirror SET status='CLOSED', note=? WHERE paper_id=?",
+                  ("cancelled: manual withdraw from dashboard", trade_id))
+    return f"cancelled {n} resting broker order(s) for paper trade #{trade_id}"
 
 
 def sync_closures() -> list[str]:

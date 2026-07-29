@@ -499,9 +499,12 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
         with paper._LOCK, paper._conn() as _pc:
             pass
         with paper._LOCK, ib_exec._conn() as c:
+            # NOTE 2026-07-30: IEF (not SPY) -- SPY joined TECH_TICKERS that day, and this
+            # test is exercising the unrelated stale-signal check, not the tech-pause gate,
+            # which would otherwise cancel it first for a different reason.
             c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
                      "entry, sl, tp, rr, size_units, status) VALUES "
-                     "(1,'2026-07-13T04:00:00','SPY','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
+                     "(1,'2026-07-13T04:00:00','IEF','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
 
         place_calls = []
 
@@ -511,11 +514,11 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
 
         # BY_KEY only contains ETF entries when UNIVERSE=etf was set at dashboard.instruments'
         # IMPORT time (too late to fix here) -- ETF_TRADED_BY_KEY is unconditionally populated
-        # so the ETF branch is reached fine, but _stale_signal_check()'s BY_KEY.get("SPY")
+        # so the ETF branch is reached fine, but _stale_signal_check()'s BY_KEY.get("IEF")
         # lookup needs a stand-in; get_live_price is mocked below anyway so it doesn't care
         # what instrument object it's called with.
         with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
-             mock.patch.dict("dashboard.instruments.BY_KEY", {"SPY": object()}), \
+             mock.patch.dict("dashboard.instruments.BY_KEY", {"IEF": object()}), \
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \

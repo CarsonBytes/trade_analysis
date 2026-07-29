@@ -5,6 +5,55 @@ Last updated 2026-07-30.
 
 ---
 
+### 🎛️ ADDED 2026-07-30: TECH_TICKERS expanded (SPY/EEM/ASHR) + per-trade Withdraw/Pause buttons
+
+Same session, later the same day as the tech-pause feature below -- two follow-ups, both
+user-requested.
+
+**1. TECH_TICKERS grew from `{QQQ, XLK}` to `{QQQ, XLK, SPY, EEM, ASHR}`.** User asked to
+"evaluate" whether SPY (and possibly more) belonged in the tech-pause list. Verified real GICS
+sector weights via live web search rather than guessing (as of 2026-06/07-2026 fund fact
+sheets): QQQ ~55% IT, XLK ~100%, **EEM 45.15%**, **SPY 38.03%**, **ASHR 31.11%**, then a sharp
+drop-off -- DIA 18.38%, IWM 14.82%, EFA 9.33%. Drew the line at the natural break just above
+30%: EEM/SPY/ASHR are all genuine tech-plurality funds (IT is each one's single largest GICS
+sector by a wide margin), same character as QQQ/XLK. DIA/IWM/EFA stay genuinely diversified and
+were deliberately left out. Everything else in the 22-ETF/11-sleeve universe (bonds,
+commodities, REITs, credit, munis) isn't an equity-sector fund at all -- not evaluated as
+"tech" in the first place. No code changes needed beyond the one `TECH_TICKERS` set literal in
+`paper.py` -- the existing three-gate wiring (evaluate_signal/place_sleeve_signals/mirror_new)
+already keys off that set generically.
+
+**Test fallout**: `test_evaluate_signal.py` used SPY as its generic default test ticker (via
+`_score()`/`_llm()`'s `key="SPY"` defaults) AND as its "non-tech" example -- both broke once SPY
+joined `TECH_TICKERS` (module-level `TECH_PAUSED` defaults `True`, so every unrelated
+WAIT/WATCH test started getting short-circuited by the tech-pause gate instead). Repointed the
+whole file's generic test ticker to `IEF` (bond ETF, no tech exposure). Same fix in
+`test_ib_exec.py`'s stale-signal test (was inserting a SPY row directly into `paper_trades`,
+unrelated to tech-pause -- also repointed to IEF). Added 1 new test
+(`test_tech_paused_blocks_spy_eem_ashr`) covering all three new tickers.
+
+**2. Per-pending-trade "Withdraw" / "Pause" buttons** (dashboard's Active Trades panel,
+`app.py::_trade_card()`). User asked for this directly, separately from the tech-list question.
+- **Pause / Resume**: new `manual_paused` column on `paper_trades` (migration, default 0).
+  `paper.set_trade_paused(id, bool)` toggles it; `mirror_new()` skips funding while set --
+  reversible, the trade stays queued and gets re-checked every cycle like normal. Only shown
+  on cards that haven't reached the broker yet (`t["id"] not in broker.executed_ids()`) --
+  once a real order is resting at IB, `mirror_new()`'s `if t["id"] in done: continue` never
+  looks at `manual_paused` again, so the toggle would silently do nothing there; Withdraw
+  still works in that state because it acts on the broker order directly.
+- **Withdraw**: `paper.withdraw_trade(id)` marks the trade `CANCELLED`
+  (`exit_reason="manually withdrawn"`), same path every other auto-cancel in this codebase
+  uses. New `ib_exec.cancel_pending_order(id)` runs FIRST when the trade already has a
+  resting, unfilled order at IB (looked up via the `ib_mirror` table's `con_id`) -- cancels it
+  via `ib.openTrades()`/`ib.cancelOrder()` (same passive-cache pattern as
+  `manual_close_sleeve()`/`sync_closures()`'s existing orphan-order cleanup) before the local
+  journal is touched, so a "withdrawn" trade never leaves a real order silently resting at the
+  broker with nothing local tracking it.
+- Shown on every pending card regardless of which pending sub-group ("Waiting to fill" /
+  "On hold" / "Needs a bigger account") it's in.
+
+---
+
 ### 🎛️ ADDED 2026-07-30: manual tech pause/resume (QQQ/XLK), user-requested -- currently PAUSED
 
 A deliberate, explicit user override, NOT a backtested strategy finding -- exists to let the

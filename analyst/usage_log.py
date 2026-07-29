@@ -46,17 +46,14 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
     try:
         in_price, out_price = _PRICING.get(model, _DEFAULT_PRICING)
         cost_usd = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
-        # REVERTED 2026-07-18: the project/call_type/environment/provider columns added
-        # 2026-07-16 (citing a study-repo migration) were never actually run against the
-        # live Supabase table -- verified directly: real columns are just id, user_id,
-        # purpose, model, prompt_tokens, completion_tokens, cost_usd, latency_ms,
-        # created_at. Every write since 2026-07-16 has 400'd and been swallowed by this
-        # except-clause, leaving shared_calls_ok() reading a permanently-empty ledger
-        # ("0 calls today, always safe") for 2 days straight -- silently defeating the
-        # whole point of the shared-quota guard (see store.py::can_call()) and letting
-        # paper+live+events+study each burn their own local 200 allowance against the
-        # one real shared key, unseen. Back to `purpose`-only, which is all
-        # _project_of() ever needed anyway.
+        # RESTORED 2026-07-28: the project/call_type/environment/provider columns were
+        # reverted 2026-07-18 because they 400'd against the live table at the time (the
+        # migration adding them hadn't been run yet). It has since landed -- confirmed live
+        # via direct PostgREST query 2026-07-28 -- so readers that key off the real columns
+        # (rather than parsing the `purpose` prefix) now see this project's rows again.
+        # `environment` is filled from DASH_FIXED_MODE when the launch script pins one
+        # (dashboard.ps1='paper', run_dashboard_live.ps1='live'); falls back to whatever
+        # store.get_mode() would resolve to isn't worth the import here, so unset -> None.
         httpx.post(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers={
@@ -67,6 +64,10 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
             },
             json={
                 "purpose": f"quant:{kind}",
+                "project": "quant",
+                "call_type": kind,
+                "provider": provider,
+                "environment": os.environ.get("DASH_FIXED_MODE"),
                 "model": model,
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,

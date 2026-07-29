@@ -1361,7 +1361,46 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
                     else f" (not on {_bk.name()})"))
         ui.label(f"{t['method']} · opened {_fmt_ts(t['ts'])}{tag}")\
             .classes("text-xs text-grey-6")
-        ui.button("Details", on_click=lambda k=key: _open_detail(k)).props("flat dense").classes("text-xs")
+        with ui.row().classes("gap-1 items-center"):
+            ui.button("Details", on_click=lambda k=key: _open_detail(k))\
+                .props("flat dense").classes("text-xs")
+            # ADDED 2026-07-30: per-trade manual controls, PENDING trades only -- a filled
+            # (pos is not None) trade is already protected by its own broker-side SL/TP
+            # bracket, so neither action applies there.
+            if not pos:
+                _already_placed = t["id"] in _bk.executed_ids()
+                if not _already_placed:
+                    # Pause only makes sense before mirror_new() has dispatched the trade --
+                    # once a real order is resting at the broker, mirror_new()'s
+                    # `if t["id"] in done: continue` never looks at manual_paused again, so
+                    # the toggle would silently do nothing. Withdraw (below) still works then
+                    # because it cancels the broker order directly.
+                    _paused = bool(t.get("manual_paused"))
+                    def _toggle_pause(tid=t["id"], inst=key, want=not bool(t.get("manual_paused"))) -> None:
+                        from dashboard.core import paper as _paper
+                        _paper.set_trade_paused(tid, want)
+                        ui.notify(f"{inst}: {'paused' if want else 'resumed'}")
+                        active_panel.refresh()
+                    ui.button("Resume" if _paused else "Pause",
+                             icon="play_arrow" if _paused else "pause",
+                             on_click=_toggle_pause).props("flat dense").classes("text-xs")\
+                        .tooltip("Resume automatic funding -- picks up again next cycle"
+                                if _paused else
+                                "Hold this trade back from funding -- reversible, stays "
+                                "queued, resume any time")
+                def _withdraw(tid=t["id"], inst=key, placed=_already_placed) -> None:
+                    from dashboard.core import paper as _paper
+                    if placed and _bk.is_ib():
+                        from dashboard.execution import ib_exec
+                        ib_exec.cancel_pending_order(tid)
+                    _paper.withdraw_trade(tid)
+                    ui.notify(f"{inst}: withdrawn", type="warning")
+                    active_panel.refresh()
+                ui.button("Withdraw", icon="close", on_click=_withdraw)\
+                    .props("flat dense color=negative").classes("text-xs")\
+                    .tooltip("Cancel this trade permanently" +
+                            (" (also cancels the resting broker order)"
+                             if _already_placed else ""))
 
 
 def _fundable_count(eq: float | None) -> tuple[int | None, int]:
@@ -2472,13 +2511,17 @@ def main_page() -> None:
                     _paper.TECH_PAUSED = bool(e.value)
                     _save_settings()
                     gate_panel.refresh(); active_panel.refresh()
-                ui.checkbox("Pause tech investment (QQQ/XLK)", value=_paper.TECH_PAUSED,
+                ui.checkbox("Pause tech-concentrated ETFs", value=_paper.TECH_PAUSED,
                             on_change=_set_tech_paused)\
                     .tooltip("Manual override, checked before every other gate. Blocks new "
-                             "QQQ/XLK entries (core + sleeve) and actively cancels any "
-                             "already-pending, not-yet-funded QQQ/XLK signal. Existing FILLED "
-                             "positions are never touched -- their own broker-side SL/TP "
-                             "brackets keep protecting them regardless of this setting.")
+                             "entries (core + sleeve) and actively cancels any already-"
+                             "pending, not-yet-funded signal for QQQ (~55% IT sector), "
+                             "XLK (~100%), EEM (45%), SPY (38%), and ASHR (31%) -- funds "
+                             "verified to have Information Technology as their single "
+                             "largest GICS sector by a wide margin (2026-07-30). Existing "
+                             "FILLED positions are never touched -- their own broker-side "
+                             "SL/TP brackets keep protecting them regardless of this "
+                             "setting.")
                 ui.label("Risk/trade:").classes("text-sm")
                 def _set_risk(e) -> None:
                     setattr(_paper, "RISK_PER_TRADE", e.value)

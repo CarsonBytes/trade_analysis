@@ -28,26 +28,30 @@ def check(name, got, want):
 
 
 def _score(signal: str, strength: int = 5) -> Score:
-    return Score(key="SPY", direction="long", strength=strength, obviousness=1.0,
+    # NOTE 2026-07-30: uses IEF (a bond ETF, not in TECH_TICKERS) as the generic test
+    # instrument -- used to be SPY, but SPY joined TECH_TICKERS that day (see paper.py) and
+    # every test in this file would otherwise get short-circuited by the tech-pause gate
+    # instead of exercising the WAIT/WATCH logic under test.
+    return Score(key="IEF", direction="long", strength=strength, obviousness=1.0,
                 signal=signal, note="test", facts={}, facts_text="")
 
 
 def _llm(action: str, rationale: str = "test rationale") -> InstrumentSignal:
-    return InstrumentSignal(key="SPY", bias="bullish" if action == "BUY" else "neutral",
+    return InstrumentSignal(key="IEF", bias="bullish" if action == "BUY" else "neutral",
                             action=action, confidence=0.7, rationale=rationale,
                             macro_linkage="none material", invalidation="n/a")
 
 
 def test_no_llm_sig_watch_is_plain_noise():
     print("no llm_sig, deterministic WATCH -- plain noise reason (unchanged):")
-    ok, reasons, _ = evaluate_signal("SPY", _score("WATCH"), None)
+    ok, reasons, _ = evaluate_signal("IEF", _score("WATCH"), None)
     check("rejected", ok, False)
     check("plain WAIT/WATCH reason", reasons, ["action is WAIT/WATCH"])
 
 
 def test_llm_agrees_watch_is_plain_noise():
     print("\nllm_sig also WAIT, deterministic WATCH -- still plain noise:")
-    ok, reasons, _ = evaluate_signal("SPY", _score("WATCH"), _llm("WAIT"))
+    ok, reasons, _ = evaluate_signal("IEF", _score("WATCH"), _llm("WAIT"))
     check("rejected", ok, False)
     check("plain WAIT/WATCH reason (no real setup underneath either)",
           reasons, ["action is WAIT/WATCH"])
@@ -55,7 +59,7 @@ def test_llm_agrees_watch_is_plain_noise():
 
 def test_llm_vetoes_real_buy_signal():
     print("\ndeterministic BUY, llm_sig vetoes to WAIT -- must be DISTINGUISHABLE:")
-    ok, reasons, _ = evaluate_signal("SPY", _score("BUY"), _llm("WAIT", "Fed decision risk"))
+    ok, reasons, _ = evaluate_signal("IEF", _score("BUY"), _llm("WAIT", "Fed decision risk"))
     check("rejected", ok, False)
     check("exactly one reason", len(reasons), 1)
     check("reason is NOT the generic noise label", reasons == ["action is WAIT/WATCH"], False)
@@ -66,7 +70,7 @@ def test_llm_vetoes_real_buy_signal():
 
 def test_llm_vetoes_real_sell_signal():
     print("\ndeterministic SELL, llm_sig vetoes to WAIT -- same distinction, SELL side:")
-    ok, reasons, _ = evaluate_signal("SPY", _score("SELL"), _llm("WAIT"))
+    ok, reasons, _ = evaluate_signal("IEF", _score("SELL"), _llm("WAIT"))
     check("rejected", ok, False)
     check("reason names SELL specifically",
           reasons[0].startswith("LLM vetoed to WAIT (deterministic was SELL)"), True)
@@ -77,7 +81,7 @@ def test_llm_rationale_semicolons_are_sanitized():
           "(confirmed live: 'muted short-term returns; wait for break' fragmented into 2 "
           "bogus rows because journal.rejection_counts() splits reasons on bare ';'):")
     rationale_with_semicolon = "Uptrends across horizons but near resistance; wait for break"
-    ok, reasons, _ = evaluate_signal("SPY", _score("BUY"), _llm("WAIT", rationale_with_semicolon))
+    ok, reasons, _ = evaluate_signal("IEF", _score("BUY"), _llm("WAIT", rationale_with_semicolon))
     check("rejected", ok, False)
     check("no semicolon survives into the stored reason", ";" in reasons[0], False)
     check("the content is still present (comma-joined, not dropped)",
@@ -97,7 +101,7 @@ def test_journal_canonicalizes_the_new_reason():
 
 def test_llm_agrees_buy_passes_the_action_gate():
     print("\nllm_sig agrees BUY -- must NOT hit the WAIT/WATCH early return at all:")
-    ok, reasons, direction = evaluate_signal("SPY", _score("BUY", strength=5), _llm("BUY"))
+    ok, reasons, direction = evaluate_signal("IEF", _score("BUY", strength=5), _llm("BUY"))
     check("did not reject on action/WAIT gate",
           "action is WAIT/WATCH" in reasons or any(r.startswith("LLM vetoed") for r in reasons),
           False)
@@ -134,12 +138,29 @@ def test_tech_paused_blocks_xlk_too():
         paper.TECH_PAUSED = old
 
 
-def test_tech_paused_does_not_affect_non_tech_instruments():
-    print("\nTECH_PAUSED=True: a non-tech instrument (SPY) is completely unaffected:")
+# ADDED 2026-07-30: TECH_TICKERS expanded from {QQQ, XLK} to also cover SPY/EEM/ASHR after
+# verifying real GICS sector weights (SPY 38%, EEM 45%, ASHR 31% Information Technology --
+# all a clear plurality, same character as QQQ/XLK, unlike DIA/IWM/EFA which stay <20%).
+def test_tech_paused_blocks_spy_eem_ashr():
+    print("\nTECH_PAUSED=True: blocks SPY/EEM/ASHR too (38%/45%/31% GICS tech weight):")
     old = paper.TECH_PAUSED
     paper.TECH_PAUSED = True
     try:
-        ok, reasons, direction = evaluate_signal("SPY", _score("BUY", strength=5), _llm("BUY"))
+        for ticker in ("SPY", "EEM", "ASHR"):
+            ok, reasons, _ = evaluate_signal(ticker, _score("BUY", strength=5), _llm("BUY"))
+            check(f"{ticker} rejected", ok, False)
+            check(f"{ticker} tech-pause reason", reasons, ["tech investment paused"])
+    finally:
+        paper.TECH_PAUSED = old
+
+
+def test_tech_paused_does_not_affect_non_tech_instruments():
+    print("\nTECH_PAUSED=True: a non-tech instrument (IEF, a bond ETF) is completely "
+          "unaffected:")
+    old = paper.TECH_PAUSED
+    paper.TECH_PAUSED = True
+    try:
+        ok, reasons, direction = evaluate_signal("IEF", _score("BUY", strength=5), _llm("BUY"))
         check("not rejected by the tech gate",
               "tech investment paused" in reasons, False)
         check("direction resolved to long", direction, "long")
@@ -170,6 +191,7 @@ if __name__ == "__main__":
     test_llm_agrees_buy_passes_the_action_gate()
     test_tech_paused_blocks_a_strong_qqq_buy()
     test_tech_paused_blocks_xlk_too()
+    test_tech_paused_blocks_spy_eem_ashr()
     test_tech_paused_does_not_affect_non_tech_instruments()
     test_tech_resumed_lets_qqq_through_again()
     print()
