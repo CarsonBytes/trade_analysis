@@ -315,6 +315,7 @@ def _refresh_pending_ticks() -> None:
         return
     from dashboard.data import ib_client
     _live = dict(STATE["live"])
+    got = 0
     for key in pending_keys:
         try:
             tick = ib_client.get_stock_tick(key)
@@ -326,7 +327,14 @@ def _refresh_pending_ticks() -> None:
             # STATE["live"] fallback needs no changes to pick this up.
             _live[key] = {"price": tick["mid"], "src": "ib-tick",
                           "spread": tick.get("spread"), "age": 0.0}
+            got += 1
     STATE["live"] = _live
+    # Visibility, not just silent success/failure -- if this account has no real-time
+    # market-data subscription for these symbols, get_stock_tick() returns None for
+    # every one of them (a normal, already-handled case, not an error) and it's worth
+    # being able to SEE that from the log rather than guess.
+    log.info("pending-tick refresh: %d/%d instrument(s) got a fresh IB quote (%s)",
+             got, len(pending_keys), ", ".join(sorted(pending_keys)))
 
 
 def refresh_cheap() -> None:
