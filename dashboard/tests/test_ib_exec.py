@@ -550,6 +550,103 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
             pass
 
 
+# ADDED 2026-07-30: cancel_pending_order(), called from the dashboard's per-trade "Withdraw"
+# button BEFORE paper.withdraw_trade() touches the local journal -- must never leave a real
+# resting order at the broker with nothing local tracking it anymore (same failure mode
+# sync_closures() already guards against elsewhere in this file, above).
+def test_cancel_pending_order_cancels_the_resting_order():
+    print("cancel_pending_order(): a resting broker order for this paper trade gets "
+          "cancelled, and the ib_mirror row is marked CLOSED:")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(7,0,222,'SPY',1.0,50.0,'','2026-07-30T00:00:00','OPEN','etf')")
+
+        cancelled = []
+        fake_order = SimpleNamespace(orderId=1)
+        fake_trade = SimpleNamespace(contract=SimpleNamespace(conId=222), order=fake_order)
+
+        class _FakeIB:
+            def openTrades(self):
+                return [fake_trade]
+            def cancelOrder(self, order):
+                cancelled.append(order)
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            msg = ib_exec.cancel_pending_order(7)
+
+        check("cancelled exactly one order", len(cancelled), 1)
+        check("cancelled the correct order object", cancelled[0] is fake_order, True)
+        check("returned a human message naming the trade id", "7" in (msg or ""), True)
+        with ib_exec._conn() as c:
+            status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=7").fetchone()[0]
+        check("ib_mirror row marked CLOSED", status, "CLOSED")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_cancel_pending_order_noop_when_never_reached_broker():
+    print("\ncancel_pending_order(): no ib_mirror row at all (most pending trades -- still "
+          "waiting on risk budget/account size, never sent to IB) -- safe no-op:")
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+
+        class _FakeIB:
+            def openTrades(self):
+                raise AssertionError("should never be called -- nothing to look up")
+            def cancelOrder(self, order):
+                raise AssertionError("should never be called")
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()):
+            msg = ib_exec.cancel_pending_order(999)
+        check("returns None", msg, None)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_cancel_pending_order_noop_when_broker_unreachable():
+    print("\ncancel_pending_order(): broker not connected (_guard() -> None) -> safe no-op, "
+          "no exception:")
+    from dashboard.execution import ib_exec
+    with mock.patch.object(ib_exec, "_guard", return_value=None):
+        check("returns None", ib_exec.cancel_pending_order(1), None)
+
+
 # ADDED 2026-07-30: manual tech pause (paper.TECH_PAUSED/TECH_TICKERS), user-requested. Covers
 # the THIRD of the three places this gate applies (evaluate_signal() and place_sleeve_signals()
 # are tested in test_evaluate_signal.py / test_sleeve.py) -- an already-pending, not-yet-funded
@@ -869,6 +966,9 @@ if __name__ == "__main__":
     test_stale_signal_check_leaves_fresh_signals_alone()
     test_stale_signal_check_fails_open_on_no_live_price()
     test_mirror_new_cancels_stale_signal_instead_of_funding()
+    test_cancel_pending_order_cancels_the_resting_order()
+    test_cancel_pending_order_noop_when_never_reached_broker()
+    test_cancel_pending_order_noop_when_broker_unreachable()
     test_mirror_new_cancels_pending_tech_signal_when_paused()
     test_mirror_new_does_not_cancel_tech_signals_when_resumed()
     test_commission_estimate_usd()

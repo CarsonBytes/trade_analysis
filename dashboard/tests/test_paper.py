@@ -353,6 +353,88 @@ def test_reentry_blocked_uses_most_recent_trade_only():
         _restore_db(old, path)
 
 
+# ADDED 2026-07-30: dashboard's new per-trade Withdraw/Pause buttons (app.py's _trade_card())
+# call these directly -- covering the DB layer in isolation, separately from the UI wiring.
+def test_set_trade_paused_toggles_flag_on_open_trade():
+    print("set_trade_paused(): toggles manual_paused on an OPEN trade, both directions:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        t = paper.Trade(
+            ts="2026-07-30T10:00:00+00:00", instrument="SPY", direction="long",
+            method="ATR rr3.0", entry=500.0, sl=490.0, tp=530.0, rr=3.0,
+            size_units=1.0, horizon_end="2026-08-30T10:00:00+00:00", confidence=0.6,
+            rationale="test",
+        )
+        paper._insert(t)
+        trade_id = paper.open_trades()[0]["id"]
+        check("starts unpaused", paper.open_trades()[0]["manual_paused"], 0)
+        paper.set_trade_paused(trade_id, True)
+        check("paused", paper.open_trades()[0]["manual_paused"], 1)
+        paper.set_trade_paused(trade_id, False)
+        check("resumed", paper.open_trades()[0]["manual_paused"], 0)
+    finally:
+        _restore_db(old, path)
+
+
+def test_set_trade_paused_noop_on_closed_trade():
+    print("\nset_trade_paused(): a CLOSED trade's manual_paused is never touched "
+          "(WHERE status='OPEN' guard):")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        trade_id = _closed_trade("SPY", "long", entry=500.0, sl=490.0, status="WIN",
+                                 exit_ts="2026-07-29T00:00:00+00:00")
+        paper.set_trade_paused(trade_id, True)
+        row = [t for t in paper.all_trades() if t["id"] == trade_id][0]
+        check("still 0 -- update matched zero rows", row["manual_paused"], 0)
+    finally:
+        _restore_db(old, path)
+
+
+def test_withdraw_trade_cancels_a_pending_trade():
+    print("\nwithdraw_trade(): marks an OPEN trade CANCELLED with realized_r=0 and a "
+          "human exit_reason, entry price preserved as exit_price:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        t = paper.Trade(
+            ts="2026-07-30T10:00:00+00:00", instrument="EEM", direction="long",
+            method="ATR rr3.0", entry=61.5, sl=59.0, tp=68.0, rr=3.0,
+            size_units=10.0, horizon_end="2026-08-30T10:00:00+00:00", confidence=0.6,
+            rationale="test",
+        )
+        paper._insert(t)
+        trade_id = paper.open_trades()[0]["id"]
+        paper.withdraw_trade(trade_id)
+        check("no longer OPEN", paper.open_trades(), [])
+        row = [t for t in paper.all_trades() if t["id"] == trade_id][0]
+        check("status CANCELLED", row["status"], "CANCELLED")
+        check("realized_r is 0 (never funded, no real gain/loss)", row["realized_r"], 0.0)
+        check("exit_price mirrors entry (never actually filled/exited)",
+              row["exit_price"], 61.5)
+        check("exit_reason explains why", row["exit_reason"], "manually withdrawn")
+    finally:
+        _restore_db(old, path)
+
+
+def test_withdraw_trade_noop_on_unknown_or_already_closed_id():
+    print("\nwithdraw_trade(): a nonexistent or already-closed trade id is a safe no-op "
+          "(no exception, no phantom row created):")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        paper.withdraw_trade(99999)  # never existed at all
+        check("no trades exist", paper.all_trades(), [])
+        trade_id = _closed_trade("EEM", "long", entry=61.5, sl=59.0, status="WIN",
+                                 exit_ts="2026-07-29T00:00:00+00:00")
+        paper.withdraw_trade(trade_id)  # already closed, not OPEN
+        row = [t for t in paper.all_trades() if t["id"] == trade_id][0]
+        check("status still WIN, not overwritten to CANCELLED", row["status"], "WIN")
+    finally:
+        _restore_db(old, path)
+
+
 if __name__ == "__main__":
     test_deposit_adjusted_series()
     test_current_drawdown_pct()
@@ -365,6 +447,10 @@ if __name__ == "__main__":
     test_reentry_blocked_win_does_not_gate()
     test_reentry_blocked_no_prior_trade()
     test_reentry_blocked_uses_most_recent_trade_only()
+    test_set_trade_paused_toggles_flag_on_open_trade()
+    test_set_trade_paused_noop_on_closed_trade()
+    test_withdraw_trade_cancels_a_pending_trade()
+    test_withdraw_trade_noop_on_unknown_or_already_closed_id()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")
