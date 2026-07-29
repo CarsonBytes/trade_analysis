@@ -60,14 +60,20 @@ outbound connection to gateway 4001), HTTP 200, clean reconcile ("broker/local p
 (8 open)"), no errors. A new QQQ signal (id=31) placed itself normally ~2min post-restart --
 the system re-evaluates and acts immediately once alive again, nothing was "stuck."
 
-**NOT YET FIXED -- the actual root-cause gap remains open.** What's needed is an INDEPENDENT
-periodic watchdog that checks "is something actually listening on 8081/8080" and proactively
-calls `Start-ScheduledTask` if not, completely decoupled from Task Scheduler's own restart-on-
-failure logic (which this incident just showed is insufficient on its own). [[project-event-
-radar]] already has exactly this pattern (`deploy/watchdog.ps1`, 20s poll loop, Startup-VBS +
-PID-lock-guarded against duplicates) -- the natural fix here is the same pattern applied to
-quant's two dashboard instances, not a new design. Until built, this class of failure can
-recur and go undetected for an unbounded time.
+**FIXED same day (2026-07-30):** built `D:\quant\watchdog.ps1`, an independent watchdog
+checking BOTH instances every 20s -- port LISTENING (catches a genuinely dead process, this
+incident's cause) AND a real HTTP GET within 8s (catches a HUNG process that still holds the
+port but stopped responding, the DIFFERENT 2026-07-24 incident class) -- calling
+`Start-ScheduledTask` for whichever instance fails either check, fully decoupled from Task
+Scheduler's own restart-on-failure logic. Same pattern as [[project-event-radar]]'s
+`deploy/watchdog.ps1` and this project's own Cloudflare Tunnel watchdog (PID-lock-guarded
+against duplicate loops, Startup-folder VBS at logon since `Register-ScheduledTask` is
+unreliable in this session context -- see `install-watchdog.ps1`). **Verified end-to-end, not
+just installed:** force-killed the paper process (`Invoke-CimMethod -MethodName Terminate` --
+plain `Stop-Process` silently no-ops against these privileged processes, confirmed the hard
+way first), watchdog detected it at 00:25:25, called `Start-ScheduledTask`, confirmed healthy
+at 00:25:41 -- 16 seconds, fully automatic. Installed and running now; survives this logon
+via the Startup entry.
 
 ---
 
