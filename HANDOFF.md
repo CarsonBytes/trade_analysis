@@ -55,9 +55,10 @@ any symbol without a real-time subscription -- it was never actually "falling ba
 it was failing the SAME way on every single call. **Real fix:** call `ib.reqMarketDataType(3)`
 (delayed, ~15-20min lag, free on IBKR, no subscription needed) once per fresh connection in
 `_ensure_conn()`. Full test suite still green (no test exercises `_ensure_conn()`'s internals,
-all mock it out entirely). Deployed; still needs a fresh live observation cycle to confirm the
-`0/3` pattern actually turns around now that delayed-mode is requested -- check the
-`pending-tick refresh` log line next session if this comes up again.
+all mock it out entirely). **CONFIRMED working after redeploy**: the very first `pending-tick
+refresh` cycle on the new connection read `3/3`, and it stayed `3/3` on every cycle after --
+visually confirmed on the live site too, all 3 pending cards (SPY/QQQ/XLK) now show fresh,
+moving prices distinct from their originally-logged values.
 
 ---
 
