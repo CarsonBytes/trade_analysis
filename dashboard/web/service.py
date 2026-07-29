@@ -292,6 +292,43 @@ def pnl_crosscheck() -> dict:
     return out
 
 
+# ADDED 2026-07-30, alongside the same-day fix for OPEN positions' stale price (see
+# ib_exec.py::live_positions()'s current_price). PENDING (not-yet-funded) signals have no
+# broker position to read a live mark from, so they were still falling back to STATE["live"]'s
+# WEEKLY-bar price for a pure IB deployment (no MT5) -- the exact same staleness, just for
+# trades that haven't been funded yet rather than ones that have. ib_client.get_stock_tick()
+# (a live/delayed quote via reqTickersAsync, independent of holding a position) already
+# existed and was already used by the sleeve's spread guard, just never for display. Scoped to
+# ONLY the instruments with a genuinely pending trade right now (typically 0-5, not the full
+# ~22-instrument universe) to avoid extra IBKR API load on instruments nothing is waiting on.
+def _refresh_pending_ticks() -> None:
+    if not broker.is_ib():
+        return   # MT5's STATE["live"] is already tick-fresh via _score_one(); nothing to do
+    try:
+        from dashboard.core import paper
+        pending_keys = {t["instrument"] for t in paper.all_trades()
+                        if t["status"] == "OPEN" and t["id"] not in broker.executed_ids()}
+    except Exception as e:
+        log.debug("_refresh_pending_ticks: could not list pending trades: %s", e)
+        return
+    if not pending_keys:
+        return
+    from dashboard.data import ib_client
+    _live = dict(STATE["live"])
+    for key in pending_keys:
+        try:
+            tick = ib_client.get_stock_tick(key)
+        except Exception as e:
+            log.debug("_refresh_pending_ticks: get_stock_tick(%s) failed: %s", key, e)
+            continue
+        if tick and tick.get("mid"):
+            # Same shape _score_one() already writes, so _trade_card()'s existing
+            # STATE["live"] fallback needs no changes to pick this up.
+            _live[key] = {"price": tick["mid"], "src": "ib-tick",
+                          "spread": tick.get("spread"), "age": 0.0}
+    STATE["live"] = _live
+
+
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
@@ -315,6 +352,7 @@ def refresh_cheap() -> None:
             STATE["positions"] = _pos
     except Exception as e:
         log.debug("live_positions error: %s", e)
+    _refresh_pending_ticks()
     # broker-agnostic status for the header (computed here so the UI thread never
     # blocks on a broker call). Under BROKER=ib this is the IBKR gateway/account.
     STATE["broker_name"] = broker.name()

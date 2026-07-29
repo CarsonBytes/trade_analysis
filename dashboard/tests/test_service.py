@@ -291,6 +291,109 @@ def test_pnl_crosscheck_not_enough_data():
         _restore_db(old, path)
 
 
+# ADDED 2026-07-30, alongside the same-day fix for OPEN positions' stale price
+# (ib_exec.py::live_positions()'s current_price). PENDING (not-yet-funded) trades have no
+# broker position to read a fresh mark from, so they were still showing STATE["live"]'s WEEKLY-
+# bar price under BROKER=ib -- confirmed live, same root cause, just for unfunded signals.
+def test_refresh_pending_ticks_fetches_only_for_pending_instruments():
+    print("_refresh_pending_ticks(): fetches a fresh IB tick for a PENDING (unfunded) "
+          "instrument, but does NOT waste a call on an already-funded one:")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        from unittest import mock
+        from dashboard.core import paper
+        from dashboard.execution import ib_exec   # local import: creates the ib_mirror table
+        from dashboard.web import service
+
+        with paper._LOCK, paper._conn():
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            # id=1 SPY: OPEN, funded (has an ib_mirror row) -- must NOT get a tick fetch
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-21T00:00:00','SPY','long','ATR rr3.0',742.09,727.87,"
+                     "784.76,3.0,1,'OPEN')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'SPY',1.0,1000.0,'','2026-07-21T00:00:00','OPEN','etf')")
+            # id=2 QQQ: OPEN, NOT funded (no ib_mirror row) -- pending, SHOULD get a fresh tick
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(2,'2026-07-21T00:00:00','QQQ','long','ATR rr3.0',675.49,633.32,"
+                     "686.65,3.0,1,'OPEN')")
+
+        calls = []
+
+        def _fake_tick(symbol):
+            calls.append(symbol)
+            return {"bid": 664.0, "ask": 664.74, "mid": 664.37, "spread": 0.74}
+
+        service.STATE["live"] = {"QQQ": {"price": 675.49, "src": "yfinance",
+                                         "spread": None, "age": None}}
+        with mock.patch("dashboard.data.ib_client.get_stock_tick", side_effect=_fake_tick):
+            service._refresh_pending_ticks()
+
+        check("fetched exactly one tick", calls, ["QQQ"])
+        check("SPY (funded) got no fetch", "SPY" in calls, False)
+        check("QQQ's stale weekly price replaced with the fresh tick",
+              service.STATE["live"]["QQQ"]["price"], 664.37)
+        check("marked with the ib-tick source", service.STATE["live"]["QQQ"]["src"], "ib-tick")
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+        service.STATE["live"] = {}
+
+
+def test_refresh_pending_ticks_noop_under_mt5():
+    print("\n_refresh_pending_ticks(): MT5's STATE[\"live\"] is already tick-fresh -- "
+          "no-op, zero IB calls, regardless of pending trades:")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ.pop("BROKER", None)      # default is mt5, not ib
+    try:
+        from unittest import mock
+        from dashboard.core import paper
+        from dashboard.web import service
+
+        with paper._LOCK, paper._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-21T00:00:00','QQQ','long','ATR rr3.0',675.49,633.32,"
+                     "686.65,3.0,1,'OPEN')")
+
+        with mock.patch("dashboard.data.ib_client.get_stock_tick") as fake_tick:
+            service._refresh_pending_ticks()
+        check("get_stock_tick never called under MT5", fake_tick.called, False)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+
+
+def test_refresh_pending_ticks_noop_when_nothing_pending():
+    print("\n_refresh_pending_ticks(): no OPEN trades at all -- no-op, zero IB calls:")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        from unittest import mock
+        from dashboard.core import paper
+        from dashboard.web import service
+
+        with paper._LOCK, paper._conn():
+            pass   # paper_trades exists but is empty
+
+        with mock.patch("dashboard.data.ib_client.get_stock_tick") as fake_tick:
+            service._refresh_pending_ticks()
+        check("get_stock_tick never called with nothing pending", fake_tick.called, False)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+
+
 if __name__ == "__main__":
     for t in (test_heal_series_bracketed_zero_spike, test_heal_series_real_sustained_jump_kept,
               test_heal_series_unresolved_anomaly_left_alone,
@@ -300,7 +403,10 @@ if __name__ == "__main__":
               test_hist_cash_gpv, test_detect_external_cash_flow,
               test_pnl_crosscheck_agrees_when_clean,
               test_pnl_crosscheck_flags_unrecorded_deposit,
-              test_pnl_crosscheck_not_enough_data):
+              test_pnl_crosscheck_not_enough_data,
+              test_refresh_pending_ticks_fetches_only_for_pending_instruments,
+              test_refresh_pending_ticks_noop_under_mt5,
+              test_refresh_pending_ticks_noop_when_nothing_pending):
         t()
     print()
     if _fails:

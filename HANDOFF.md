@@ -27,9 +27,28 @@ broker-price extraction incl. a fails-safe-to-None case, matching the existing `
 coverage style). Display-only fix -- order placement/exit logic uses SL/TP levels set at entry
 and broker-side bracket orders, untouched by this; no backtest needed, deployed directly.
 
+**FOLLOW-UP same day: PENDING (not-yet-funded) trades had the identical staleness, unfixed by
+the above** since they have no broker position for `current_price` to come from. User asked
+directly ("would those positions and SL/TP be dynamically adjusted, i still see old prices
+there") -- answered precisely first (SL/TP are deliberately frozen at signal time, never
+recomputed; see `STALE_SIGNAL_CANCEL_R`'s docstring -- funding uses a fresh MARKET-order entry
+but the ORIGINAL sl/tp), then fixed the separate, real display gap. `ib_client.get_stock_tick()`
+(a live/delayed quote via `reqTickersAsync`, independent of holding a position) already existed
+-- already used by the sleeve's spread guard -- but was never called for display. New
+`service.py::_refresh_pending_ticks()` fetches it ONLY for instruments with a genuinely pending
+trade right now (typically 0-5, not the full ~22-instrument universe, to avoid extra IBKR API
+load on instruments nothing is waiting on), overwriting `STATE["live"][key]` with the fresher
+value -- `_trade_card()` needed zero changes, it already reads that same dict. No-op under MT5
+(already tick-fresh) and when nothing is pending. 3 new tests. Note: this account doesn't appear
+to have a real-time market-data subscription for ETFs (`get_stock_tick()`'s own docstring warns
+it "needs a real-time market-data subscription; returns None on delayed/empty" and the sleeve's
+spread guard already treats a None tick as routine) -- when it returns None the code falls
+through to the existing weekly-bar price unchanged, same "missing quote isn't a hard failure"
+philosophy used everywhere else in this codebase.
+
 ---
 
-### 🚨 2026-07-29: LIVE dashboard down ~80+ min, undetected -- a THIRD orphan-class gap, still open
+### 🚨 2026-07-29: LIVE dashboard down ~80+ min, undetected -- a THIRD orphan-class gap (FIXED 07-30, see below)
 
 Routine "verify live site" check found port 8081 not listening and `DashboardAppLive`'s task
 state "Ready" (stopped). `Get-ScheduledTaskInfo` showed `LastRunTime` 08:24 that morning,
