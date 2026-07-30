@@ -2540,17 +2540,19 @@ def main_page() -> None:
                         ("PAUSED" if _paper.TECH_PAUSED else "RESUMED") +
                         " manually (QQQ/XLK/SPY/EEM/ASHR)")
                     gate_panel.refresh(); active_panel.refresh()
-                ui.checkbox("Pause tech-concentrated ETFs", value=_paper.TECH_PAUSED,
+                ui.checkbox("Pause tech-concentrated ETFs (core only)", value=_paper.TECH_PAUSED,
                             on_change=_set_tech_paused)\
-                    .tooltip("Manual override, checked before every other gate. Blocks new "
-                             "entries (core + sleeve) and actively cancels any already-"
-                             "pending, not-yet-funded signal for QQQ (~55% IT sector), "
-                             "XLK (~100%), EEM (45%), SPY (38%), and ASHR (31%) -- funds "
-                             "verified to have Information Technology as their single "
-                             "largest GICS sector by a wide margin (2026-07-30). Existing "
-                             "FILLED positions are never touched -- their own broker-side "
-                             "SL/TP brackets keep protecting them regardless of this "
-                             "setting.")
+                    .tooltip("Manual override for the CORE strategy only, checked before "
+                             "every other core gate. Blocks new core entries and actively "
+                             "cancels any already-pending, not-yet-funded CORE signal for "
+                             "QQQ (~55% IT sector), XLK (~100%), EEM (45%), SPY (38%), and "
+                             "ASHR (31%) -- funds verified to have Information Technology as "
+                             "their single largest GICS sector by a wide margin (2026-07-30). "
+                             "Deliberately LOWER priority than the dipbuy-sleeve strategy "
+                             "(2026-07-30, user request): a QQQ/XLK/SPY/EEM/ASHR dip-buy can "
+                             "still fire and fund even while this is paused. Existing FILLED "
+                             "positions are never touched -- their own broker-side SL/TP "
+                             "brackets keep protecting them regardless of this setting.")
                 ui.label("Risk/trade:").classes("text-sm")
                 def _set_risk(e) -> None:
                     setattr(_paper, "RISK_PER_TRADE", e.value)

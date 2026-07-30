@@ -290,14 +290,17 @@ def mirror_new() -> list[str]:
     for t in paper.open_trades():
         if t["id"] in done:
             continue
-        # Manual tech pause -- checked FIRST, ahead of core/sleeve dispatch. Covers BOTH
-        # methods in one place (core ATR trades and sleeve dipbuy trades both flow through
-        # this same loop) since pending==unfunded regardless of which method logged it.
-        # Actively CANCELS a pending tech signal rather than just leaving it queued forever --
-        # see paper.TECH_PAUSED's docstring for why (a deliberate user override, not a
-        # backtested change). Already-FILLED tech positions are untouched -- this loop only
-        # ever sees not-yet-mirrored (pending) trades in the first place.
-        if paper.TECH_PAUSED and t["instrument"] in paper.TECH_TICKERS:
+        # Manual tech pause -- checked FIRST, ahead of core dispatch, for CORE trades only.
+        # CHANGED 2026-07-30: user request -- tech-pause is now lower priority than the
+        # dipbuy-sleeve strategy, so a pending sleeve (dipbuy-sleeve) tech signal is
+        # deliberately EXCLUDED here and proceeds to normal placement below, same as
+        # sleeve.py::place_sleeve_signals() no longer gating new sleeve entries on it either.
+        # Actively CANCELS a pending CORE tech signal rather than just leaving it queued
+        # forever -- see paper.TECH_PAUSED's docstring for why (a deliberate user override,
+        # not a backtested change). Already-FILLED tech positions are untouched -- this loop
+        # only ever sees not-yet-mirrored (pending) trades in the first place.
+        if (paper.TECH_PAUSED and t["instrument"] in paper.TECH_TICKERS
+                and t["method"] != sleeve.SLEEVE_METHOD):
             paper._update_resolution(
                 t["id"], "CANCELLED",
                 dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),

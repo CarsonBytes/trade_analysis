@@ -5,6 +5,41 @@ Last updated 2026-07-30.
 
 ---
 
+### 🎛️ CHANGED 2026-07-30: tech-pause now LOWER priority than the dipbuy-sleeve strategy
+
+User request: a QQQ/XLK/SPY/EEM/ASHR dip-buy sleeve entry should still be allowed to fire and
+fund even while "Pause tech-concentrated ETFs" is on -- the toggle should only gate the CORE
+strategy. Previously it was checked FIRST in all three places (a deliberate design choice from
+earlier the same day, since superseded by this explicit follow-up instruction).
+
+- `sleeve.py::place_sleeve_signals()`: the `TECH_PAUSED`/`TECH_TICKERS` check REMOVED entirely
+  from the per-ticker loop -- the sleeve no longer reads these globals at all.
+- `ib_exec.py::mirror_new()`: the pending-cancel check now reads
+  `if paper.TECH_PAUSED and t["instrument"] in paper.TECH_TICKERS and t["method"] !=
+  sleeve.SLEEVE_METHOD` -- a pending `dipbuy-sleeve` tech signal is excluded and proceeds to
+  `_place_sleeve_bracket()` normally; a pending CORE (`ATR rr3.0`) tech signal is still
+  cancelled exactly as before.
+- `paper.py::evaluate_signal()` (core funnel) is UNCHANGED -- it never touched sleeve entries
+  in the first place (the sleeve has always used its own separate `entry_signal()` codepath,
+  never `evaluate_signal()`), so core tech entries are still fully blocked while paused.
+- Checkbox relabelled "Pause tech-concentrated ETFs (core only)" + tooltip updated to state
+  the new precedence explicitly.
+- Test fallout: `test_ib_exec.py`'s `test_mirror_new_cancels_pending_tech_signal_when_paused`
+  previously (incorrectly, by today's new rule) used `method='dipbuy-sleeve'` for its
+  cancellation-assertion fixture -- repointed to `'ATR rr3.0'` (core), and added
+  `test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused()` to guard the new
+  behavior. `test_sleeve.py` gained `test_sleeve_ignores_tech_paused_entirely()` for the same
+  reason at the sleeve.py layer; its pre-existing end-to-end test no longer needs to patch
+  `TECH_PAUSED` off since the sleeve doesn't check it at all now. Full suite green, both
+  instances redeployed.
+
+**Net effect**: the manual override now has exactly the scope its name implies -- pausing
+"tech investment" pauses the CORE trend book's tech exposure, while the panic-dip-buy sleeve
+(a fundamentally different, short-holding-period strategy) keeps working on tech tickers
+regardless, per explicit user instruction that it should take priority.
+
+---
+
 ### 🎛️ ADDED 2026-07-30: TECH_TICKERS expanded (SPY/EEM/ASHR) + per-trade Withdraw/Pause buttons
 
 Same session, later the same day as the tech-pause feature below -- two follow-ups, both

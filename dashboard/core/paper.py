@@ -43,16 +43,21 @@ HORIZON_CAL = 35           # live horizon window in calendar days (5 weeks) -- m
 RISK_PER_TRADE = 0.01      # 1% risk/trade -- with ETF_POS_CAP=0.25 this "fills" the cap on
                            # the high-vol names; the cap (not risk%) is the real return/DD dial.
 ACCOUNT = 10_000.0
-# ADDED 2026-07-30, user-requested manual pause/resume for tech exposure specifically (QQQ
-# core+sleeve, XLK sleeve-only -- the only two tech-flavored tickers in the tradeable
-# universe). A deliberate, explicit override, NOT a backtested strategy change -- it exists
-# to let the user manually sit out tech regardless of what any gate (deterministic edge, LLM,
-# objective confidence) says, so it's checked FIRST, ahead of every other entry condition, in
-# both evaluate_signal() (core) and sleeve.py::place_sleeve_signals(). Also actively CANCELS
-# any already-pending (not-yet-funded) tech signal while paused (ib_exec.py::mirror_new()) --
-# existing FILLED positions are deliberately left untouched, same "new entries only" scope as
-# every other pause-type gate here (DD_HALT_PCT etc.), their own broker-side SL/TP brackets
-# keep protecting them regardless of this setting.
+# ADDED 2026-07-30, user-requested manual pause/resume for tech exposure specifically. A
+# deliberate, explicit override, NOT a backtested strategy change -- it exists to let the user
+# manually sit out tech regardless of what any gate (deterministic edge, LLM, objective
+# confidence) says, checked FIRST, ahead of every other entry condition, in evaluate_signal()
+# (the CORE funnel only). Also actively CANCELS an already-pending (not-yet-funded) CORE tech
+# signal while paused (ib_exec.py::mirror_new()) -- existing FILLED positions are deliberately
+# left untouched, same "new entries only" scope as every other pause-type gate here
+# (DD_HALT_PCT etc.), their own broker-side SL/TP brackets keep protecting them regardless of
+# this setting.
+#
+# CHANGED 2026-07-30 (same day): explicitly LOWER priority than the dipbuy-sleeve strategy,
+# per user request -- sleeve.py::place_sleeve_signals() no longer checks this at all, and
+# mirror_new()'s pending-cancel now excludes SLEEVE_METHOD trades, so a QQQ/XLK/SPY/EEM/ASHR
+# dip-buy can still fire and get funded even while this toggle is on. Only CORE entries
+# (`evaluate_signal()`) are still gated by it.
 TECH_PAUSED = True         # set True 2026-07-30 per explicit user request ("for the moment
                            # set tech investment to pause") -- toggle from the dashboard
                            # Settings panel to resume.

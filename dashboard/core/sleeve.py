@@ -269,10 +269,12 @@ def place_sleeve_signals(equity_usd: float | None) -> list[str]:
         return logs
     now = dt.datetime.now(dt.timezone.utc)
     for ticker in active_sleeve_universe():
-        # Manual tech pause -- checked FIRST, ahead of every other gate, same as the core
-        # funnel's evaluate_signal(). See paper.TECH_PAUSED's docstring.
-        if paper.TECH_PAUSED and ticker in paper.TECH_TICKERS:
-            continue
+        # CHANGED 2026-07-30: manual tech pause DELIBERATELY does NOT apply to the sleeve --
+        # user request: tech-pause is now lower priority than the dipbuy-sleeve strategy, so
+        # a QQQ/XLK/SPY/EEM/ASHR dip-buy can still fire even while the toggle is on. Tech-pause
+        # still gates the CORE funnel (paper.evaluate_signal()) and mirror_new()'s pending-
+        # cancel now excludes SLEEVE_METHOD too (see its own updated comment) -- this sleeve
+        # loop simply never checks TECH_PAUSED at all anymore.
         if paper._has_open(ticker, SLEEVE_METHOD) or paper._recent_close(ticker):
             continue
         tripped = _ticker_breaker_tripped(ticker)
