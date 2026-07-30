@@ -147,9 +147,70 @@ def test_sleeve_ignores_tech_paused_entirely():
             pass
 
 
+# ADDED 2026-07-31: entry_signal()'s VIX-spike condition was DROPPED per user-approved
+# ablation (meanrev_filter_ablation_test.py's variant B beat the VIX-inclusive spec on
+# CAGR/Sharpe/Calmar at every weight, IS and OOS -- see HANDOFF.md). Direct tests of the
+# real function (not mocked), confirming the actual new gate, not just that nothing broke.
+def _daily(close=97.0, ma20=100.0, rsi14=30.0, adx14=25.0, vix=15.0, vix_5ago=15.0):
+    import pandas as pd
+    return {"close": close, "vix": vix, "vix_5ago": vix_5ago, "ma5": close * 0.99,
+           "ma20": ma20, "rsi14": rsi14, "adx14": adx14, "asof": pd.Timestamp.now()}
+
+
+def test_entry_signal_fires_without_a_vix_spike():
+    print("entry_signal(): fires on close/RSI/ADX alone -- flat VIX (no spike) no longer "
+          "blocks entry (the 2026-07-31 change):")
+    from dashboard.core import sleeve
+    with mock.patch.object(sleeve, "_load_daily",
+                           return_value=_daily(vix=15.0, vix_5ago=15.0)):  # 0% VIX move
+        cand = sleeve.entry_signal("SPY")
+    check("candidate returned despite no VIX spike", cand is not None, True)
+    check("instrument correct", cand["instrument"] if cand else None, "SPY")
+
+
+def test_entry_signal_still_requires_rsi_below_35():
+    print("\nentry_signal(): RSI>=35 still blocks entry (unchanged):")
+    from dashboard.core import sleeve
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(rsi14=40.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("no candidate -- RSI too high", cand, None)
+
+
+def test_entry_signal_still_requires_adx_above_20():
+    print("\nentry_signal(): ADX<=20 still blocks entry (unchanged -- this is the filter "
+          "that's actually earning its keep per the ablation):")
+    from dashboard.core import sleeve
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(adx14=15.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("no candidate -- ADX too weak", cand, None)
+
+
+def test_entry_signal_still_requires_close_below_20ma():
+    print("\nentry_signal(): close not below 20MA*0.975 still blocks entry (unchanged):")
+    from dashboard.core import sleeve
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(close=100.0, ma20=100.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("no candidate -- not oversold vs 20MA", cand, None)
+
+
+def test_entry_signal_vix_still_drives_sizing_not_gating():
+    print("\nentry_signal(): VIX>30 still bumps risk_pct to RISK_HIGH (sizing untouched, "
+          "only the ENTRY gate on VIX was removed):")
+    from dashboard.core import sleeve
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(vix=35.0, vix_5ago=35.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("candidate returned", cand is not None, True)
+    check("risk_pct bumped to RISK_HIGH", cand["risk_pct"] if cand else None, sleeve.RISK_HIGH)
+
+
 if __name__ == "__main__":
     test_ticker_breaker_isolated()
     test_sleeve_ignores_tech_paused_entirely()
+    test_entry_signal_fires_without_a_vix_spike()
+    test_entry_signal_still_requires_rsi_below_35()
+    test_entry_signal_still_requires_adx_above_20()
+    test_entry_signal_still_requires_close_below_20ma()
+    test_entry_signal_vix_still_drives_sizing_not_gating()
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

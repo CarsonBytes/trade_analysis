@@ -16,8 +16,11 @@ AND the naive all-22 version. NOTE: IWM's inclusion updates an earlier note ("no
 edge") from an earlier research round -- this re-test, run against the CURRENT exact production
 signal spec, shows genuine edge (n=83, meanR +0.80%, win 72%) at a comparable tier to DIA. See
 HANDOFF for the full comparison table.
-Entry (ALL, daily close): close < 20dMA*0.975  AND  VIX/VIX[-5] - 1 > 0.15  AND  RSI14 < 35
-                           AND ADX14 > 20.
+Entry (ALL, daily close): close < 20dMA*0.975  AND  RSI14 < 35  AND ADX14 > 20.
+CHANGED 2026-07-31: the VIX-spike condition (was: VIX/VIX[-5] - 1 > 0.15) was DROPPED from
+entry gating -- see entry_signal()'s docstring below and HANDOFF.md for the ablation that
+found it was over-conditioning the entry. VIX is still used for position SIZING (1.0% risk
+above VIX>30, vs 0.5% base) -- only the entry gate on it is gone.
 Size: 0.5% risk base, 1.0% at VIX>30 (hard cap 1%) -- risk_pct stored in entry_facts so
       ib_exec._place_sleeve_bracket sizes correctly without re-deriving it.
 Exit: FOUR conditions, first true wins:
@@ -201,7 +204,16 @@ def _load_daily(ticker: str) -> dict | None:
 
 def entry_signal(ticker: str) -> dict | None:
     """The exact backtest entry rule. Returns a candidate dict if ALL conditions hold, else
-    None. Caller still must check _has_open()/cooldown before acting on this."""
+    None. Caller still must check _has_open()/cooldown before acting on this.
+
+    CHANGED 2026-07-31: the VIX-spike condition (VIX +15%/5d) was DROPPED from entry gating
+    -- user-proposed ablation (dashboard/research/meanrev_filter_ablation_test.py, variant
+    B) found it was over-conditioning the entry, filtering out real oversold-in-a-real-trend
+    setups that don't happen to coincide with a VIX spike that particular week. Beat the
+    VIX-inclusive spec on CAGR/Sharpe/Calmar at every weight tested (5/10/15%), both
+    in-sample and OOS, no exceptions -- full writeup in HANDOFF.md. `vix_up`/`d["vix"]` are
+    still computed and used below (rationale text + the VIX>30 SIZING bump, RISK_HIGH vs
+    RISK_BASE) -- only the ENTRY gate on it is gone, sizing is untouched."""
     d = _load_daily(ticker)
     if d is None:
         return None
@@ -209,8 +221,7 @@ def entry_signal(ticker: str) -> dict | None:
                                         d["vix"], d["vix_5ago"])) or d["vix_5ago"] <= 0:
         return None
     vix_up = d["vix"] / d["vix_5ago"] - 1.0
-    ok = (d["close"] < d["ma20"] * 0.975) and (vix_up > 0.15) and \
-         (d["rsi14"] < 35) and (d["adx14"] > 20)
+    ok = (d["close"] < d["ma20"] * 0.975) and (d["rsi14"] < 35) and (d["adx14"] > 20)
     if not ok:
         return None
     entry = d["close"]
@@ -219,9 +230,10 @@ def entry_signal(ticker: str) -> dict | None:
         "instrument": ticker, "entry": entry,
         "sl": round(entry * (1 - STOP_FRAC), 4), "tp": round(entry * (1 + TARGET_FRAC), 4),
         "risk_pct": risk_pct, "vix_at_entry": d["vix"], "asof": d["asof"],
-        "rationale": (f"panic dip-buy: close {entry:.2f} < 20MA*0.975 "
-                      f"({d['ma20']*0.975:.2f}), VIX {d['vix']:.1f} (+{vix_up:.0%}/5d), "
-                      f"RSI14 {d['rsi14']:.0f}, ADX14 {d['adx14']:.0f}"),
+        "rationale": (f"dip-buy: close {entry:.2f} < 20MA*0.975 "
+                      f"({d['ma20']*0.975:.2f}), RSI14 {d['rsi14']:.0f}, "
+                      f"ADX14 {d['adx14']:.0f} (VIX {d['vix']:.1f}, {vix_up:+.0%}/5d -- "
+                      f"context/sizing only, not a 2026-07-31+ entry condition)"),
     }
 
 

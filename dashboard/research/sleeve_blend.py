@@ -89,9 +89,14 @@ def _core_weekly_returns(pos_cap: float | None, portfolio_cap: float | None,
 
 def _sleeve_trades(ticker: str) -> list[dict]:
     """EXACT reproduction of core/sleeve.py's entry_signal()/should_exit_dynamic(): close <
-    20dMA*0.975, VIX +15%/5d, RSI14<35, ADX14>20 -> long; exit at first of 5MA-touch / +3% TP /
-    -5% SL / 10 trading days. No look-ahead (entry i uses only bars up to i; exit walk starts
-    at i+1)."""
+    20dMA*0.975, RSI14<35, ADX14>20 -> long; exit at first of 5MA-touch / +3% TP / -5% SL /
+    10 trading days. No look-ahead (entry i uses only bars up to i; exit walk starts at i+1).
+
+    CHANGED 2026-07-31: the VIX +15%/5d condition was DROPPED from entry_signal() (see its
+    own docstring + HANDOFF.md -- meanrev_filter_ablation_test.py's variant B beat the
+    VIX-inclusive spec on CAGR/Sharpe/Calmar at every weight, IS and OOS). VIX is still
+    fetched here since it's still used for position SIZING in the live function, but it no
+    longer gates entry -- `vix_up` is computed but intentionally unused in `ent` below."""
     p = yf.download([ticker, "^VIX"], period="max", interval="1d", progress=False, auto_adjust=True)["Close"]
     if ticker not in p.columns:
         return []
@@ -116,8 +121,10 @@ def _sleeve_trades(ticker: str) -> list[dict]:
     adx = (100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)).ewm(alpha=1 / 14, adjust=False).mean()
     sv, vv, m5v, m20v = s.values, v.values, ma5.values, ma20.values
     r14v, adxv, idx = r14.values, adx.values, s.index
-    vix_up = vv / np.roll(vv, 5) - 1.0
-    ent = (sv < m20v * 0.975) & (vix_up > 0.15) & (r14v < 35) & (adxv > 20)
+    vix_up = vv / np.roll(vv, 5) - 1.0                    # noqa: F841 -- kept for parity with
+                                                            # the live function's variables, no
+                                                            # longer part of the entry gate
+    ent = (sv < m20v * 0.975) & (r14v < 35) & (adxv > 20)
     ent = np.nan_to_num(ent).astype(bool)
     ent[:200] = False                                   # warm-up (indicators need history)
     n = len(sv); out = []; i = 200

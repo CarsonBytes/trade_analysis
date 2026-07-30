@@ -5,7 +5,23 @@ Last updated 2026-07-31.
 
 ---
 
-### 🔬 FINDING 2026-07-31: sleeve entry-filter ablation -- user's specific MR proposals REJECTED, but the ablation surfaced a real adjacent improvement (NOT YET DEPLOYED, needs a decision)
+### 🎛️ DEPLOYED 2026-07-31: sleeve's VIX-spike entry condition DROPPED (user-approved)
+
+Following the ablation finding below (variant B), the user explicitly approved deployment.
+`core/sleeve.py::entry_signal()`'s `ok = ...` line no longer includes `(vix_up > 0.15)` --
+entry is now `close < 20MA*0.975 & RSI14 < 35 & ADX14 > 20` only. VIX is UNCHANGED as a
+position-SIZING input (RISK_HIGH 1.0% above VIX>30, vs RISK_BASE 0.5%) -- only the entry
+gate on it is gone. `sleeve_blend.py::_sleeve_trades()` (the research reproduction) updated
+to match, so future sleeve research stays honest against the real live spec. 5 new direct
+unit tests added (`test_sleeve.py`: fires without a VIX spike; RSI/ADX/20MA conditions still
+gate as before; VIX still drives sizing not gating) -- full suite green. Expect MORE sleeve
+signals firing than before (backtest: pooled trades 736→1134 across the 11-ticker universe)
+-- worth a fresh look at commission-viability at the sleeve's typical position size if fill
+frequency noticeably increases live.
+
+---
+
+### 🔬 FINDING 2026-07-31: sleeve entry-filter ablation -- user's specific MR proposals REJECTED, but the ablation surfaced a real adjacent improvement (DEPLOYED same day, see entry above)
 
 User critique (in Chinese): proposed (1) pure/unconditional mean-reversion (Bollinger-band
 touch, RSI<30/>70, Z-score >2sd) as a supplement to the conditional dip-buy sleeve, correctly
@@ -57,15 +73,9 @@ this project uses.
 specifically. Robustness across every weight/IS/OOS split is the corroborating evidence here
 instead, same as that research used.
 
-**NOT YET DEPLOYED** -- this changes a real, currently-active gate condition on live money,
-so per this project's standing rule it needs an explicit user decision before touching
-`core/sleeve.py::entry_signal()` (the VIX condition, lines ~211-213), not a unilateral
-implementation. If adopted: drop `(vix_up > 0.15)` from `entry_signal()`'s `ok = ...` line,
-update `sleeve_blend.py`'s `_sleeve_trades()` to match (currently an "EXACT reproduction" of
-the VIX-inclusive spec, would need updating for future research to stay honest), and expect
-somewhat MORE sleeve trades firing (n=736→1134 pooled backtest trades, real-world funding
-frequency would rise too, worth a fresh look at commission-viability at the sleeve's typical
-position size before deploying).
+**DEPLOYED same day, user approved via explicit choice ("Deploy now").** See the entry
+above this one for the implementation details (both `core/sleeve.py::entry_signal()` and
+`sleeve_blend.py::_sleeve_trades()` updated, 5 new tests, both instances redeployed).
 
 ---
 
