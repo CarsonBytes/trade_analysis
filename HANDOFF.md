@@ -5,6 +5,70 @@ Last updated 2026-07-31.
 
 ---
 
+### 🔬 FINDING 2026-07-31: sleeve entry-filter ablation -- user's specific MR proposals REJECTED, but the ablation surfaced a real adjacent improvement (NOT YET DEPLOYED, needs a decision)
+
+User critique (in Chinese): proposed (1) pure/unconditional mean-reversion (Bollinger-band
+touch, RSI<30/>70, Z-score >2sd) as a supplement to the conditional dip-buy sleeve, correctly
+flagging the "catching a falling knife" (逆勢接刀) risk in a real downtrend; (2) pairs/
+stat-arb, which they correctly self-identified as already tested and rejected
+(`pairs_test.py`/`refined_statarb_test.py`, OOS Sharpe ≤0.54, DSR ≤17%) -- NOT re-tested,
+no new premise. New permanent script: `dashboard/research/meanrev_filter_ablation_test.py`.
+
+**Methodology**: a clean ablation on the sleeve's own proven live logic -- SAME universe
+(`SLEEVE_UNIVERSE`), SAME exit structure (5MA-touch/+3%TP/-5%SL/10d cap) across every
+variant, only the ENTRY filter changes, isolating exactly what each condition contributes:
+- **A (live today)**: close<20MA*0.975 & VIX+15%/5d & RSI14<35 & ADX>20
+- **B**: drop VIX only (RSI14<35 & ADX>20, still requires close<20MA*0.975)
+- **C**: drop ADX only (keeps VIX+RSI, drops trend-strength confirmation)
+- **D**: user's literal proposal -- unconditional RSI14<30, no MA/VIX/ADX at all
+- **E**: user's literal proposal -- unconditional Bollinger/Z-score (close < 20MA - 2σ), no
+  VIX/ADX at all
+
+**Result, at w=10% (representative; consistent at 5%/15%, IS and OOS):**
+| variant | full-hist CAGR | full-hist maxDD | Calmar | OOS CAGR | OOS maxDD | OOS Calmar |
+|---|---|---|---|---|---|---|
+| A (live) | +8.76% | -8.00% | 1.095 | +12.46% | -8.00% | 1.557 |
+| B (drop VIX) | **+9.90%** | -8.29% | **1.195** | **+13.90%** | -8.29% | **1.677** |
+| C (drop ADX) | +8.25% | -9.87% | 0.835 | +11.93% | -9.87% | 1.208 |
+| D (unconditional RSI, user's idea) | +7.75% | -7.43% | 1.043 | +12.09% | -7.43% | 1.627 |
+| E (unconditional Bollinger, user's idea) | +8.15% | -9.84% | 0.828 | +12.73% | -9.84% | 1.294 |
+
+**The user's own specific proposals (D, E) do NOT beat the live filter** -- their critique
+was correct. Dropping ADX (C) confirms the "falling knife" risk directly: a "falling knife"
+diagnostic (what fraction of each looser variant's EXTRA trades fire while ADX>25, a
+genuinely strong trend, not just chop) shows D fires 66-86% of its added trades during a
+strong trend across every ticker, E fires 22-55% -- exactly the dangerous scenario the user
+named, now quantified rather than asserted.
+
+**But the ablation surfaced something adjacent and unexpected: variant B (drop the VIX
+condition only, keep RSI<35 & ADX>20) beats the live filter (A) on CAGR, Sharpe, AND Calmar
+at EVERY weight tested (5/10/15%), both in-sample and OOS, with no exceptions** -- the VIX
+panic-spike requirement appears to be over-conditioning the entry (filtering out real oversold-
+in-a-real-trend setups that don't happen to coincide with a VIX spike that week), while ADX
+(trend-strength confirmation) is doing the real protective work. DD does move slightly
+against B at higher weights (-8.00%→-8.29% at w=10%; actually BETTER at w=5%, -6.72%→-6.65%)
+-- a smaller relative DD increase than the 2026-07-18 LIVE leverage-bump grid search accepted
+(-7.85%→-8.83%, adopted, see below), and stays well inside the ~9% full-history DD budget
+this project uses.
+
+**DSR is uninformative here** (checked: naive AND n_trials=5-corrected DSR both saturate at
+100% for every variant, pooled n=593-1507 trades each) -- same known limitation as the
+2026-07-18 re-entry-gate research at this sample size; can't use it to discriminate B from A
+specifically. Robustness across every weight/IS/OOS split is the corroborating evidence here
+instead, same as that research used.
+
+**NOT YET DEPLOYED** -- this changes a real, currently-active gate condition on live money,
+so per this project's standing rule it needs an explicit user decision before touching
+`core/sleeve.py::entry_signal()` (the VIX condition, lines ~211-213), not a unilateral
+implementation. If adopted: drop `(vix_up > 0.15)` from `entry_signal()`'s `ok = ...` line,
+update `sleeve_blend.py`'s `_sleeve_trades()` to match (currently an "EXACT reproduction" of
+the VIX-inclusive spec, would need updating for future research to stay honest), and expect
+somewhat MORE sleeve trades firing (n=736→1134 pooled backtest trades, real-world funding
+frequency would rise too, worth a fresh look at commission-viability at the sleeve's typical
+position size before deploying).
+
+---
+
 ### 🔬 REJECTED 2026-07-31: dip-SELL sleeve (inverse ETFs) + leveraged ETF variants of the sleeve
 
 User request: since the panic-MR dip-buy sleeve only captures ONE direction (bounce UP
