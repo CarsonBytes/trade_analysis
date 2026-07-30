@@ -52,6 +52,24 @@ unrelated to tech-pause -- also repointed to IEF). Added 1 new test
 - Shown on every pending card regardless of which pending sub-group ("Waiting to fill" /
   "On hold" / "Needs a bigger account") it's in.
 
+**3. Retro logging for all of the above** (same day, follow-up user request: "ensure the
+block/pause/resume log history could be logged for retro"). The per-trade Pause/Resume/
+Withdraw buttons and the global "Pause tech-concentrated ETFs" checkbox previously only fired
+a transient `ui.notify()` toast -- gone the moment the page refreshed, no persisted trail. All
+four now also call `notable_events.record()`, the same changelog table that already backs the
+dashboard's "Recent notable events" panel (Retrospective tab) and the Telegram alert path --
+so a manual action leaves the same kind of retro trail as every automated gate action, and
+shows up next to the tech-pause gate's own auto-cancellations rather than in a separate,
+undiscoverable place. Deliberately kept at plain `info` level (no Telegram push) for all four
+-- the user is already on the dashboard, actively clicking; a phone buzz for something they
+just did themselves would be noise, matching the existing convention that routine
+system-initiated cancellations (tech-pause auto-cancel, stale-signal cancel) are `info` too,
+while `warning`/`error` is reserved for things that need attention even when nobody's looking
+(DD-halt, reconcile mismatches). No dedicated tests added -- `app.py` is UI wiring, not
+imported by the test suite (confirmed: no test file imports it), consistent with how every
+other UI-only feature this session (info modal, cash-flows dialog, the checkbox itself) was
+verified by live browser check instead.
+
 ---
 
 ### 🎛️ ADDED 2026-07-30: manual tech pause/resume (QQQ/XLK), user-requested -- currently PAUSED

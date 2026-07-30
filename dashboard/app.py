@@ -1378,7 +1378,16 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
                     _paused = bool(t.get("manual_paused"))
                     def _toggle_pause(tid=t["id"], inst=key, want=not bool(t.get("manual_paused"))) -> None:
                         from dashboard.core import paper as _paper
+                        from dashboard.core import notable_events
                         _paper.set_trade_paused(tid, want)
+                        # ADDED 2026-07-30: persisted to the same changelog the "Recent
+                        # notable events" retrospective panel + Telegram already read, so a
+                        # manual pause/resume leaves the same kind of retro trail as every
+                        # automated gate action -- previously only a transient ui.notify()
+                        # toast, gone the moment the page refreshed.
+                        notable_events.record(
+                            f"{inst} (#{tid}): manually {'paused' if want else 'resumed'} "
+                            "(pending trade)")
                         ui.notify(f"{inst}: {'paused' if want else 'resumed'}")
                         active_panel.refresh()
                     ui.button("Resume" if _paused else "Pause",
@@ -1390,10 +1399,19 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
                                 "queued, resume any time")
                 def _withdraw(tid=t["id"], inst=key, placed=_already_placed) -> None:
                     from dashboard.core import paper as _paper
+                    from dashboard.core import notable_events
                     if placed and _bk.is_ib():
                         from dashboard.execution import ib_exec
                         ib_exec.cancel_pending_order(tid)
                     _paper.withdraw_trade(tid)
+                    # ADDED 2026-07-30: same retro trail (and level -- plain "info", no
+                    # Telegram push) as the tech-pause gate's own auto-cancellations
+                    # (ib_exec.mirror_new()) -- the user is already on the dashboard,
+                    # deliberately clicking this, so a phone buzz would just be noise; the
+                    # persisted record is what matters for later review.
+                    notable_events.record(
+                        f"{inst} (#{tid}): manually withdrawn" +
+                        (" (resting broker order also cancelled)" if placed else ""))
                     ui.notify(f"{inst}: withdrawn", type="warning")
                     active_panel.refresh()
                 ui.button("Withdraw", icon="close", on_click=_withdraw)\
@@ -2510,6 +2528,17 @@ def main_page() -> None:
                 def _set_tech_paused(e) -> None:
                     _paper.TECH_PAUSED = bool(e.value)
                     _save_settings()
+                    # ADDED 2026-07-30: the CONSEQUENCE (mirror_new() cancelling a specific
+                    # pending tech trade) was already logged to notable_events -- but the
+                    # CAUSE, flipping this toggle itself, wasn't, so the retro trail was
+                    # missing the actual decision point, only its downstream effects. Plain
+                    # info level, matching every other manual-action record on this page --
+                    # the user is already looking at the checkbox they just clicked.
+                    from dashboard.core import notable_events
+                    notable_events.record(
+                        "tech investment " +
+                        ("PAUSED" if _paper.TECH_PAUSED else "RESUMED") +
+                        " manually (QQQ/XLK/SPY/EEM/ASHR)")
                     gate_panel.refresh(); active_panel.refresh()
                 ui.checkbox("Pause tech-concentrated ETFs", value=_paper.TECH_PAUSED,
                             on_change=_set_tech_paused)\
