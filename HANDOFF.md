@@ -1,7 +1,64 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-30.
+Last updated 2026-07-31.
+
+---
+
+### 🔬 REJECTED 2026-07-31: dip-SELL sleeve (inverse ETFs) + leveraged ETF variants of the sleeve
+
+User request: since the panic-MR dip-buy sleeve only captures ONE direction (bounce UP
+after an oversold panic), test the mirror image -- a "dip-sell" sleeve buying INVERSE ETFs
+on an overbought melt-up (this project is long-only throughout, so an inverse product is
+the only way to express a bearish view) -- and separately test LEVERAGED (2x/3x) products
+for both directions, to see if CAGR/maxDD improve. New permanent script:
+`dashboard/research/sleeve_direction_leverage_test.py`, built on `sleeve_blend.py`'s exact
+live-signal reproduction.
+
+**Methodology**: entry/exit TIMING is always computed off the UNDERLYING's own price/RSI/
+ADX/VIX (exact reproduction of `core/sleeve.py`'s real signal -- mirror-imaged for dip-sell:
+close>20MA*1.025, VIX **-**15%/5d [complacency, not a spike], RSI14>65, ADX>20; same exit
+structure, opposite side). The REALIZED return for every inverse/leveraged variant is read
+from that PRODUCT'S OWN real daily closes over the same window -- never synthesized as
+-1x/2x/3x the underlying's return, since that would silently erase the real volatility
+decay/expense-ratio/tracking-error a leveraged or inverse product actually carries, which is
+the entire point of the test. Tested SPY/QQQ/DIA/IWM/EFA/EEM/VNQ/XLK (HYG/PFF/ASHR excluded
+-- no viable leveraged/inverse product exists for them). Real per-ticker product history
+disclosed in the script's own output (mostly 2006-2010 inception, far short of the core
+book's 33y).
+
+**Result: REJECTED, both ideas, decisively, at every weight (5/10/15%) and both IS and OOS.**
+
+- **Dip-sell (1x inverse)**: per-ticker meanR/trade is NEGATIVE for the most liquid names
+  (SPY -0.19%, QQQ -0.32%, DIA -0.37%, IWM -0.72%) and only marginally positive for the
+  thinner/shorter-history ones (EFA +0.30%, EEM +0.51%, VNQ +0.15%), with win rates
+  (31-70%) far below the dip-buy sleeve's (72-82%). Portfolio-level at w=10% IS: dip-sell
+  alone = CAGR +5.10%/maxDD -8.67% (barely different from CORE-ONLY, i.e. worse than doing
+  nothing) vs the existing dip-buy sleeve's +8.36%/-8.00%. Adding dip-sell ON TOP of the
+  existing dip-buy sleeve doesn't help either -- combined CAGR +8.33%/-8.00%, statistically
+  indistinguishable from dip-buy alone, not additive. Same pattern OOS (dip-sell alone
+  +8.86%/-6.57% vs dip-buy's +12.13%/-8.00%). **Root cause, not just noise**: equities have
+  a secular positive drift -- "buy the dip expecting a bounce up" rides WITH that drift;
+  "buy the inverse after a melt-up expecting a pullback" fights it. That's a structural
+  headwind for this specific idea, not a sample-size artifact (n=11-27/ticker, comparable
+  to the dip-buy sleeve's own n=59-98/ticker).
+- **Leveraged variants (2x/3x, both directions)**: textbook leverage-decay signature. 2x
+  dip-buy at w=10% IS: CAGR +8.95% (vs 1x's +8.36%, a small bump) but maxDD **-15.65%**
+  (nearly DOUBLE 1x's -8.00%) -- Calmar collapses 1.045→0.572. 3x is WORSE than 2x on CAGR
+  too (+7.80%, decay overtaking the extra leverage) with maxDD -16.30%, Calmar 0.478. Same
+  pattern OOS: 3x dip-buy's OOS CAGR (+14.10%) is the single highest number in the whole
+  test, but at maxDD -16.30% -- more than DOUBLE this project's own established ~9%
+  full-history DD budget (the same budget the 2026-07-18 LIVE leverage-bump grid search was
+  explicitly constrained to, see that entry below) -- rejected on the DD leg regardless of
+  the CAGR headline. Every leveraged-inverse (dip-sell) variant is simply worse than its
+  own 1x dip-sell baseline, compounding one rejected idea on top of another.
+- **Calmar ratio (risk-adjusted) is uniformly WORSE than the current live 1x dip-buy-only
+  sleeve for every single tested alternative, at every weight, both IS and OOS, with zero
+  exceptions.** No live/paper code change made -- the sleeve stays exactly as it is today
+  (1x underlying instruments, dip-buy only). Joins the long list of "juice the returns"
+  ideas rejected this project (vol-targeting, ATR-override leverage, etc.) for the same
+  underlying reason: leverage/inverse products change the RISK profile far more than they
+  change the RETURN profile once decay and secular drift are accounted for honestly.
 
 ---
 
