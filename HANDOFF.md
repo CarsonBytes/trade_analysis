@@ -5,6 +5,81 @@ Last updated 2026-07-31.
 
 ---
 
+### 🔬 STRESS-TESTED 2026-07-31: VIX-drop deploy survives a detailed critique; both proposed follow-up mechanisms REJECTED; found+fixed a real latent bug along the way
+
+User critique (Cantonese) of the same-day VIX-condition-drop raised three risks and three
+optimizations. Investigating them found and fixed a real bug first, then answered each on
+real data.
+
+**Bug found+fixed**: `sleeve_blend.py::_sleeve_trades()` is "exact reproduction of the live
+function" -- true until the VIX-drop deployed that same day, after which it silently started
+reproducing the NEW (no-VIX) spec instead of the old one. Two research scripts
+(`meanrev_filter_ablation_test.py`'s own variant A, and the first draft of
+`vix_drop_stress_test.py`) both used `_sleeve_trades()` as "variant A, before today," which
+had silently become identical to variant B post-deploy -- a same-vs-same comparison. Fixed
+in both by reconstructing variant A's VIX-inclusive formula independently
+(`_variant_entries(f, "A_full_filter_LIVE")`), unaffected by what's currently live. **Lesson:
+a helper that reproduces "the live function" needs re-verifying after any live change, not
+just the live function itself.**
+
+**Corrected numbers (this supersedes the DD figures in the entry below, which were computed
+before this bug was found)** -- at w=10%, pos_cap=25%: **A (pre-deploy, with VIX): CAGR
++8.76%, maxDD -8.00%, Calmar 1.095. B (deployed, no VIX): CAGR +9.91%, maxDD -7.90%, Calmar
+1.255.** B now beats A on ALL THREE metrics, not a CAGR-for-DD tradeoff as first reported.
+
+**2022 stress test (the user's risk #1) -- confirmed real, but modest.** Per-calendar-year
+breakdown: 2022 is the one year where A modestly beats B on BOTH dimensions (A: +11.28%
+return / -2.62% intra-year DD; B: +10.83% / -3.32%). A genuine, disclosed exception to the
+aggregate result -- not eliminated by the correction above, and worth keeping in mind, but a
+single year's ~0.5-0.7pp underperformance among 30 is expected variance, not evidence the
+aggregate finding is wrong.
+
+**Per-ticker nuance (surfaced investigating risk #2)**: B has LOWER mean-R-per-trade than A
+on 7 of 11 tickers (SPY/QQQ/XLK/DIA/EFA/EEM/VNQ) -- the aggregate CAGR gain comes from more
+trades (+54%, all still solidly positive per-ticker) outweighing a modest average-quality
+dip, not from uniformly better signal selection. A real nuance worth knowing, though every
+ticker's meanR stays positive and the effect holds up under cost stress (below).
+
+**Cost sensitivity (risk #3) -- holds.** Re-priced both variants at 10bp (base)/20bp/30bp
+round-trip cost. B's Calmar edge over A shrinks as cost rises (1.255→1.187→1.121 for B vs
+1.094→1.049→1.004 for A) but never flips, even at 3x today's cost assumption.
+
+**DSR / selection-bias (risk #2, methodology)**: already checked same-day (n_trials=5,
+saturates at 100% for all 5 variants, uninformative at this sample size). User's sharper
+point conceded: the earlier "robust across every weight 5/10/15%" framing overstated
+independence -- that's mostly one trade series linearly rescaled, not 5 separate tests. The
+genuinely independent checks are the IS/OOS split (both directions agree) and this session's
+new per-year/per-ticker breakdowns.
+
+**Two proposed follow-up mechanisms, both built and backtested for real (not accepted on
+the predicted magnitudes) -- BOTH REJECTED:**
+- **Consecutive-loss cooldown** (2 losses on a ticker -> pause that ticker 10 trading days):
+  n 1132→1051, CAGR 9.90%→9.18%, Calmar 1.194→1.107 (worse) -- and **2022's drawdown doesn't
+  move AT ALL (-3.32% both with and without)**. The mechanism targets "one ticker losing 3+
+  times in a row"; that isn't the actual shape of 2022's underperformance (broader, milder
+  bleeding spread across many tickers, not a concentrated streak on any one).
+- **Weekly trade cap** (max 2 new sleeve entries/week across all 11 tickers, keep the
+  highest-ADX when more fire): n 1132→433 (-62%), CAGR 9.90%→7.47% (-25% relative), maxDD
+  -8.29%→-6.15% (real aggregate improvement, Calmar 1.194→1.215) -- but **2022 gets WORSE, not
+  better** (DD -3.32%→-5.10%, return crashes to +4.74%) -- the exact scenario it was proposed
+  to fix. Discarding lower-ADX signals in a real panic week apparently removes some of the
+  diversification/frequency that cushions that period, not just "noise."
+
+**Separately, the ADX threshold sweep from the same-day earlier ablation still stands and
+looks like a genuinely good candidate**: ADX>25 (vs the deployed ADX>20) gives Calmar 1.349
+(vs 1.255 deployed) at CAGR 9.22% (vs 9.91%) and maxDD -6.83% (vs -7.90%) -- a cleaner
+risk-adjusted tradeoff. **NOT YET DEPLOYED** -- pending a user decision, same as every other
+live-money change this project makes.
+
+**Net read**: the VIX-drop deploy holds up under real scrutiny -- it's not undone by any of
+the three risks raised, though the 2022 exception and the per-ticker meanR nuance are real
+and now on record. Neither proposed mechanism to further de-risk it actually works as
+predicted when tested. `dashboard/research/vix_drop_stress_test.py` and
+`sleeve_cooldown_weekly_cap_test.py` are both permanent, reusable scripts for anyone revisiting
+this later.
+
+---
+
 ### 🎛️ DEPLOYED 2026-07-31: sleeve's VIX-spike entry condition DROPPED (user-approved)
 
 Following the ablation finding below (variant B), the user explicitly approved deployment.
