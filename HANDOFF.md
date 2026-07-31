@@ -5,6 +5,46 @@ Last updated 2026-07-31.
 
 ---
 
+### 🔬 RE-VERIFIED 2026-07-31: three items flagged stale in the README, checked against today's sleeve spec
+
+Closing out three gaps flagged when the README was updated with today's sleeve figures
+(no-VIX entry, ADX>25). All three had permanent-or-rebuilt scripts; results below.
+
+**1. Core/sleeve correlation** (`dashboard/research/core_sleeve_correlation.py` — already
+reads the live `_sleeve_trades()`, no code change needed, just re-run): essentially
+unchanged. Active-days correlation -0.028 (was -0.026), sleeve-exit-days correlation +0.016
+(was +0.011) — still genuinely uncorrelated under the new entry rule.
+
+**2. Black-swan (VIX>40) slippage stress test** (2026-07-18's version was ad-hoc, never
+saved permanently — rebuilt as `sleeve_blackswan_stress_retest.py`). VIX>40 entries: 177 of
+873 trades (20.3%, similar share to before), max VIX at entry 82.7 (unchanged, same 2008/2020
+fills). Per-trade meanR does stay positive under 500bps stress on just those entries (+0.34%
+aggregate) — matching the ORIGINAL "stays positive-EV" framing. **But the proper
+portfolio-level blend (same methodology as every other backtest this session) reveals what
+the meanR framing hid: maxDD more than DOUBLES (-6.83%→-14.75%) and Calmar collapses
+(1.349→0.414).** VIX>40 entries cluster during real historical panics (2008, 2020), so the
+stress concentrates within the portfolio's already-worst windows rather than spreading
+evenly across 30 years the way a flat meanR figure implies. The original "stays positive"
+conclusion was technically correct but incomplete — worth knowing this scenario would
+meaningfully breach this project's own ~9% DD budget if it ever actually happened (it's
+explicitly an extreme, pessimistic assumption for liquid ETFs, not an expected one).
+
+**3. Full live config re-check** (core + reclaim-1.0R re-entry gate + sleeve, pos_cap=30%,
+risk=1% — 2026-07-18's version was ALSO ad-hoc/never saved, used a jointly-position-sized
+single portfolio walk; rebuilt as `full_live_config_retest.py` using the SAME simpler
+additive-blend methodology as every other sleeve backtest this session instead, disclosed
+explicitly rather than claimed equivalent). Result: **FULL CAGR +7.82% / maxDD -6.42% /
+Calmar 1.218; OOS CAGR +11.17% / maxDD -4.32% / Calmar 2.585** — differs substantially from
+the documented 9.78%/-8.83%/1.11 (lower CAGR, better DD, better Calmar), plausibly explained
+by the methodology gap (a fixed 10%-weight overlay vs. core and sleeve jointly competing for
+one shared portfolio-cap budget) rather than the sleeve spec change itself. The gap is large
+enough that this should be read as **directional confirmation the deployed config still
+looks strong** (Calmar actually higher under this method), not a byte-for-byte replacement
+for the original number — a true joint-position-sizing reproduction would need separate,
+larger future work if that exact figure needs updating.
+
+---
+
 ### 🔬 REJECTED 2026-07-31: 4 more sleeve refinements proposed on top of the deployed no-VIX/ADX>25 spec
 
 User follow-up (Cantonese), same day, proposed 4 more ideas after accepting the VIX-drop and

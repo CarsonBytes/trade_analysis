@@ -40,21 +40,26 @@ the full project; the honest conclusions:
   entries on close<20MA*0.975 & RSI14<35 & ADX14>25, staged rollout (3→5→11 tickers over 6
   months per instance) so a new sleeve doesn't front-load risk. **UPDATED 2026-07-31**: the
   entry rule changed twice the same day (both below) — these are the CURRENT, latest-verified
-  figures, at the ablation's own test config (pos_cap=25%, not yet re-run at the exact live
-  pos_cap=30%+reentry-gate config). Core+sleeve@10% weight: full-history **CAGR 9.22% / DD
-  -6.83% / Calmar 1.350**; OOS (recent decade) **CAGR 13.13% / DD -6.83% / Calmar 1.922**.
-  Versus the prior spec (VIX-gated entry, ADX>20): full-history raw CAGR is slightly lower
-  (10.08%→9.22%) but DD improved by proportionally more (-7.73%→-6.83%), so Calmar — the
-  metric this project weights most — improved both full-history (1.305→1.350) and OOS
-  (1.693→1.922). Core/sleeve correlation measured directly (not assumed, prior spec): -0.026
-  overall, +0.011 on sleeve-exit days — genuinely different risk driver, confirmed
-  empirically; not yet re-measured against the new entry rule. **Black-swan slippage
-  stress-tested** (2026-07-18, ALSO predates today's entry-rule change, not yet re-verified):
-  VIX>40 entries aren't rare (51 of 278 historical sleeve trades under the old spec, including
-  real 2008/2020 fills up to VIX 82.7) — even at 500bps round-trip cost applied only to those
-  entries (an extreme assumption for SPY/QQQ/XLK specifically), the sleeve stayed positive-EV
-  (meanR +0.184R, CAGR 1.07%), degrading gracefully rather than flipping to destructive
-  losses. **What changed 2026-07-31, in order**: (1) an entry-filter ablation, triggered by a
+  figures, at the ablation's own test config (pos_cap=25%; the exact live pos_cap=30%+
+  reentry-gate config was re-checked directionally, see below). Core+sleeve@10% weight:
+  full-history **CAGR 9.22% / DD -6.83% / Calmar 1.350**; OOS (recent decade) **CAGR 13.13% /
+  DD -6.83% / Calmar 1.922**. Versus the prior spec (VIX-gated entry, ADX>20): full-history
+  raw CAGR is slightly lower (10.08%→9.22%) but DD improved by proportionally more
+  (-7.73%→-6.83%), so Calmar — the metric this project weights most — improved both
+  full-history (1.305→1.350) and OOS (1.693→1.922). **Core/sleeve correlation re-verified
+  against the new entry rule** (was measured against the prior spec, re-checked same day):
+  essentially unchanged, -0.028 active-days (was -0.026), +0.016 sleeve-exit-days (was
+  +0.011) — still genuinely uncorrelated. **Black-swan slippage stress-test re-verified**
+  (2026-07-18's version predated today's entry-rule change — rebuilt and re-run same day,
+  `dashboard/research/sleeve_blackswan_stress_retest.py`): VIX>40 entries aren't rare under
+  the new spec either (177 of 873 trades, 20.3%, similar share to before, same real 2008/2020
+  fills up to VIX 82.7) and per-trade meanR does stay positive under 500bps stress on just
+  those entries — but the proper PORTFOLIO-LEVEL blend (not just meanR) shows something the
+  original framing missed: maxDD more than doubles (-6.83%→-14.75%) and Calmar collapses
+  (1.349→0.414) under this stress, since VIX>40 entries cluster during real historical panics
+  rather than spreading evenly. Still an extreme, pessimistic assumption for liquid ETFs, not
+  an expected scenario — but the honest complete picture is more sobering than "stays
+  positive-EV" alone conveyed. **What changed 2026-07-31, in order**: (1) an entry-filter ablation, triggered by a
   user critique of the sleeve as "conditional mean reversion"
   (`dashboard/research/meanrev_filter_ablation_test.py`), found the VIX-spike requirement
   (VIX +15%/5d) was over-conditioning entry — filtering out real oversold-in-a-real-trend
@@ -322,9 +327,11 @@ without saying so is exactly the kind of self-deception this whole project tries
 | Approach | CAGR | Max drawdown | Calmar | Basis |
 |---|---|---|---|---|
 | **This system (core-only, after-tax)** | **6.06%** (median 6.75%, 90% CI 4.82–8.93%) | **-6.83%** | **0.887** (90% CI 0.536–1.355) | Real 30-year weekly backtest, block-bootstrapped (500 draws) |
-| **This system (DEPLOYED: core+reentry-gate+sleeve, pos_cap=30%, FULL 32y, pre-tax)** | 9.78% | -8.83% | 1.11 | Real 32-year backtest, point estimate + 100% DSR (n_trials=19) + true-holdout validation — see "Update 2026-07-18" above. **NOT YET block-bootstrapped** with this exact config (the 6.06% row above predates the 2026-07-18 pos_cap/gate change) — treat as less uncertainty-quantified than the core-only row, though more representative of what's actually live today |
+| **This system (DEPLOYED: core+reentry-gate+sleeve, pos_cap=30%, FULL 32y, pre-tax)** | 9.78% | -8.83% | 1.11 | Real 32-year backtest, point estimate + 100% DSR (n_trials=19) + true-holdout validation — see "Update 2026-07-18" above. Uses a jointly-position-sized single portfolio walk (core+sleeve share one portfolio-cap budget); that exact script was never saved permanently, so this row predates today's sleeve entry-rule change and hasn't been reproduced byte-for-byte with it — see the directional re-check row below. **NOT YET block-bootstrapped** with this exact config (the 6.06% row above predates the 2026-07-18 pos_cap/gate change) — treat as less uncertainty-quantified than the core-only row |
 | **This system (DEPLOYED, OOS ~13y, pre-tax)** | 12.53% | -4.61% | 2.72 | Same config, recent-decade window — Sharpe 1.97, Sortino 6.83 |
-| **This system (core+sleeve@10%, OOS, LATEST 2026-07-31 entry rule)** | 13.13% | -6.83% | 1.922 | Real backtest, recent-decade window, pos_cap=25% (not the exact live pos_cap=30%+reentry-gate config — see the row above, not yet re-run with today's sleeve change) |
+| **This system (core+gate+sleeve@10%, FULL 32y, LATEST sleeve spec, DIRECTIONAL re-check)** | 7.82% | -6.42% | 1.218 | 2026-07-31, `dashboard/research/full_live_config_retest.py` — SIMPLER additive-blend methodology (fixed 10% sleeve weight), not the row above's joint-sizing method, so not directly comparable number-for-number; Calmar is higher under this method, read as directional confirmation the deployed config still looks strong post-sleeve-change, not a replacement figure |
+| **This system (core+gate+sleeve@10%, OOS, LATEST sleeve spec, DIRECTIONAL re-check)** | 11.17% | -4.32% | 2.585 | Same directional re-check, recent-decade window — Sharpe 1.921 |
+| **This system (core+sleeve@10%, OOS, LATEST 2026-07-31 entry rule, pos_cap=25%)** | 13.13% | -6.83% | 1.922 | Real backtest, recent-decade window, simpler pos_cap=25% test config (not the live pos_cap=30%+reentry-gate) |
 | SPY buy-and-hold | 10.08% | -54.6% | 0.185 | Real 1996–2026 data, pulled and verified this session |
 | Risk-matched SPY + cash (12.5% SPY / 87.5% cash, sized to match this system's -6.83% DD) | 5.02% | -6.83% | 0.735 | Real data; the core-only row above beats it by +20.6% relative Calmar at today's ~4.3% cash rate (breakeven rate ~5.5%) |
 | 60/40 (SPY/AGG) | ~7% | ~-22% | ~0.32 | Rough estimate, not re-run this project |
