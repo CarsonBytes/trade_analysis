@@ -5,6 +5,67 @@ Last updated 2026-07-31.
 
 ---
 
+### 🎛️ DEPLOYED 2026-07-31: LLM auto-pause extended to intraday hours (9:30am-3:30pm ET)
+
+User request, two-part -- (1) restrict signal EXECUTION to a 10:00am-3:30pm ET window
+(backtest.py flag) -- see the critique below, NOT built as specified; (2) restrict LLM board
+scans to 9:30am-3:30pm ET -- built, deployed.
+
+**Part 2 (built)**: `app.py::_market_open()` (the only call site is `_do_llm()`'s auto-pause
+gate) now checks intraday hours, not just weekday. Kept the existing function name (single
+caller, a rename would be pure churn) but the behavior is what the user asked for under the
+name `is_within_llm_hours()`. Weekend-only exclusion, no NYSE holiday calendar (user
+explicitly allowed this simplification; a holiday still passes the check but just produces
+the same "no fresh setup" read a real no-movement day would -- low cost, not worth a
+maintained holiday list, matches the prior function's own established simplification).
+Checkbox relabelled "Pause LLM outside market hours" (was "...on weekends"). Verified
+directly (not via app.py import -- that has a real side effect, starts a NiceGUI server,
+confirmed the hard way when a first verification attempt collided with the live paper
+instance's own port; both instances confirmed unaffected) -- 10 boundary cases incl. exact
+9:30/15:30 edges and a December (EST, not EDT) date to confirm `ZoneInfo` DST handling,
+all pass.
+
+**Part 1 (NOT built as specified) -- see the critique entry directly below.**
+
+---
+
+### 🔬 CRITIQUED 2026-07-31: "backtest a 10am-3:30pm ET execution window" -- not achievable as asked, real concern redirected
+
+User asked for a `--time-window` flag in `backtest.py`, modifying `_portfolio()`'s simulated
+execution to only fire within a stated intraday window, to test whether avoiding the
+wider-spread open/close periods improves CAGR/DD/Calmar/Sharpe/Sortino.
+
+**Verified before attempting anything**: the CORE book's `_signals()`/`_portfolio()` run on
+`interval="1wk"` bars (`yf.download(..., interval="1wk")`, confirmed directly in both
+`backtest.py` and `providers.py`) -- one Open/High/Low/Close per WEEK, no daily granularity
+at all, let alone intraday. There is no timestamp finer than "which week" anywhere in this
+backtest's own data to restrict against. A `--time-window` flag would have literally nothing
+to act on -- not a difficult engineering problem, a category error: the data doesn't contain
+the dimension being asked to filter. Building it would mean fabricating an assumed spread-
+cost delta and dressing it up as a backtest result, which is worse than not building it --
+it would look empirically verified while actually being an assumption in a labcoat.
+
+**The underlying concern is real, just not backtestable here.** Confirmed entries DO use
+real MARKET orders (`ib_exec.py`: `bracket.parent.orderType = "MKT"`), so they're genuinely
+exposed to whatever the prevailing bid-ask spread is at the moment of fill -- the academic
+premise about wider spreads at the open/close is legitimate. But two things weaken it
+further for this specific system, beyond the backtest-data gap: (1) this system's core
+signals fire on WEEKLY bars -- an entry doesn't need to happen at a precise moment, it's
+already price-insensitive to same-day timing by construction; (2) exits are LMT/STP orders
+sitting GTC (good-til-cancelled) -- their fill TIME is whenever the market touches the
+resting price, not controllable by restricting when the ORDER was SUBMITTED, so a submission-
+time window wouldn't actually control fill-time spread exposure for exits at all.
+
+**Not implemented -- would need an explicit decision on what to actually build.** If still
+wanted, the honest path is an OPERATIONAL execution-timing gate at `ib_exec.py`'s order-
+submission layer (hold a queued entry's actual broker submission until the window opens,
+similar in spirit to the tech-pause/LLM-hours gates above -- a deliberate manual control,
+not a backtested alpha claim, since backtesting genuinely cannot evaluate it with this
+data). Not built without confirming that's actually what's wanted, given it's a different,
+narrower thing than what was literally asked for.
+
+---
+
 ### 🔬 RE-VERIFIED 2026-07-31: three items flagged stale in the README, checked against today's sleeve spec
 
 Closing out three gaps flagged when the README was updated with today's sleeve figures

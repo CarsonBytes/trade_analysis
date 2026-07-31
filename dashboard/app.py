@@ -112,27 +112,43 @@ _load_settings()                                       # apply persisted setting
 
 # ---- helpers ---------------------------------------------------------------
 
-def _market_open() -> bool:
-    """Rough market-hours guard for the optional auto-pause. Treats Sat/Sun as closed
-    (Mon-Fri open); does NOT check intraday hours, so it can still fire outside the
-    9:30-16:00 window on a trading day (the broker itself enforces that at order time).
+def _market_open(now: dt.datetime | None = None) -> bool:
+    """Guard for the LLM auto-pause -- the only call site (_do_llm() below). Renamed in
+    spirit but kept this name (only one caller, avoid a pointless rename): as of 2026-07-31
+    this also checks INTRADAY hours (9:30am-3:30pm ET), not just weekday, per explicit user
+    request -- purely to avoid burning LLM API budget analyzing signals outside real trading
+    hours, a different concern from the old rationale below (which was about ORDER-PLACEMENT
+    safety, irrelevant here: it doesn't matter that a hypothetical order would sit unfilled
+    or get rejected outside hours -- the point is not to spend API calls on signals nobody
+    can act on for hours anyway). Cuts 30min before the 4pm close (not the full session) --
+    also user-specified, gives the analysis a buffer before end-of-day volatility/spread
+    widening rather than analyzing right up to the bell. Does NOT check US market holidays
+    (same simplification the old weekday-only version already made) -- a holiday still
+    passes, but just produces the same "no fresh setup" read a real no-movement day would;
+    not worth a maintained holiday calendar for that low a cost. `now` param (ET-aware if
+    passed) is for direct unit testing without mocking datetime.now() globally.
 
-    FIXED 2026-07-11: this box's system clock is Asia/Hong_Kong (UTC+8), 12h ahead of
-    US Eastern (the market this account actually trades, BROKER=ib/UNIVERSE=etf --
-    NYSE-listed ETFs). Using the LOCAL weekday meant HK Sat 00:00-04:00 (still Fri
-    12:00-16:00 ET, regular trading hours) was wrongly treated as closed, and HK Mon
-    00:00-21:30 (still Sun noon - Mon pre-market ET) was wrongly treated as open --
-    roughly half a day of misalignment at each week boundary. Confirmed live: the
-    auto-pause kicked in at HK Sat 00:00:14, which was Fri 12:00pm ET -- cutting off
-    the rest of Friday's real trading session. For the MT5/FX legacy path (~24h
-    market, no single relevant exchange timezone) local weekday is kept as-is."""
+    FIXED 2026-07-11 (weekday check, still applies): this box's system clock is
+    Asia/Hong_Kong (UTC+8), 12h ahead of US Eastern (the market this account actually
+    trades, BROKER=ib/UNIVERSE=etf -- NYSE-listed ETFs). Using the LOCAL weekday meant HK
+    Sat 00:00-04:00 (still Fri 12:00-16:00 ET, regular trading hours) was wrongly treated as
+    closed, and HK Mon 00:00-21:30 (still Sun noon - Mon pre-market ET) was wrongly treated
+    as open -- roughly half a day of misalignment at each week boundary. Confirmed live: the
+    auto-pause kicked in at HK Sat 00:00:14, which was Fri 12:00pm ET -- cutting off the
+    rest of Friday's real trading session. For the MT5/FX legacy path (~24h market, no
+    single relevant exchange timezone) local weekday is kept as-is, no hours check."""
     from dashboard.instruments import _ib_broker
     if _ib_broker():
         from zoneinfo import ZoneInfo
-        now = dt.datetime.now(ZoneInfo("America/New_York"))
+        now = now or dt.datetime.now(ZoneInfo("America/New_York"))
+        if now.weekday() >= 5:                     # Sat/Sun
+            return False
+        open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        return open_t <= now <= close_t
     else:
-        now = dt.datetime.now()
-    return now.weekday() < 5  # Mon-Fri
+        now = now or dt.datetime.now()
+        return now.weekday() < 5  # Mon-Fri, no intraday check (MT5 path, unchanged)
 
 
 def _ago(t: dt.datetime | None) -> str:
@@ -2494,10 +2510,16 @@ def main_page() -> None:
                           value=SETTINGS["llm_min"],
                           on_change=lambda e: (SETTINGS.update(llm_min=e.value),
                                                _save_settings())).props("dense")
-                ui.checkbox("Pause LLM on weekends",
+                ui.checkbox("Pause LLM outside market hours",
                             value=SETTINGS["auto_pause"],
                             on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
-                                                 _save_settings()))
+                                                 _save_settings()))\
+                    .tooltip("Skips the LLM board scan on weekends AND outside 9:30am-"
+                             "3:30pm ET on trading days (was weekends-only before "
+                             "2026-07-31) -- avoids spending API budget analyzing signals "
+                             "nobody can act on for hours. Manual refresh always overrides "
+                             "this. Price/position tracking is untouched -- only the LLM "
+                             "call is gated.")
                 ui.label("Columns:").classes("text-sm")
 
                 def _set_cols(e) -> None:
