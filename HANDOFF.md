@@ -5,6 +5,46 @@ Last updated 2026-07-31.
 
 ---
 
+### 🔬 REJECTED 2026-07-31: 4 more sleeve refinements proposed on top of the deployed no-VIX/ADX>25 spec
+
+User follow-up (Cantonese), same day, proposed 4 more ideas after accepting the VIX-drop and
+ADX>25 findings. 3 were testable in the existing R-multiple/unit-series framework
+(`dashboard/research/sleeve_further_refinements_test.py`); all rejected, one provably inert.
+The 4th isn't testable with this framework at all -- explained honestly rather than faked.
+
+- **(1) ADX-tiered sizing** (0.5% base / 0.75% at ADX 35-50 / 1.0% at ADX>50, matching
+  VIX>30's existing tier): real distribution check first confirmed the tiers are populated
+  (ADX>35 = 35.7% of entries, ADX>50 = 1.5%) -- but the backtest result is a wash at best:
+  CAGR 9.20%→10.11% (up) but maxDD -6.83%→-7.56% (meaningfully worse), full-history Calmar
+  flat-to-slightly-worse (1.347→1.337). More $ concentrated on "high ADX" trades amplifies
+  both wins and losses -- ADX measures existing trend strength, not win probability, so
+  sizing up on it doesn't protect against the occasional high-ADX trade reversing.
+- **(2) ATR-dynamic `ETF_POS_CAP`** (scale the sleeve's max position size down as ATR rises
+  relative to its 20-day average): NOT TESTED. This is a dollar position-sizing mechanism at
+  the broker-execution layer -- this project's R-multiple/unit-series backtest framework
+  blends WEIGHTED RETURN SERIES, it doesn't simulate real share counts against a live equity
+  curve and portfolio-room constraint. Testing it properly needs a genuinely different (much
+  larger) backtest harness. Flagged as a real gap, not approximated with a bad proxy.
+- **(3) ADX-decay early exit** (ADX drops <20 after entering above 25, AND unrealized profit
+  >1% -> exit early): **PROVABLY INERT** -- backtest results are IDENTICAL to baseline on
+  every single metric (same n=872, same CAGR/DD/Calmar/OOS/2022 figures). The condition
+  never fires before one of the existing 4 exits (5MA-touch especially) already resolves the
+  trade -- same structural reason the earlier VIX-crush exit idea (2026-06-29) was also
+  found inert.
+- **(4) Portfolio-level 30-day drawdown cooldown** (-5% trailing sleeve R sum, across ALL
+  tickers -> pause all new entries ~1 week): directly targeted the root cause found testing
+  the earlier PER-TICKER cooldown (2022's damage was spread across many tickers, not
+  concentrated in one) -- but **never triggers during 2022 at all** (2022 return/DD figures
+  are byte-identical with and without this mechanism active), while cutting aggregate CAGR
+  9.20%→7.68% and Calmar 1.347→1.145 for no benefit. 2022's aggregate sleeve drawdown simply
+  never reached the -5%/30-day threshold, even though it was disruptive enough to show up in
+  the earlier per-year comparison.
+
+**Net read**: none of these four ideas beat the deployed spec. No further sleeve changes
+made this round -- stays at no-VIX-condition, ADX>25, existing 4-way exit structure.
+
+---
+
 ### 🔬 CHECKED 2026-07-31: is there a better ADX threshold than 25? No -- 25 sits on the plateau, further gains are overfit
 
 Same day as the ADX>20→25 deploy, swept a wider/finer grid (15/18/20/22/25/28/30/33/35/40)
