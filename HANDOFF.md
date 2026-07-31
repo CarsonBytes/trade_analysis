@@ -5,6 +5,38 @@ Last updated 2026-07-31.
 
 ---
 
+### 🎛️ DEPLOYED 2026-07-31: execution-window gate for new entries (10:00am-3:30pm ET)
+
+Follow-up to the earlier critique of "Task 1" (backtest a time-window) -- user clarified:
+skip the backtest, critique-and-configure the operational alternative if justified. It is:
+low cost (this system's WEEKLY-bar signals don't need same-day precision, so holding an
+already-identified entry for at most a few hours costs nothing strategically), plausible
+benefit (entries are real MKT orders -- `orderType = "MKT"` -- genuinely exposed to spread
+at fill time, and the academic premise about wider open/close spreads is real, even if its
+magnitude is smaller for mega-liquid ETFs than the general case).
+
+`ib_exec.py::within_entry_execution_window()` (new) -- weekday, 10:00am-3:30pm ET via
+`ZoneInfo`, no NYSE holiday calendar (same simplification used throughout this codebase's
+other hours checks). Wired into `mirror_new()`'s per-trade loop, checked after the manual-
+pause gate, before method dispatch -- so it applies uniformly to core AND sleeve entries.
+**Entries only, deliberately does NOT gate exits** (LMT/STP, GTC -- fill whenever price
+touches them regardless of submission time, so a submission-time window wouldn't even
+control their spread exposure; and delaying a risk-management exit to chase a marginally
+better spread would be the wrong tradeoff anyway). Skips (not cancels) outside the window --
+same "leave it queued, retry automatically" pattern as the manual-pause gate. New specific
+UI message in `app.py::_pending_reason()` so a held-back trade doesn't show the generic
+"just logged" text outside the window.
+
+**Test fallout, found before it could bite**: this is checked UNCONDITIONALLY in
+`mirror_new()`'s loop, so three EXISTING tests that expected placement to proceed --
+without mocking this new function -- would have silently become wall-clock-time-dependent
+(passing or failing depending on what time of day the test suite happens to run). Found and
+fixed by adding `mock.patch.object(ib_exec, "within_entry_execution_window", return_value=
+True)` to all three. 3 new tests added (boundary checks incl. a DST date, held-outside-
+window, placed-inside-window). Full 15-file suite green, deployed to both instances.
+
+---
+
 ### 🎛️ DEPLOYED 2026-07-31: LLM auto-pause extended to intraday hours (9:30am-3:30pm ET)
 
 User request, two-part -- (1) restrict signal EXECUTION to a 10:00am-3:30pm ET window
@@ -25,7 +57,9 @@ instance's own port; both instances confirmed unaffected) -- 10 boundary cases i
 9:30/15:30 edges and a December (EST, not EDT) date to confirm `ZoneInfo` DST handling,
 all pass.
 
-**Part 1 (NOT built as specified) -- see the critique entry directly below.**
+**Part 1 (NOT built as specified) -- see the critique entry directly below. Later the same
+day, user confirmed the operational alternative (not a backtest) was wanted -- built and
+deployed, see the entry ABOVE this one.**
 
 ---
 

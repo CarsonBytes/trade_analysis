@@ -1276,6 +1276,14 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
                 pass
         return (f"Needs ~${t['entry']:,.0f}/share, ~${room:,.0f} of room left.{eta}",
                "retrying")
+    # ADDED 2026-07-31: execution-window gate (ib_exec.within_entry_execution_window(),
+    # 10:00am-3:30pm ET, entries only) -- give this its own message rather than falling
+    # through to the generic "just logged" one below, which would be misleading outside
+    # the window (it wasn't "just logged," it's deliberately waiting for the window).
+    from dashboard.execution import ib_exec
+    if not ib_exec.within_entry_execution_window():
+        return ("Outside the 10:00am-3:30pm ET execution window (avoids the wider "
+                "open/close spreads) — will place automatically once it opens.", "retrying")
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 

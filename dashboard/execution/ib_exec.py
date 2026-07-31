@@ -237,6 +237,30 @@ def mirrored_open_symbols() -> set[str]:
 
 # ---- actions ----------------------------------------------------------------
 
+def within_entry_execution_window(now: dt.datetime | None = None) -> bool:
+    """ADDED 2026-07-31, user-requested execution-quality gate -- holds new-entry ORDER
+    SUBMISSION to 10:00am-3:30pm ET, deliberately narrower than app.py's LLM-hours gate
+    (9:30am-3:30pm): this window additionally excludes the first 30min too, matching the
+    academic premise that bid-ask spreads are measurably wider in the first/last 30min of
+    the session. Entries are real MKT orders (see mirror_new()'s bracket placement below),
+    genuinely exposed to spread at fill time. Deliberately does NOT gate EXITS (LMT/STP,
+    GTC -- fill whenever price touches them regardless of submission time, so this wouldn't
+    even control their spread exposure; and delaying a risk-management exit to chase a
+    marginally better spread would be the wrong tradeoff anyway). Not a backtested alpha
+    claim -- the core book's WEEKLY-bar signals don't need same-day precision, so holding an
+    already-identified entry for at most a few hours costs nothing strategically; this is an
+    operational execution-quality control, same category as the tech-pause/LLM-hours gates
+    elsewhere in this project. Weekday-only, no NYSE holiday calendar (same simplification
+    used throughout this codebase's other hours checks). `now` param is for direct testing."""
+    from zoneinfo import ZoneInfo
+    now = now or dt.datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5:
+        return False
+    open_t = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
 def mirror_new() -> list[str]:
     """Place paper bracket orders for OPEN paper trades of the live variant not
     yet mirrored. Returns human-readable log lines."""
@@ -317,6 +341,14 @@ def mirror_new() -> list[str]:
         # again the moment the user un-pauses it. Checked before core/sleeve dispatch, same as
         # the tech-pause gate.
         if t.get("manual_paused"):
+            continue
+        # Execution-window gate -- entries only, see within_entry_execution_window()'s
+        # docstring. Skips (not cancels) outside 10:00am-3:30pm ET, same "leave it queued,
+        # pick it up automatically next cycle" pattern as the manual-pause check above --
+        # the UI's pending-card grouping (_pending_reason() in app.py) already treats an
+        # unmirrored trade with no other blocker as "retrying" by default, so this needs no
+        # UI change to show correctly, though app.py adds a specific message for it too.
+        if not within_entry_execution_window():
             continue
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:

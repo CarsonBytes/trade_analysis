@@ -525,6 +525,7 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
              mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
              mock.patch.object(ib_exec, "_place_etf_bracket", side_effect=_fake_place_etf_bracket), \
              mock.patch("dashboard.data.providers.get_live_price",
                         return_value=(90.0, "test", None)):    # -2.0R drift, well past threshold
@@ -714,6 +715,127 @@ def test_mirror_new_cancels_pending_tech_signal_when_paused():
 # ADDED 2026-07-30: the priority-order fix itself -- a pending SLEEVE (dipbuy-sleeve) tech
 # signal must NOT be cancelled even while TECH_PAUSED=True, and must reach normal placement.
 # User request: tech-pause is now lower priority than the dipbuy-sleeve strategy.
+# ADDED 2026-07-31: execution-window gate (user-requested) -- holds new-entry order
+# SUBMISSION to 10:00am-3:30pm ET, avoiding the wider open/close spreads. Entries only,
+# skips (doesn't cancel) outside the window.
+def test_within_entry_execution_window_boundaries():
+    print("within_entry_execution_window(): boundary checks (10:00/15:30 ET edges, "
+          "weekend, DST):")
+    from dashboard.execution import ib_exec
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    cases = [
+        ("Mon 09:59:59 ET (1s before open)", dt.datetime(2026, 8, 3, 9, 59, 59, tzinfo=ET), False),
+        ("Mon 10:00:00 ET (exactly open)", dt.datetime(2026, 8, 3, 10, 0, 0, tzinfo=ET), True),
+        ("Mon 12:00 ET (midday)", dt.datetime(2026, 8, 3, 12, 0, tzinfo=ET), True),
+        ("Mon 15:30:00 ET (exactly cutoff)", dt.datetime(2026, 8, 3, 15, 30, 0, tzinfo=ET), True),
+        ("Mon 15:30:01 ET (1s after cutoff)", dt.datetime(2026, 8, 3, 15, 30, 1, tzinfo=ET), False),
+        ("Sat 12:00 ET (weekend)", dt.datetime(2026, 8, 1, 12, 0, tzinfo=ET), False),
+        ("Dec Mon 10:00 ET (EST/winter, exactly open)", dt.datetime(2026, 12, 7, 10, 0, tzinfo=ET), True),
+    ]
+    for label, t, want in cases:
+        check(label, ib_exec.within_entry_execution_window(t), want)
+
+
+def test_mirror_new_holds_entry_outside_execution_window():
+    print("\nmirror_new(): outside 10:00am-3:30pm ET, a pending CORE entry is held (not "
+          "placed, not cancelled) -- _place_etf_bracket() never called:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old_db = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    old_tech_paused = paper.TECH_PAUSED
+    paper.TECH_PAUSED = False   # isolate this gate from the unrelated tech-pause gate
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-29T23:48:00','DIA','long','ATR rr3.0',400.0,380.0,"
+                     "460.0,3.0,1,'OPEN')")
+
+        etf_calls = []
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=False), \
+             mock.patch.object(ib_exec, "_place_etf_bracket",
+                              side_effect=lambda *a, **kw: etf_calls.append(1)):
+            ib_exec.mirror_new()
+
+        check("_place_etf_bracket never called (outside window)", len(etf_calls), 0)
+        with ib_exec._conn() as c:
+            status = c.execute("SELECT status FROM paper_trades WHERE id=1").fetchone()[0]
+        check("paper_trades row still OPEN (held, not cancelled)", status, "OPEN")
+    finally:
+        paper.TECH_PAUSED = old_tech_paused
+        if old_db is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old_db
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_mirror_new_places_entry_inside_execution_window():
+    print("\nmirror_new(): inside 10:00am-3:30pm ET, a pending CORE entry reaches "
+          "_place_etf_bracket() normally:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old_db = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    old_tech_paused = paper.TECH_PAUSED
+    paper.TECH_PAUSED = False
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-29T23:48:00','DIA','long','ATR rr3.0',400.0,380.0,"
+                     "460.0,3.0,1,'OPEN')")
+
+        etf_calls = []
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
+             mock.patch.object(ib_exec, "_place_etf_bracket",
+                              side_effect=lambda *a, **kw: etf_calls.append(1)):
+            ib_exec.mirror_new()
+
+        check("_place_etf_bracket WAS called (inside window)", len(etf_calls), 1)
+    finally:
+        paper.TECH_PAUSED = old_tech_paused
+        if old_db is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old_db
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused():
     print("\nmirror_new(): TECH_PAUSED=True does NOT touch a pending SLEEVE QQQ signal -- "
           "it reaches _place_sleeve_bracket() same as if tech-pause didn't exist:")
@@ -745,6 +867,7 @@ def test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused():
              mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
              mock.patch.object(ib_exec, "_place_sleeve_bracket",
                               side_effect=lambda *a, **kw: (sleeve_calls.append(1), "placed")[1]):
             logs = ib_exec.mirror_new()
@@ -799,6 +922,7 @@ def test_mirror_new_does_not_cancel_tech_signals_when_resumed():
              mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
              mock.patch.object(ib_exec, "_place_sleeve_bracket",
                               side_effect=lambda *a, **kw: (sleeve_calls.append(1), "placed")[1]):
             ib_exec.mirror_new()
@@ -1026,6 +1150,9 @@ if __name__ == "__main__":
     test_cancel_pending_order_cancels_the_resting_order()
     test_cancel_pending_order_noop_when_never_reached_broker()
     test_cancel_pending_order_noop_when_broker_unreachable()
+    test_within_entry_execution_window_boundaries()
+    test_mirror_new_holds_entry_outside_execution_window()
+    test_mirror_new_places_entry_inside_execution_window()
     test_mirror_new_cancels_pending_tech_signal_when_paused()
     test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused()
     test_mirror_new_does_not_cancel_tech_signals_when_resumed()
