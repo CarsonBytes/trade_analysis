@@ -5,6 +5,29 @@ Last updated 2026-07-31.
 
 ---
 
+### 🔬 CHECKED 2026-07-31: is there a better ADX threshold than 25? No -- 25 sits on the plateau, further gains are overfit
+
+Same day as the ADX>20→25 deploy, swept a wider/finer grid (15/18/20/22/25/28/30/33/35/40)
+full-history AND OOS (`dashboard/research/sleeve_adx_sweep_test.py`), tracking per-ticker
+trade counts to catch overfitting from thinning samples, not just the aggregate Calmar.
+
+**Full-history Calmar plateaus 1.35-1.36 across ADX 25-30** (25: 1.350, 28: 1.364, 30:
+1.354 -- differences within noise, not a real ranking) before collapsing sharply above 33
+(1.125 at 33, 0.878 at 40). **OOS Calmar keeps climbing all the way to ADX>33 (2.125)** --
+but that's a shrinking-sample mirage, not real signal: per-ticker trade count drops from 30
+(at the deployed 25) to 18/14/12/10 by ADX 28/30/33/35, and total pooled trades more than
+halve (874→419) by 33. At ADX>40 the pattern's own internal logic confirms this: BOTH
+full-history AND OOS Calmar collapse together (0.878 / 1.554) exactly where min per-ticker n
+bottoms out at 2 -- a single ticker with 2 trades across 30+ years is pure noise, and that's
+where "OOS keeps improving forever" finally breaks, the textbook overfit signature.
+
+**Verdict: no case to push past 25.** It already sits on the start of the real
+full-history plateau; the marginal "improvement" at 28-30 is within noise and buys real
+statistical reliability cost (nearly half the sample); anything past 30 is fitting a
+shrinking tail, not finding a better filter. ADX_THRESHOLD stays at 25.
+
+---
+
 ### 🎛️ DEPLOYED 2026-07-31: sleeve ADX threshold raised 20→25 (user-approved)
 
 Same day as the VIX-drop + its stress test (below). `core/sleeve.py::entry_signal()`'s ADX
