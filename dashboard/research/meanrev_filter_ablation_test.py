@@ -35,7 +35,7 @@ import pandas as pd
 import yfinance as yf
 
 from dashboard.research.sleeve_blend import (
-    _core_weekly_returns, _sleeve_trades, _sleeve_unit_series, _metrics, COST,
+    _core_weekly_returns, _sleeve_unit_series, _metrics, COST,
     STOP_FRAC, TARGET_FRAC, TIME_CAP_DAYS,
 )
 from dashboard.core.sleeve import SLEEVE_UNIVERSE
@@ -148,11 +148,17 @@ def main() -> None:
             print("  (no data)")
             continue
         for v in VARIANTS:
-            if v == "A_full_filter_LIVE":
-                trs = _sleeve_trades(tk)          # exact live function -- ground truth, not reimplemented
-            else:
-                ent = _variant_entries(f, v)
-                trs = _trades_for_entry_mask(f, ent)
+            # FIXED 2026-07-31: variant A used to reuse _sleeve_trades() as "the exact live
+            # function, ground truth, not reimplemented" -- true when this script was first
+            # written, but core/sleeve.py's entry_signal() (and sleeve_blend.py's
+            # _sleeve_trades() reproduction of it) was CHANGED that same day to drop the VIX
+            # condition (this ablation's own finding, deployed same-day) -- so _sleeve_trades()
+            # now silently reproduces variant B, not A, collapsing "A vs B" into "B vs B".
+            # Reconstruct A independently via _variant_entries() instead (unaffected by the
+            # sleeve.py edit) so this script stays a correct historical A-vs-B comparison
+            # regardless of what's currently live.
+            ent = _variant_entries(f, v)
+            trs = _trades_for_entry_mask(f, ent)
             trades_by_variant[v][tk] = trs
             rs = np.array([t["r"] for t in trs]) if trs else np.array([])
             print(f"  {v:<32} n={len(rs):<5} meanR {rs.mean()*100 if len(rs) else 0:+6.2f}% "
