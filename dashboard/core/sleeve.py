@@ -16,11 +16,15 @@ AND the naive all-22 version. NOTE: IWM's inclusion updates an earlier note ("no
 edge") from an earlier research round -- this re-test, run against the CURRENT exact production
 signal spec, shows genuine edge (n=83, meanR +0.80%, win 72%) at a comparable tier to DIA. See
 HANDOFF for the full comparison table.
-Entry (ALL, daily close): close < 20dMA*0.975  AND  RSI14 < 35  AND ADX14 > 20.
+Entry (ALL, daily close): close < 20dMA*0.975  AND  RSI14 < 35  AND ADX14 > 25.
 CHANGED 2026-07-31: the VIX-spike condition (was: VIX/VIX[-5] - 1 > 0.15) was DROPPED from
 entry gating -- see entry_signal()'s docstring below and HANDOFF.md for the ablation that
 found it was over-conditioning the entry. VIX is still used for position SIZING (1.0% risk
-above VIX>30, vs 0.5% base) -- only the entry gate on it is gone.
+above VIX>30, vs 0.5% base) -- only the entry gate on it is gone. SAME DAY, separately: the
+ADX threshold was raised 20->25 -- a follow-up sweep (dashboard/research/
+vix_drop_stress_test.py section 4) found ADX>25 gives a better risk-adjusted tradeoff than
+the just-deployed ADX>20 (Calmar 1.349 vs 1.255, maxDD -6.83% vs -7.90%, for a CAGR cost of
+9.91%->9.22%) -- user-approved.
 Size: 0.5% risk base, 1.0% at VIX>30 (hard cap 1%) -- risk_pct stored in entry_facts so
       ib_exec._place_sleeve_bracket sizes correctly without re-deriving it.
 Exit: FOUR conditions, first true wins:
@@ -67,6 +71,10 @@ RISK_HIGH = 0.01
 STOP_FRAC = 0.05
 TARGET_FRAC = 0.03
 TIME_CAP_DAYS = 10
+# CHANGED 2026-07-31: 20->25, same day as the VIX-drop above. Sweep found ADX>25 a better
+# risk-adjusted tradeoff than the just-deployed ADX>20 (Calmar 1.349 vs 1.255, maxDD -6.83%
+# vs -7.90%, CAGR 9.22% vs 9.91%) -- see vix_drop_stress_test.py section 4, user-approved.
+ADX_THRESHOLD = 25
 
 
 def sleeve_enabled() -> bool:
@@ -221,7 +229,7 @@ def entry_signal(ticker: str) -> dict | None:
                                         d["vix"], d["vix_5ago"])) or d["vix_5ago"] <= 0:
         return None
     vix_up = d["vix"] / d["vix_5ago"] - 1.0
-    ok = (d["close"] < d["ma20"] * 0.975) and (d["rsi14"] < 35) and (d["adx14"] > 20)
+    ok = (d["close"] < d["ma20"] * 0.975) and (d["rsi14"] < 35) and (d["adx14"] > ADX_THRESHOLD)
     if not ok:
         return None
     entry = d["close"]

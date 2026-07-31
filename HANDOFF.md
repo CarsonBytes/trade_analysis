@@ -5,6 +5,19 @@ Last updated 2026-07-31.
 
 ---
 
+### 🎛️ DEPLOYED 2026-07-31: sleeve ADX threshold raised 20→25 (user-approved)
+
+Same day as the VIX-drop + its stress test (below). `core/sleeve.py::entry_signal()`'s ADX
+condition raised from `>20` to `>25` (new named constant `ADX_THRESHOLD = 25`, replacing the
+bare literal). Backtest (`vix_drop_stress_test.py` section 4): Calmar 1.255→1.349, maxDD
+-7.90%→-6.83%, for a CAGR cost of 9.91%→9.22% -- a cleaner risk-adjusted tradeoff than the
+just-deployed ADX>20. `sleeve_blend.py::_sleeve_trades()` updated to match. 3 new assertions
+in `test_sleeve.py`'s ADX test, including a boundary check (ADX=22, which cleared the OLD
+>20 threshold but not the new >25 one) to confirm the threshold actually moved, not just
+that ADX filtering exists. Full suite green, both instances redeployed.
+
+---
+
 ### 🔬 STRESS-TESTED 2026-07-31: VIX-drop deploy survives a detailed critique; both proposed follow-up mechanisms REJECTED; found+fixed a real latent bug along the way
 
 User critique (Cantonese) of the same-day VIX-condition-drop raised three risks and three

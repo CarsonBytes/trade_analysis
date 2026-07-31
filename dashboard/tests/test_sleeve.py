@@ -151,7 +151,7 @@ def test_sleeve_ignores_tech_paused_entirely():
 # ablation (meanrev_filter_ablation_test.py's variant B beat the VIX-inclusive spec on
 # CAGR/Sharpe/Calmar at every weight, IS and OOS -- see HANDOFF.md). Direct tests of the
 # real function (not mocked), confirming the actual new gate, not just that nothing broke.
-def _daily(close=97.0, ma20=100.0, rsi14=30.0, adx14=25.0, vix=15.0, vix_5ago=15.0):
+def _daily(close=97.0, ma20=100.0, rsi14=30.0, adx14=30.0, vix=15.0, vix_5ago=15.0):
     import pandas as pd
     return {"close": close, "vix": vix, "vix_5ago": vix_5ago, "ma5": close * 0.99,
            "ma20": ma20, "rsi14": rsi14, "adx14": adx14, "asof": pd.Timestamp.now()}
@@ -176,13 +176,22 @@ def test_entry_signal_still_requires_rsi_below_35():
     check("no candidate -- RSI too high", cand, None)
 
 
-def test_entry_signal_still_requires_adx_above_20():
-    print("\nentry_signal(): ADX<=20 still blocks entry (unchanged -- this is the filter "
-          "that's actually earning its keep per the ablation):")
+def test_entry_signal_requires_adx_above_25():
+    print("\nentry_signal(): ADX<=25 blocks entry -- this is the filter that's actually "
+          "earning its keep per the ablation, threshold RAISED 20->25 same day (a follow-up "
+          "sweep found a better risk-adjusted tradeoff, see HANDOFF.md):")
     from dashboard.core import sleeve
     with mock.patch.object(sleeve, "_load_daily", return_value=_daily(adx14=15.0)):
         cand = sleeve.entry_signal("SPY")
     check("no candidate -- ADX too weak", cand, None)
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(adx14=22.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("no candidate -- ADX=22 would have passed the OLD >20 threshold but not the new "
+          ">25 one (confirms the threshold actually moved, not just 'ADX filtering exists')",
+          cand, None)
+    with mock.patch.object(sleeve, "_load_daily", return_value=_daily(adx14=26.0)):
+        cand = sleeve.entry_signal("SPY")
+    check("ADX=26 clears the new threshold -- candidate returned", cand is not None, True)
 
 
 def test_entry_signal_still_requires_close_below_20ma():
@@ -208,7 +217,7 @@ if __name__ == "__main__":
     test_sleeve_ignores_tech_paused_entirely()
     test_entry_signal_fires_without_a_vix_spike()
     test_entry_signal_still_requires_rsi_below_35()
-    test_entry_signal_still_requires_adx_above_20()
+    test_entry_signal_requires_adx_above_25()
     test_entry_signal_still_requires_close_below_20ma()
     test_entry_signal_vix_still_drives_sizing_not_gating()
     print()
