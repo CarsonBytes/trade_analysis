@@ -1,7 +1,47 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-07-31.
+Last updated 2026-08-04.
+
+---
+
+### 🐞 FIXED 2026-08-04: LIVE "P&L over time" chart showed a false ~-10,000 HKD dip at the very start
+
+User report: "P&L over time on live account displays incorrectly." Debugged from the real
+LIVE database (`dashboard/dashboard_live.db`) directly, not guessed -- the visible dashboard
+itself is Cloudflare Access-gated, no credentials available, so root-caused from data first.
+
+**Root cause**: `paper.py::deposit_adjusted_series()` (shared by app.py's equity chart AND
+`current_drawdown_pct()`) netted out EVERY cash flow regardless of when it happened,
+including a flow recorded BEFORE `equity_history` tracking even started. Live case: the
+account's real first deposit (+10,000 HKD) landed 2026-07-08, but `equity_history` tracking
+only began 2026-07-10 (2 days later, already funded) -- so `adj[0]` came out to a bogus
+~40 HKD (a tiny pre-funding leftover artifact) instead of the real starting balance
+(~10,040 HKD). app.py's chart zero-references the P&L view by subtracting `hist[0][1]`
+(assumes `adj[0] == hist[0][1]`) -- silently wrong once that assumption broke, showing a
+false ~-10,000 HKD dip at the very start of the line before "recovering" to the real
+(much smaller, +832 HKD as of this fix) P&L.
+
+**This exact bug class was already found and fixed once before, just not here**:
+`app.py`'s own "Total P&L" stat hit the identical problem on 2026-07-10 and was fixed with
+`net_flows = sum(f[1] for f in flows if f[0] >= base0_ts)` -- filtering to flows at/after
+tracking start. `deposit_adjusted_series()` (a DIFFERENT code path, added later) never got
+the same filter, so the chart and the drawdown calc kept the bug while the headline stat
+didn't -- explains why this wasn't caught immediately (the headline number looked right;
+only the chart line was wrong). `current_drawdown_pct()`'s 2026-07-11 "materiality floor"
+was a partial workaround for the SAME underlying issue, applied to a different symptom
+(a bogus -90% drawdown reading) without fixing the root cause -- kept as defense-in-depth,
+no longer load-bearing for this specific scenario.
+
+**Fix**: `deposit_adjusted_series()` now only nets out flows with `ts >= hist[0][0]`,
+matching the already-established "Total P&L" convention exactly -- one fix in the shared
+function instead of requiring every caller to work around it separately. **Verified against
+the real live data**: `adj[0]` now correctly equals `hist[0][1]` (10,040.00, was 40.00), and
+the fixed P&L series's last value (+832.58) now exactly matches the independently-computed
+"Total P&L" stat's own math (832.58) -- a real cross-check, not just "looks more reasonable."
+Real range corrected from a bogus **-10,331 to -7,652 HKD** to the true **-331 to +2,347
+HKD**. 2 new regression tests (a flow before tracking start is ignored entirely; a mixed
+before/after case). Full 16-file suite green, deployed to both instances.
 
 ---
 

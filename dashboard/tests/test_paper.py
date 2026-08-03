@@ -53,6 +53,19 @@ def test_deposit_adjusted_series():
           deposit_adjusted_series(hist5, None), [10000.0, 10100.0, 20100.0])
     check("5-field entries with flows still nets out correctly",
           deposit_adjusted_series(hist5, flows), [10000.0, 10100.0, 10100.0])
+    # FIXED 2026-08-04: confirmed live on the real account -- a flow recorded BEFORE
+    # hist[0]'s own timestamp (the account was already funded when tracking started) used
+    # to still get netted out, making adj[0] a tiny near-zero pre-funding artifact instead
+    # of the real starting balance. app.py's equity chart zero-references the P&L view by
+    # subtracting hist[0][1] (assumes adj[0] == hist[0][1]) -- that silently broke,
+    # showing a false ~10,000 HKD dip at the very start of the real P&L(ex-deposits) line.
+    flows_before_start = [[50, 10000.0, "HKD"]]   # a flow BEFORE hist[0][0]=100
+    check("a flow before hist[0]'s timestamp is ignored entirely -- adj[0] == hist[0][1]",
+          deposit_adjusted_series(hist, flows_before_start), [10000.0, 10100.0, 20100.0])
+    # a mix: one flow before tracking (ignored), one flow after (still netted out normally)
+    flows_mixed = [[50, 10000.0, "HKD"], [250, 5000.0, "HKD"]]
+    check("mixed: pre-tracking flow ignored, post-tracking flow still nets out normally",
+          deposit_adjusted_series(hist, flows_mixed), [10000.0, 10100.0, 15100.0])
 
 
 def test_current_drawdown_pct():

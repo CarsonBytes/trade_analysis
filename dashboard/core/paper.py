@@ -334,10 +334,30 @@ def deposit_adjusted_series(hist: list, flows: list | None) -> list[float]:
     point subtracted, so the series reads as pure trading P&L -- deposits/withdrawals become
     invisible instead of looking like gains. Shared by app.py's equity chart AND
     current_drawdown_pct() below -- a deposit must never look like a new all-time high that
-    resets the peak and hides a real drawdown."""
+    resets the peak and hides a real drawdown.
+
+    FIXED 2026-08-04: only nets out flows at or AFTER hist[0]'s own timestamp -- a flow
+    recorded BEFORE tracking even began (the account was already funded when
+    equity_history started, e.g. an initial deposit a couple of days earlier) used to get
+    subtracted anyway, making adj[0] a tiny near-zero pre-funding artifact instead of the
+    real starting balance (confirmed live: a real +10,000 HKD deposit from 2026-07-08
+    subtracted from a series that only starts 2026-07-10, turning adj[0] from a correct
+    ~10,040 into a bogus ~40). app.py's equity chart assumes adj[0] == hist[0][1] (it
+    zero-references the P&L view by subtracting hist[0][1], not adj[0]) -- that assumption
+    was silently broken, showing a false ~-10,000 HKD dip at the very start of the P&L(ex-
+    deposits) line. This exact bug class was already found and fixed for the "Total P&L"
+    stat on 2026-07-10 (app.py's `net_flows = sum(f[1] for f in flows if f[0] >= base0_ts)`)
+    but never applied here, the OTHER caller of the same underlying problem -- this makes
+    the shared function itself match that established convention instead of requiring every
+    caller to work around it separately (current_drawdown_pct()'s own 2026-07-11 materiality
+    floor was one such workaround; kept as defense-in-depth, but shouldn't be load-bearing
+    for this specific scenario anymore)."""
     if not flows:
         return [h[1] for h in hist]
-    flows_sorted = sorted(flows, key=lambda f: f[0])
+    start_ts = hist[0][0] if hist else 0
+    flows_sorted = sorted((f for f in flows if f[0] >= start_ts), key=lambda f: f[0])
+    if not flows_sorted:
+        return [h[1] for h in hist]
     out = []
     fi, cum = 0, 0.0
     for ts, val, *_ in hist:
