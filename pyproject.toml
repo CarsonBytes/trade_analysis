@@ -28,6 +28,7 @@ dependencies = [
     # `uv run --no-sync`). ib_async = IBKR futures (paper exec); MetaTrader5 = MT5.
     "ib_async>=1.0",
     "MetaTrader5; sys_platform == 'win32'",
+    "pandas-market-calendars>=5.4.0",
 ]
 
 [project.optional-dependencies]

@@ -122,11 +122,13 @@ def _market_open(now: dt.datetime | None = None) -> bool:
     or get rejected outside hours -- the point is not to spend API calls on signals nobody
     can act on for hours anyway). Cuts 30min before the 4pm close (not the full session) --
     also user-specified, gives the analysis a buffer before end-of-day volatility/spread
-    widening rather than analyzing right up to the bell. Does NOT check US market holidays
-    (same simplification the old weekday-only version already made) -- a holiday still
-    passes, but just produces the same "no fresh setup" read a real no-movement day would;
-    not worth a maintained holiday calendar for that low a cost. `now` param (ET-aware if
-    passed) is for direct unit testing without mocking datetime.now() globally.
+    widening rather than analyzing right up to the bell. **CHANGED 2026-07-31 (same day):**
+    now also excludes US market holidays via `market_calendar.is_us_trading_day()` (real
+    NYSE calendar, not a hand-maintained list -- see that module's docstring) -- superseding
+    the earlier "not worth a maintained holiday calendar" call now that the user asked for
+    it explicitly and a real (self-maintaining) calendar package was added instead of a
+    fixed list. `now` param (ET-aware if passed) is for direct unit testing without mocking
+    datetime.now() globally.
 
     FIXED 2026-07-11 (weekday check, still applies): this box's system clock is
     Asia/Hong_Kong (UTC+8), 12h ahead of US Eastern (the market this account actually
@@ -140,8 +142,9 @@ def _market_open(now: dt.datetime | None = None) -> bool:
     from dashboard.instruments import _ib_broker
     if _ib_broker():
         from zoneinfo import ZoneInfo
+        from dashboard.core.market_calendar import is_us_trading_day
         now = now or dt.datetime.now(ZoneInfo("America/New_York"))
-        if now.weekday() >= 5:                     # Sat/Sun
+        if not is_us_trading_day(now.date()):       # weekend OR US market holiday
             return False
         open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
         close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)

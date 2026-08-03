@@ -250,11 +250,15 @@ def within_entry_execution_window(now: dt.datetime | None = None) -> bool:
     claim -- the core book's WEEKLY-bar signals don't need same-day precision, so holding an
     already-identified entry for at most a few hours costs nothing strategically; this is an
     operational execution-quality control, same category as the tech-pause/LLM-hours gates
-    elsewhere in this project. Weekday-only, no NYSE holiday calendar (same simplification
-    used throughout this codebase's other hours checks). `now` param is for direct testing."""
+    elsewhere in this project. **CHANGED 2026-07-31 (same day): now also excludes US market
+    holidays** via `market_calendar.is_us_trading_day()` (real NYSE calendar, not a
+    hand-maintained list) -- superseding the earlier "not worth a maintained holiday
+    calendar" call now that a real, self-maintaining calendar package was added instead of
+    a fixed list. `now` param is for direct testing."""
     from zoneinfo import ZoneInfo
+    from dashboard.core.market_calendar import is_us_trading_day
     now = now or dt.datetime.now(ZoneInfo("America/New_York"))
-    if now.weekday() >= 5:
+    if not is_us_trading_day(now.date()):           # weekend OR US market holiday
         return False
     open_t = now.replace(hour=10, minute=0, second=0, microsecond=0)
     close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)

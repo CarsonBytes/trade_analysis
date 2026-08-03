@@ -5,6 +5,95 @@ Last updated 2026-07-31.
 
 ---
 
+### 🎛️ DEPLOYED 2026-07-31: real NYSE holiday awareness added to the hours-check gates
+
+Follow-up to the 2FA fix above -- user asked to also exclude US market holidays (not just
+weekends) from the weekday-only hours checks. Earlier the same day, both `_market_open()`
+and `within_entry_execution_window()` were built with an explicit "not worth a maintained
+holiday calendar" simplification -- superseded by this request.
+
+New `dashboard/core/market_calendar.py::is_us_trading_day()` uses `pandas_market_calendars`
+(real NYSE calendar) rather than a hand-maintained date list -- the point of avoiding a
+maintenance burden is defeated by writing code that itself needs annual updates, and even a
+correctly-implemented fixed-rule list (nth-weekday-of-month + Easter-relative Good Friday)
+would still miss one-off exceptions (e.g. a market-wide closure for a national day of
+mourning) that a real, actively-maintained calendar package already handles. Verified
+against real 2026 NYSE dates, including the Independence Day weekend-observed shift (real
+Jul 4 is a Saturday in 2026, so the market closes Jul 3 instead -- confirmed correctly
+detected, not just the fixed date). Cached per calendar year (checked on every ~1min
+refresh tick -- an uncached call would mean 1000+ real calendar computations/day for
+nothing, since a published year's calendar never changes). **Fails OPEN** (treats a weekday
+as tradeable) if the calendar package itself errors -- a missed holiday is harmless (one
+wasted LLM call, or one entry held back that retries next cycle), while failing closed
+could silently block every weekday if the package/network ever has a bad moment.
+
+Wired into both `app.py::_market_open()` (LLM-hours gate) and `ib_exec.py::
+within_entry_execution_window()` (entry-submission window) -- both now check
+`is_us_trading_day()` instead of a bare weekday test. New dependency:
+`pandas_market_calendars` (`uv add`, pulls in `exchange-calendars`). New test file
+`test_market_calendar.py` (12 real-date checks incl. every major 2026 holiday + the
+observed-shift case, a caching check, and a fail-open check) -- 16 test files now, full
+suite green. Deployed to both instances.
+
+---
+
+### 🔐 FIXED 2026-07-31: excess IB Gateway 2FA prompts -- root-caused and fixed, both instances
+
+User request: 2FA logins should be as rare as possible, and land only on weekday trading
+days, ~1-2h before US market open. Investigated rather than guessed -- found TWO real,
+independent causes, both outside the git repo (these files aren't tracked -- this HANDOFF
+entry is the only record of the change, `git log` won't show it).
+
+**Root cause #1 (the dominant one today): `C:\Scripts\dashboard.ps1` unconditionally killed
+the IB Gateway on EVERY dashboard restart**, regardless of whether it was already healthy
+and logged in. A cold Gateway login needs 2FA -- so every dashboard.ps1 restart (a code
+redeploy, a Task Scheduler recovery, an unrelated crash-and-relaunch) forced an unwanted
+phone prompt, even though the dashboard app and the Gateway are independent processes with
+no real reason to restart together. This session alone did many paper-instance restarts
+(the wedged Task Scheduler saga + repeated code redeploys), each one silently forcing a
+fresh gateway relogin. **Fixed**: the kill logic is now gated behind `Test-Port 4002` --
+only kills+relaunches the Gateway if the port is actually NOT responding (a genuinely
+stuck/orphaned process), leaves a healthy Gateway alone otherwise. Verified: PowerShell
+tokenizer confirms the edited script parses clean (`[PSParser]::Tokenize`, 0 errors).
+**`run_dashboard_live.ps1` (LIVE) never had this bug** -- checked directly, it only guards
+its own dashboard-process port, never touches the Gateway on restart; asymmetry between the
+two scripts confirmed, only paper's needed the fix.
+
+**Root cause #2: IBC's own session-preserving daily restart (`AutoRestartTime`) was
+missing or mistimed.** This IBC feature does a scheduled Gateway restart that PRESERVES the
+login session (no 2FA needed) -- the correct mechanism for "one predictable, no-prompt
+refresh per day," but:
+- **PAPER (`C:\IBC\config.ini`): `AutoRestartTime` was EMPTY** -- never configured at all,
+  so paper's Gateway had no scheduled session-preserving refresh, relying entirely on
+  whatever default session-expiry behavior IBKR applies (unpredictable timing, likely
+  needing a fresh 2FA login whenever it hits, not confined to any convenient window).
+- **LIVE (`C:\IBC-Live\config.ini`): `AutoRestartTime=08:00 AM`** -- already configured,
+  but 08:00 AM is this machine's LOCAL (HKT) time (confirmed: the setting is documented as
+  local-timezone, not ET) -- 8:00 AM HKT converts to ~19:00-20:00 ET the PREVIOUS evening,
+  nowhere near "1-2h before market open," despite already being the right *kind* of
+  mechanism.
+
+**Fixed both to `AutoRestartTime=08:30 PM`** (20:30 HKT). Verified this lands within the
+requested 1-2h-before-open window across BOTH DST regimes, not just one: market opens 21:30
+HKT during EDT (20:30 = 1h before, the near edge) and 22:30 HKT during EST (20:30 = 2h
+before, the far edge) -- 20:30 HKT sits inside the window year-round without needing a
+seasonal adjustment IBC doesn't support anyway (it doesn't auto-adjust for the ET-side DST
+shift, per its own config comments).
+
+**Also set `ColdRestartTime=20:30`** on both (was empty on both) -- IBC's mandatory-by-
+IBKR weekly Sunday full restart (a real requirement, not something to eliminate) was
+previously left to fire at an unconfigured/unpredictable time; now pinned to the same
+convenient pre-market slot, safely after the "must be after 01:00 US/Eastern" floor in
+both DST regimes (1am ET = 13:00-14:00 HKT depending on season, well before 20:30).
+
+**Not tested by forcing an immediate Gateway restart** -- doing so would itself trigger the
+exact kind of prompt this fix exists to reduce. The `AutoRestartTime`/`ColdRestartTime`
+changes take effect at IBC's own next scheduled firing; the `dashboard.ps1` fix takes
+effect at the next natural dashboard restart (a future redeploy, crash-recovery, etc.),
+already verified safe via the syntax check above.
+
+---
+
 ### 🎛️ DEPLOYED 2026-07-31: execution-window gate for new entries (10:00am-3:30pm ET)
 
 Follow-up to the earlier critique of "Task 1" (backtest a time-window) -- user clarified:
