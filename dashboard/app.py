@@ -1195,7 +1195,22 @@ def portfolio_panel() -> None:
     id_to_sym = {t["id"]: t["instrument"] for t in paper.open_trades()}
     base_to_usd = 1.0 / usd_to_base if usd_to_base else 0.0   # base ccy -> USD
     raw = []  # (short_name, base_value, usd_value)
-    for pid, p in positions.items():
+    # FIXED 2026-08-05: dedupe by broker ticket before summing. When one instrument has
+    # multiple layered paper trades funding the SAME aggregate broker position, a stale
+    # ib_mirror row for an already-resolved trade could keep pointing at that same ticket
+    # (root cause fixed in ib_exec.py::sync_closures(), which now closes such rows) --
+    # this loop is defense-in-depth for the propagation window before that next runs, and
+    # costs nothing for the normal one-ticket-per-pid case (MT5 always is; IB is once the
+    # ib_mirror fix lands). Process open-trade pids first so the kept label is always the
+    # genuinely-open trade, not a resolved duplicate.
+    seen_tickets: set = set()
+    for pid in sorted(positions, key=lambda k: k not in id_to_sym):
+        p = positions[pid]
+        ticket = p.get("ticket")
+        if ticket is not None:
+            if ticket in seen_tickets:
+                continue
+            seen_tickets.add(ticket)
         mv_usd = p["volume"] * p["open"] + p.get("profit", 0.0)
         raw.append((id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd))
     if sgov_base > 0:
@@ -1209,16 +1224,41 @@ def portfolio_panel() -> None:
                "name": f"{s} {b / total_base * 100:.0f}%\n${u:,.0f} / {ccy} {b:,.0f}"}
               for s, b, u in raw]
     if slices:
+        # MOBILE-FRIENDLY 2026-08-05: outside labels with leader lines (the previous style)
+        # get crowded/overlapping on a narrow phone screen once there are more than ~4-5
+        # slices -- switch to INSIDE labels (percent only, always fits within its own slice,
+        # no leader lines competing for horizontal space) and move the full name/$ breakdown
+        # into each slice's tooltip instead, which is tap-to-reveal on mobile rather than
+        # needing screen width. media_query keeps the roomier outside-label style on desktop
+        # (nicequi ui.echart accepts a plain ECharts option dict; NiceGUI's own responsive
+        # container classes handle overall width, so only the pie's internal layout needs a
+        # size-based switch, done here via ECharts' own "media" query support).
+        # NOTE: ECharts' media-query responsive support requires the top-level option to be
+        # wrapped as {baseOption: {...}, media: [...]} -- a flat option dict with "media" as
+        # a sibling of "series" is silently ignored (no error, the query just never matches).
         ui.echart({
-            "tooltip": {"show": False},
-            "legend": {"show": False},
-            "series": [{"type": "pie", "radius": ["35%", "60%"],
-                        "center": ["50%", "50%"], "data": slices,
-                        "label": {"show": True, "position": "outside", "fontSize": 9,
-                                  "formatter": "{b}"},
-                        "labelLine": {"show": True}}],
+            "baseOption": {
+                "tooltip": {"show": True, "trigger": "item", "formatter": "{b}"},
+                "legend": {"show": False},
+                "series": [{"type": "pie", "radius": ["35%", "60%"],
+                            "center": ["50%", "50%"], "data": slices,
+                            "label": {"show": True, "position": "outside", "fontSize": 9,
+                                      "formatter": "{b}"},
+                            "labelLine": {"show": True}}],
+            },
+            "media": [{
+                "query": {"maxWidth": 480},
+                "option": {
+                    "series": [{"radius": ["30%", "55%"], "center": ["50%", "45%"],
+                                "label": {"show": True, "position": "inside",
+                                         "fontSize": 10, "color": "#fff",
+                                         "formatter": "{d}%"},
+                                "labelLine": {"show": False}}],
+                },
+            }],
         }).classes("w-full h-80").tooltip(
-            f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %")
+            f"Allocation — each slice labelled with USD (actual) + {ccy} (converted) + %. "
+            "Tap a slice for details on a narrow screen.")
 
 
 def _pending_reason(t: dict, room: float | None, eq: float | None,
@@ -1314,9 +1354,22 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
     # (which never sets current_price -- its STATE["live"] price is already tick-fresh).
     price = (pos.get("current_price") if pos and pos.get("current_price") else
              (live["price"] if live else t["entry"]))
-    # prefer the REAL MT5 fill price when this trade is on the demo, so
-    # the card matches what the MT5 terminal shows (not the paper entry).
-    entry = pos["open"] if pos else t["entry"]
+    # FIXED 2026-08-05: this used to prefer pos["open"] (the REAL fill price) over the
+    # paper-recorded entry -- fine for a single-fill position (the two are nearly identical,
+    # differing only by tiny slippage), but WRONG once this instrument has multiple separate
+    # paper trades layered into ONE aggregate broker position (confirmed live: paper CPER had
+    # an older EXPIRED trade (entry 37.45) plus a newer OPEN one (entry 39.28, SL 38.17)
+    # sharing the same broker position -- pos["open"] is IBKR's own BLENDED avgCost across
+    # BOTH layers, 38.09, which has no relationship to this specific trade's own SL/TP.
+    # Pairing that blended price with THIS trade's own SL made the risk denominator collapse
+    # toward zero (38.09 sits almost exactly on this trade's 38.17 stop) and the displayed R
+    # explode to +24.3 -- a real trade with a completely ordinary ~+0.76R position. R-multiple
+    # math is only meaningful relative to the SAME trade's own entry/stop pair, never a
+    # cross-layer blended average -- use the paper-recorded entry unconditionally, which also
+    # keeps the "entry X · SL Y · TP Z" line below internally consistent (X/Y/Z always
+    # describe the SAME signal, not a mix of this trade's SL/TP with a different trade's
+    # broker-blended fill price).
+    entry = t["entry"]
     risk = abs(entry - t["sl"]) or 1e-9
     ur = ((price - entry) if t["direction"] == "long"
           else (entry - price)) / risk
@@ -1386,7 +1439,14 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             ui.label(reason).classes(f"text-xs {_colour}")
         # NOTE: "unconfirmed" here means "no broker fill matched yet" -- has nothing to do
         # with PAPER-vs-LIVE mode (this branch is reached in both), so don't say "paper".
-        src = f"{_bk.name()} fill" if pos else "logged, unconfirmed"
+        # FIXED 2026-08-05: used to read f"{_bk.name()} fill" and the entry above used to show
+        # pos["open"] (the broker's own price) when confirmed -- now entry is always this
+        # trade's own recorded price (see the entry= fix above, needed to keep R-multiple math
+        # correct for multi-layer positions), so labelling it "IBKR fill" would be a lie once
+        # pos["open"] and t["entry"] diverge. "confirmed" still tells the user this trade has
+        # been matched to a real broker position, without claiming the number shown is the
+        # broker's own blended price.
+        src = "confirmed" if pos else "logged, unconfirmed"
         ui.label(f"entry {entry:.4f} ({src}) · SL {t['sl']:.4f} · TP {t['tp']:.4f}")\
             .classes("text-xs text-grey-7")
         # SHORTENED 2026-07-24: dropped the internal paper-journal "#{id}" from this line --

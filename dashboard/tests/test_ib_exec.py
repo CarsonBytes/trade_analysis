@@ -261,6 +261,74 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
             pass
 
 
+def test_sync_closures_closes_stale_mirror_row_when_position_still_open_via_other_layer():
+    print("\nsync_closures(): TWO paper trades share one broker position (layered ATR "
+          "signals funding the same aggregate con_id) -- the OLDER one resolves independently "
+          "(e.g. via the deterministic tick path) while the broker's AGGREGATE position stays "
+          "non-zero because the NEWER layer still holds it. Before the 2026-08-05 fix, the "
+          "older trade's ib_mirror row never got marked CLOSED (fell through every existing "
+          "branch, which only closed rows once the aggregate position went FLAT), causing "
+          "live_positions() to attach the same real position to BOTH paper_ids -- confirmed "
+          "live: double-counted the pie chart's market value and, once, exploded a trade's "
+          "displayed R-multiple to +24.3R by pairing the broker's cross-layer blended avgCost "
+          "with one specific trade's own unrelated stop-loss:")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:   # ensures paper_trades table exists first
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            # older trade: already resolved (LOSS), mirror row still (wrongly) OPEN
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-06-01T00:00:00','CPER','long','ATR rr3.0',37.45,36.2,40.0,3.0,"
+                     "40,'LOSS')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'CPER',40.0,50.0,'','2026-06-01T00:00:00','OPEN','etf')")
+            # newer trade: genuinely OPEN, same con_id (layered into the same broker position)
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(2,'2026-07-20T00:00:00','CPER','long','ATR rr3.0',39.28,38.17,44.0,3.0,"
+                     "44,'OPEN')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(2,0,111,'CPER',44.0,55.0,'','2026-07-20T00:00:00','OPEN','etf')")
+
+        fake_pos = SimpleNamespace(contract=SimpleNamespace(conId=111), position=84.0)
+
+        class _FakeIB:
+            def positions(self):
+                return [fake_pos]
+
+        fake_ib = _FakeIB()
+        with mock.patch.object(ib_exec, "_guard", return_value=fake_ib), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            ib_exec.sync_closures()
+
+        with ib_exec._conn() as c:
+            s1 = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
+            s2 = c.execute("SELECT status FROM ib_mirror WHERE paper_id=2").fetchone()[0]
+        check("older, already-resolved trade's mirror row is now CLOSED", s1, "CLOSED")
+        check("newer, genuinely open trade's mirror row stays OPEN", s2, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 # ADDED 2026-07-21: sync_closures() previously had no terminal outcome for a bracket ENTRY
 # that was rejected/cancelled at the broker before ever filling -- only for exits (a real
 # position that later closed). Confirmed live: CWB's 2026-07-20 order vanished from the

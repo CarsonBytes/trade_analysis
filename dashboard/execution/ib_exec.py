@@ -944,6 +944,27 @@ def sync_closures() -> list[str]:
                     c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
                               (paper_id,))
             continue
+        # (a2) FIXED 2026-08-05: same "paper already resolved -> close the mirror row" case
+        # as the flat-position branch just above, but for when the AGGREGATE broker position
+        # for this con_id is still non-zero -- happens when a separate, NEWER paper trade on
+        # the same instrument is layered into the same underlying position (each ATR-signal
+        # trade funds the same broker position rather than opening a distinct one). Before
+        # this fix, this case fell through the `if open_pos is None or open_pos.position == 0`
+        # check entirely and NOTHING ever closed the older, already-resolved row -- confirmed
+        # live via 3 stale pairs (VNQ, CPER, CWB) sharing one broker ticket each, one row
+        # correctly resolved (WIN/LOSS/EXPIRED) and one stuck OPEN forever. live_positions()
+        # (WHERE status='OPEN') then attached the SAME full position to both paper_ids, so the
+        # portfolio pie chart double/triple-counted that position's market value, and
+        # app.py::_trade_card() paired the broker's cross-layer blended avgCost with one
+        # specific trade's own SL, once producing a nonsensical +24.3R display for a real
+        # ~+0.76R position (see app.py's matching entry= fix). Closing the row here doesn't
+        # touch the broker position itself (other layers' mirror rows keep tracking it) --
+        # it only stops a RESOLVED trade's own bookkeeping row from masquerading as open.
+        elif pt["status"] != "OPEN":
+            with paper._LOCK, _conn() as c:
+                c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
+                          (paper_id,))
+            continue
         # (b) roll: open position inside its contract's roll window -> close front,
         #     re-open next month carrying the same paper trade.
         spec = contracts.SPECS.get(pt["instrument"])

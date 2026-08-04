@@ -1,7 +1,69 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-04.
+Last updated 2026-08-05.
+
+---
+
+### 🐞 FIXED 2026-08-05: paper CPER showed a nonsensical +24.3R; allocation pie chart double-counted market value -- both traced to the same root cause: stale `ib_mirror` rows never closing on a layered (multi-fill) position
+
+User report: "piechart seems not uptodate... also on paper account, us copper shows +24.3 R,
+verify accuracy and debug if needed." Root-caused from the real paper DB
+(`dashboard/dashboard.db`) directly, not guessed.
+
+**Root cause**: when the SAME instrument gets multiple separate ATR-signal paper trades over
+time that all fund into ONE aggregate IBKR position (accumulating shares), and an OLDER
+trade's paper journal entry resolves (WIN/LOSS/EXPIRED) via the deterministic tick path while
+a NEWER trade is still OPEN on the same underlying broker position,
+`ib_exec.py::sync_closures()` had no branch that ever marked the older trade's `ib_mirror` row
+CLOSED -- every existing branch only closed a row once the *aggregate* broker position went
+flat, which it never does while the newer layer still holds it. Confirmed 3 real stale pairs
+live: VNQ (id 128/144, ticket 31230302), CPER (id 129/147, ticket 97462781), CWB (id 139/149,
+ticket 59354075) -- older row EXPIRED/LOSS in `paper_trades` but still `status='OPEN'` in
+`ib_mirror`, newer row genuinely OPEN, both pointing at the same con_id.
+
+This one bad row caused two separate visible symptoms:
+1. `live_positions()` (WHERE `ib_mirror.status='OPEN'`) attached the SAME real position to
+   BOTH paper_ids, so the allocation pie chart (`portfolio_panel()` in app.py, iterated
+   `positions.items()` with no dedup) double-counted that position's market value.
+2. `_trade_card()`'s R-multiple math used `entry = pos["open"] if pos else t["entry"]` --
+   IBKR's own blended avgCost ACROSS both layers (38.086 for CPER) -- paired with `t["sl"]`,
+   THIS specific trade's own unrelated stop (38.17). The two happened to sit almost exactly on
+   top of each other, collapsing the risk denominator to ~0.084 and exploding a real ~+0.76R
+   position ((40.124-39.28)/1.11) to the reported +24.3R ((40.124-38.086)/0.084 ≈ 24.26,
+   matching almost exactly).
+
+**Fix (3 parts, `dashboard/execution/ib_exec.py` + `dashboard/app.py`)**:
+- `sync_closures()`: new `elif pt["status"] != "OPEN": ... UPDATE ib_mirror SET
+  status='CLOSED'` branch, alongside the existing flat-position closure branch -- closes a
+  resolved trade's mirror row even when the aggregate broker position is still non-zero
+  (another layer holds it). Self-healing: runs on the existing ~1min cheap-refresh cycle, no
+  manual DB surgery needed for the 3 known stale rows.
+- `app.py::_trade_card()`: `entry` now always uses `t["entry"]` (this trade's own recorded
+  price), never `pos["open"]` (broker's cross-layer blended average) -- fixes the R-multiple
+  math and keeps the displayed "entry X · SL Y · TP Z" line internally consistent (X paired
+  with the SL/TP it was actually set relative to). The `src` label next to it changed from
+  claiming "IBKR fill" to "confirmed" (still signals broker-matched, without claiming the
+  shown number is the broker's own blended price, which it no longer is).
+- `app.py::portfolio_panel()`: defense-in-depth dedup by broker ticket before summing pie
+  slices (skip a `pid` whose ticket was already counted, preferring genuinely-open trades) --
+  covers the propagation window before `sync_closures()` next runs, costs nothing in the
+  normal one-ticket-per-pid case.
+
+**Also mobile-friendly (same request)**: the pie chart's outside labels + leader lines crowd
+badly on a narrow screen once there are more than ~4-5 slices. Added an ECharts `media` query
+(`{baseOption: {...}, media: [{query: {maxWidth: 480}, option: {...}}]}` -- NOTE this
+structure is required, a flat option dict with `media` as a sibling of `series` is silently
+ignored) that switches to inside-only percent labels with no leader lines below 480px chart
+width, moving the full name/$ breakdown into the tap-to-reveal tooltip instead. Desktop keeps
+the original outside-label style.
+
+New regression test: `test_sync_closures_closes_stale_mirror_row_when_position_still_open_via_other_layer`
+in `dashboard/tests/test_ib_exec.py` (2 layered trades sharing one con_id, confirms the older
+resolved row closes while the newer open row stays open). Full suite: 158 passed (was 157;
+also had to `uv add --dev pytest` -- pytest was never a declared project dependency, `uv run
+pytest` had been silently falling back to an unrelated global interpreter missing this
+project's other deps).
 
 ---
 

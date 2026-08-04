@@ -40,3 +40,8 @@ ib = ["ib_async>=1.0"]
 [tool.uv]
 # Flat collection of scripts/packages, not an installable distribution.
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
