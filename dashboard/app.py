@@ -345,6 +345,16 @@ def health_banner() -> None:
 
     cheap_txt, _ = _age_txt(service.STATE.get("last_cheap"))
     llm_txt, _ = _age_txt(service.STATE.get("last_llm"))
+    # ADDED 2026-08-04: a growing "llm: 3h ago" reads as broken even when it's the
+    # market-hours auto-pause correctly holding it back (confirmed live: user reported
+    # "LLM call seems not running" at 05:49am ET, 3h40m before the 9:30am open -- the gate
+    # was working exactly as designed, but nothing in this compact status line said so, so
+    # a stale-looking age was the only visible signal). Append a short reason when the most
+    # recent skip was specifically the auto-pause, so this reads as "expected, not broken"
+    # without having to go check the info modal or HANDOFF.md.
+    if (SETTINGS.get("auto_pause") and
+            "market closed (auto-pause)" in (service.STATE.get("last_status") or "")):
+        llm_txt += " (paused, outside hours)"
 
     bc = service.STATE.get("broker_conn") or {}
     broker_ok = bc.get("ok")

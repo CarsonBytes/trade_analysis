@@ -5,6 +5,30 @@ Last updated 2026-08-04.
 
 ---
 
+### ✅ NOT A BUG 2026-08-04: "LLM call seems not running" -- the 2026-07-31 market-hours gate working as designed; added a small UX fix so this reads clearly next time
+
+User report: market seemed open but the LLM call wasn't running. Debugged (not assumed):
+checked the real current ET time directly (`ZoneInfo("America/New_York")`), not guessed --
+**05:49am ET**, market opens 9:30am ET, i.e. **3h40m before open**. `is_us_trading_day()`
+correctly returned True (a normal Tuesday). `_market_open()` correctly returned False. Live
+`ui_settings` confirmed `auto_pause: true`. This is the 2026-07-31 LLM-hours gate doing
+exactly its job -- the market genuinely had not opened yet. Likely source of the
+confusion: this machine's local clock is HKT (UTC+8) -- 05:49am ET is **5:49pm HKT**, late
+afternoon/evening locally, which can easily read as "the workday should be active" even
+though the US market this account actually trades hasn't opened -- the exact HKT/ET
+mismatch this project's `_market_open()` has needed fixing for before (2026-07-11, weekday
+misalignment; today, the same underlying confusion resurfacing at the hours level instead).
+
+**Real gap found while confirming this, though**: the dashboard's compact "cheap/llm: Xs
+ago / Ym ago" status line gives no indication of WHY the LLM hasn't refreshed -- a growing
+age reads identically whether it's this correct, expected pause or an actual problem.
+Fixed: when `auto_pause` is on and the most recent skip was specifically the market-hours
+gate, the status line now appends "(paused, outside hours)" to the LLM age, reusing the
+`last_status` string `_do_llm()` already sets -- no new state, just surfacing it in a place
+that's actually visible at a glance instead of requiring a trip to the info modal.
+
+---
+
 ### 🐞 FIXED 2026-08-04: LIVE "P&L over time" chart showed a false ~-10,000 HKD dip at the very start
 
 User report: "P&L over time on live account displays incorrectly." Debugged from the real
