@@ -5,6 +5,45 @@ Last updated 2026-08-06.
 
 ---
 
+### FIXED 2026-08-06 (same day, minutes later): the displayed "unrealized ... HKD" profit was STILL on the reference scale -- a second instance of the exact bug the invested-amount fix had just fixed elsewhere
+
+Direct follow-up: after the "invested" line was fixed to use the real broker quantity, user
+asked me to explain the small USD gap between the card and the pie chart -- I gave a formula
+citing the card's displayed HKD profit figure as the answer, without re-verifying that figure
+itself. User then caught EFA showing "invested: USD 205 (2 units)" right next to "unrealized:
++2.11 R (HKD +1,647)" -- an obviously outsized dollar figure for a 2-unit position -- and
+asked me to verify/fix rather than accept my explanation.
+
+**Root cause**: `_unrealized_pnl_native()` (the function behind the card's "(HKD +X)" P&L
+figure, and the "profit" sort key) still multiplied by `t["size_units"]` -- the SAME fixed-
+$10,000-backtest-reference size the "invested" line had just moved away from -- instead of
+the real broker-requested quantity. Confirmed exactly: EFA real qty=2 vs size_units=43.12
+(a 21.6x overstatement) -- (107.4672-102.5700)*43.12*7.8 = HKD 1,647 (the wrong, displayed
+figure) vs *2*7.8 = HKD 76 (the correct one). Same exact bug class as the CPER/broker-
+aggregate fix from yesterday, just a second, separate spot using the wrong SIZE (this time
+the backtest-reference one, not a cross-layer broker one) that the "invested" fix didn't
+also cover.
+
+**Fix**: `_unrealized_pnl_native(t, pos, real_qty=None)` now takes the same `real_qty`
+parameter as the "invested" line, defaulting to `t["size_units"]` only when no real quantity
+is available (mirrors the exact same fallback rule everywhere now). Both call sites
+(`_trade_card()`'s displayed pnl, and `_active_sort_value()`'s "profit" sort key) updated to
+pass it through.
+
+Verified live: EFA now reads "unrealized: +2.11 R (HKD +76)" (was +1,647); SPY reads "(HKD
++906)", which NOW genuinely matches the ~USD 115 cost-basis-vs-current-price gap explained
+right before this fix landed (115 * ~7.8 ~ 897-906) -- that explanation was accidentally
+citing a still-buggy number at the time; it's correct now. Full suite: 166 passed. Redeployed
+both instances, re-verified in the browser.
+
+**Lesson for future sessions**: when fixing "a specific trade's dollar figure should use the
+real broker quantity, not the backtest-reference size," grep for EVERY use of
+`t["size_units"]` in a dollar-figure context in app.py, not just the one the user pointed at
+-- this bug class has now recurred 3 times in two days (R-multiple entry, invested amount,
+unrealized P&L) across different call sites of what is fundamentally the same distinction.
+
+---
+
 ### FIXED 2026-08-06: Active Trades "invested" now shows the REAL broker-requested quantity, not a backtest-reference estimate
 
 Direct follow-up to yesterday's clarification -- user pushed back correctly: a number

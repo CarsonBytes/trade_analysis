@@ -1417,9 +1417,9 @@ def _current_price(t: dict, pos: dict | None) -> float:
             (live["price"] if live else t["entry"]))
 
 
-def _unrealized_pnl_native(t: dict, pos: dict | None) -> float:
+def _unrealized_pnl_native(t: dict, pos: dict | None, real_qty: float | None = None) -> float:
     """Dollar P&L in the instrument's own/native currency (USD for this project's ETFs),
-    computed from THIS trade's OWN entry/size -- NOT pos["profit"] (IBKR's unrealizedPNL),
+    computed from THIS trade's OWN entry/price -- NOT pos["profit"] (IBKR's unrealizedPNL),
     which is the broker's AGGREGATE P&L across every layer accumulated into that con_id's
     position, not just this trade's own share. Same multi-layer bug class as _unrealized_r()
     above (see its docstring), just surfacing in the dollar figure instead of the R figure --
@@ -1429,11 +1429,24 @@ def _unrealized_pnl_native(t: dict, pos: dict | None) -> float:
     broker position: 453 shares from an already-resolved older trade + 293 from this one,
     746 total, still sitting there because a paper trade resolving via the deterministic tick
     path does NOT itself sell the broker position -- that's real: this trade's own 293-share
-    share was actually only ~HKD 2,370, a ~5.5x overstatement)."""
+    share was actually only ~HKD 2,370, a ~5.5x overstatement).
+
+    FIXED 2026-08-06: this STILL multiplied by t["size_units"] (the fixed-$10,000-backtest-
+    reference size, same one the "invested" line moved away from the same day) instead of the
+    REAL broker-requested quantity -- a second instance of the exact bug class it was already
+    fixing above, just left behind in this one spot. Confirmed live: EFA showed "invested:
+    USD 205 (2 units)" (correctly using the real qty=2) right next to "unrealized: +2.11 R
+    (HKD +1,647)" -- a HUGE dollar figure for a tiny position -- because this function was
+    still multiplying by size_units=43.12 (real qty=2, a ~21.6x overstatement: 1,647 HKD
+    should have been ~76 HKD). `real_qty` now defaults to `t["size_units"]` only when the
+    caller doesn't have a real quantity to pass (mirrors _trade_card()'s own invested-line
+    fallback -- same real-vs-reference distinction, same fallback rule, applied consistently
+    everywhere a dollar figure is shown for a specific trade)."""
     price = _current_price(t, pos)
     entry = t["entry"]
     diff = (price - entry) if t["direction"] == "long" else (entry - price)
-    return diff * t["size_units"]
+    qty = real_qty if real_qty is not None else t["size_units"]
+    return diff * qty
 
 
 def _unrealized_r(t: dict, pos: dict | None) -> float:
@@ -1530,7 +1543,7 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             _acct = service.STATE.get("account") or {}
             _ccy = _acct.get("_ccy", "")
             _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
-            pnl = f"  ({_ccy} {_unrealized_pnl_native(t, pos) * _f:+,.0f})"
+            pnl = f"  ({_ccy} {_unrealized_pnl_native(t, pos, real_qty) * _f:+,.0f})"
             # ADDED 2026-07-14: after this session's CWB/ASHR confusion (local records
             # showing a status the broker no longer agreed with), show WHEN this position
             # was last actually cross-checked against the broker, not just trust the display
@@ -1684,7 +1697,9 @@ def _active_sort_value(t: dict, pos: dict | None, real_qty_by_id: dict):
     if key == "r":
         return _unrealized_r(t, pos) if pos else float("-inf")
     if key == "profit":
-        return _unrealized_pnl_native(t, pos) if pos else float("-inf")
+        # FIXED 2026-08-06: same real-qty fix as the "invested" case just below.
+        return (_unrealized_pnl_native(t, pos, real_qty_by_id.get(t["id"]))
+                if pos else float("-inf"))
     if key == "invested":
         # FIXED 2026-08-06: matches _trade_card()'s own "invested" line -- the REAL
         # broker-requested quantity when one exists, only falling back to the backtest-
