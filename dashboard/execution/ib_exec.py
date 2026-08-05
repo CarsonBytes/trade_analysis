@@ -960,10 +960,31 @@ def sync_closures() -> list[str]:
         # ~+0.76R position (see app.py's matching entry= fix). Closing the row here doesn't
         # touch the broker position itself (other layers' mirror rows keep tracking it) --
         # it only stops a RESOLVED trade's own bookkeeping row from masquerading as open.
+        #
+        # BUG FOUND + FIXED same day, a few hours after the above shipped: this closed a
+        # resolved trade's row UNCONDITIONALLY whenever the aggregate position was non-zero --
+        # correct for CPER/CWB (a newer layer stays open to keep tracking it), but WRONG once
+        # EVERY layer for an instrument has resolved (VNQ, QQQ: both trades LOSS/WIN/EXPIRED,
+        # broker shares never actually sold by that resolution) -- closing the LAST open
+        # mirror row for a con_id left a REAL, still-open broker position with ZERO local
+        # tracking anywhere: invisible to live_positions(), the pie chart, AND Active Trades.
+        # Confirmed live: this project's OWN broker reconciliation caught it independently
+        # ("broker-only (no local record): ['QQQ', 'VNQ']"), and the ~HKD 246k gap between
+        # the pie chart's position sum and the broker's real GrossPositionValue matched almost
+        # exactly. Fix: only close a row here when ANOTHER open mirror row for the SAME con_id
+        # still exists to keep tracking the position -- otherwise leave it OPEN (imperfect
+        # labeling, a resolved trade's paper_id now stands in for a real position that's no
+        # longer "its own", but that beats the position vanishing from every UI panel entirely;
+        # the existing broker-only reconcile check remains the safety net for genuinely
+        # untracked positions this can't fix, e.g. one that predates ANY paper trade at all).
         elif pt["status"] != "OPEN":
             with paper._LOCK, _conn() as c:
-                c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
-                          (paper_id,))
+                other_open = c.execute(
+                    "SELECT 1 FROM ib_mirror WHERE con_id=? AND status='OPEN' AND paper_id!=?",
+                    (con_id, paper_id)).fetchone()
+                if other_open:
+                    c.execute("UPDATE ib_mirror SET status='CLOSED' WHERE paper_id=?",
+                              (paper_id,))
             continue
         # (b) roll: open position inside its contract's roll window -> close front,
         #     re-open next month carrying the same paper trade.

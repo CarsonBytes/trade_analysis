@@ -5,6 +5,75 @@ Last updated 2026-08-05.
 
 ---
 
+### VERIFIED + BUG FOUND/FIXED 2026-08-05: audited every pie-chart/Active-Trades figure against raw DB data; found + fixed a real orphaned-position bug from earlier today's own sync_closures() change
+
+User request: verify and explain the pie chart / Active Trades figures for specific
+instruments. Cross-checked every one of paper's 7 confirmed positions (AMLP, IWM, EEM, EFA,
+CPER, HYG, CWB) directly against `paper_trades`/`ib_mirror` and hand-computed R/profit/
+invested using the exact formulas in code -- **all 7 matched exactly**, confirming today's
+earlier CPER +24.3R fix and the invested-amount feature are both correct.
+
+**Real, important distinction found (not a bug, but worth documenting clearly)**: Active
+Trades cards and the pie chart intentionally use TWO DIFFERENT size bases:
+- Cards' "invested $"/R/profit use `t["size_units"]`, sized by `paper.py` against a FIXED
+  `ACCOUNT = 10_000.0` reference constant -- a backtest-consistency normalization, NOT a
+  prediction of the real broker quantity. Confirmed by formula: `size_units == (10000 *
+  RISK_PER_TRADE_at_signal_time) / stop_per_share` exactly, for all 7 open trades (AMLP/IWM
+  used the OLDER 1% risk default from before 2026-07-17; EEM onward match the current 0.25%).
+- The pie chart sums `ib_exec.py::live_positions()`'s REAL broker position size (from a live
+  `ib.positions()` query), independently sized by `_place_etf_bracket()` against the REAL
+  account equity with `ETF_POS_CAP`/`PORTFOLIO_CAP` applied at order-placement time.
+  Confirmed ratio between the two varies 0.57x-13x per trade (not a constant factor) -- e.g.
+  AMLP: size_units=62.59 vs real mirror qty=615 (9.83x); CPER: 22.52 vs 293 (13.01x). R-
+  multiple math is unaffected (scale-invariant), but "invested: $X" undersells the REAL
+  dollar amount at the broker by whatever this ratio is for that trade. Not changed here
+  (each number is internally correct for what it represents) but worth knowing before reading
+  "invested: $848" as "the real dollar amount currently at risk" -- it isn't; check the pie
+  chart's per-instrument $ figure for that.
+
+**Real bug found + fixed**: while explaining a ~HKD 246k gap between the pie chart's position
+sum and the "Invested" stat (sourced from IBKR's own GrossPositionValue), found the paper
+dashboard's own broker-reconciliation check flagging `broker-only (no local record): ['QQQ',
+'VNQ']` -- a REAL broker position with ZERO local tracking anywhere (invisible to
+`live_positions()`, the pie chart, AND Active Trades). Root-caused to THIS SAME DAY's earlier
+`sync_closures()` fix (the elif branch that closes a resolved trade's mirror row when the
+aggregate position is still non-zero): it closed unconditionally whenever the position was
+non-zero, correct for CPER/CWB (a newer layer keeps tracking it) but WRONG once EVERY layer
+for an instrument has resolved (VNQ, QQQ: both trades LOSS/WIN/EXPIRED) -- closing the LAST
+open mirror row for a con_id orphans a still-open real position entirely. Fixed
+`ib_exec.py::sync_closures()`'s elif branch to only close a row when ANOTHER open mirror row
+for the SAME con_id still exists to keep tracking the position; otherwise leaves it open.
+Added `test_sync_closures_does_not_orphan_the_last_mirror_row_for_a_position` (alongside the
+earlier `test_sync_closures_closes_stale_mirror_row_when_position_still_open_via_other_layer`,
+confirming both the double-count fix AND the orphan-prevention fix hold simultaneously).
+
+**Investigated whether real capital is CURRENTLY exposed**: repaired the 2 orphaned rows
+(re-opened paper_id 144/145) and redeployed with the fix. On the next real `sync_closures()`
+cycle, BOTH rows were closed again automatically -- but this time correctly, via the
+PRE-EXISTING flat-position branch (`open_pos.position == 0`, confirmed via a live
+`ib.positions()` query), not the buggy elif. This means the broker-only reconcile flag was
+**stale** (that check only runs "on last login, or periodically," not every cycle) -- the
+REAL current state, confirmed via a fresh live query, is that VNQ and QQQ are genuinely flat
+right now. **No real capital is currently orphaned or unmonitored**; the fix is a correct
+structural safeguard for the case it targets (confirmed working via the new test), this
+particular reconcile alert was a false alarm from stale cached state, not an active incident.
+Live instance checked too (`dashboard_live.db`) -- its reconcile shows "matched", unaffected.
+
+**Still open, not yet resolved**: even after accounting for VNQ/QQQ, the pie chart's ETF
+position sum still doesn't fully reconcile with the "Invested" stat (a real gap, methodology
+not yet fully traced -- possibly a stale reconcile cache masking other broker-only positions,
+possibly a genuine scope difference between GrossPositionValue and what `live_positions()`
+captures). Worth a dedicated follow-up if it recurs after the reconcile badge is next
+refreshed (happens automatically on the next IB Gateway reconnect).
+
+Redeployed both instances with the sync_closures() fix; verified via the browser (paper) that
+all figures render correctly post-fix. Full test suite (all 16 files) reverified via each
+file's real `__main__` runner both before and after this session's separately-run background
+fix for the check()/pytest-blindness issue landed (commit 7256198) -- genuinely all passing
+throughout, no regressions from either change.
+
+---
+
 ### ADDED 2026-08-05: "market: closed · opens in Xh Ym" row in System health; IMPORTANT test-suite finding along the way
 
 User request: show time until next market open/close. Confirmed the spec with the user
