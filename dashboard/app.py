@@ -57,7 +57,15 @@ from dashboard.core.scoring import rank                     # noqa: E402
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
 SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             "cap": 200, "grid_cols": 4, "chart_period": "All", "chart_scale": "Truncated",
-            "chart_view": "P&L (ex-deposits)"}
+            "chart_view": "P&L (ex-deposits)",
+            # ADDED 2026-08-05: Active Trades card sort control. "desc" is defined as
+            # "biggest/most-recent first" for EVERY key (newest entry date, highest R, highest
+            # profit, largest invested amount) -- one consistent mental model instead of
+            # per-key direction semantics.
+            "active_sort": "entry_date", "active_sort_dir": "desc"}
+# label -> sort-key value, in the order shown in the dropdown
+ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
+                    "profit": "Profit ($)", "invested": "Invested amount"}
 CHART_PERIODS = {"1W": 7, "1M": 30, "3M": 90, "All": None}   # label -> lookback days (None = all)
 _busy = {"flag": False}
 
@@ -72,6 +80,7 @@ def _save_settings() -> None:
             "auto_pause": SETTINGS["auto_pause"], "cap": SETTINGS["cap"],
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
+            "active_sort": SETTINGS["active_sort"], "active_sort_dir": SETTINGS["active_sort_dir"],
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
             "tech_paused": _p.TECH_PAUSED})
@@ -88,7 +97,7 @@ def _load_settings() -> None:
         if not saved:
             return
         for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
-                 "chart_scale", "chart_view"):
+                 "chart_scale", "chart_view", "active_sort", "active_sort_dir"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -1340,39 +1349,73 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
 
+def _current_price(t: dict, pos: dict | None) -> float:
+    """The price _trade_card() displays and _unrealized_r() computes against.
+    FIXED 2026-07-30: for an open position, STATE["live"]'s price is only genuinely fresh
+    under MT5 (real tick data); for BROKER=ib it falls back to get_history()'s WEEKLY
+    yfinance bars (scoring interval=1wk), stale by up to a week -- confirmed live: showed
+    QQQ at 675.49 (last Tuesday's close) vs a real 664.37, silently wrong unrealized-R too.
+    ib_exec.live_positions() now reports the broker's own live mark (ib.portfolio()'s
+    marketPrice) as "current_price" -- prefer that whenever a real position exists; only
+    fall back to STATE["live"] for PENDING signals (no broker position yet) or under MT5
+    (which never sets current_price -- its STATE["live"] price is already tick-fresh)."""
+    key = t["instrument"]
+    live = service.STATE.get("live", {}).get(key)
+    return (pos.get("current_price") if pos and pos.get("current_price") else
+            (live["price"] if live else t["entry"]))
+
+
+def _unrealized_pnl_native(t: dict, pos: dict | None) -> float:
+    """Dollar P&L in the instrument's own/native currency (USD for this project's ETFs),
+    computed from THIS trade's OWN entry/size -- NOT pos["profit"] (IBKR's unrealizedPNL),
+    which is the broker's AGGREGATE P&L across every layer accumulated into that con_id's
+    position, not just this trade's own share. Same multi-layer bug class as _unrealized_r()
+    above (see its docstring), just surfacing in the dollar figure instead of the R figure --
+    confirmed live 2026-08-05: CPER showed a self-consistent +0.93R right next to a wildly
+    inconsistent (HKD +12,980) because the R math had already been fixed to be trade-own, but
+    this dollar figure was still reading the broker's blended 2-layer position profit (real
+    broker position: 453 shares from an already-resolved older trade + 293 from this one,
+    746 total, still sitting there because a paper trade resolving via the deterministic tick
+    path does NOT itself sell the broker position -- that's real: this trade's own 293-share
+    share was actually only ~HKD 2,370, a ~5.5x overstatement)."""
+    price = _current_price(t, pos)
+    entry = t["entry"]
+    diff = (price - entry) if t["direction"] == "long" else (entry - price)
+    return diff * t["size_units"]
+
+
+def _unrealized_r(t: dict, pos: dict | None) -> float:
+    """R-multiple of the CURRENT price against this trade's OWN entry/stop -- factored out
+    of _trade_card() so the Active Trades sort-by-R control (2026-08-05) can never drift
+    from what the card itself displays.
+    FIXED 2026-08-05: this used to prefer pos["open"] (the REAL fill price) over the
+    paper-recorded entry -- fine for a single-fill position (the two are nearly identical,
+    differing only by tiny slippage), but WRONG once this instrument has multiple separate
+    paper trades layered into ONE aggregate broker position (confirmed live: paper CPER had
+    an older EXPIRED trade (entry 37.45) plus a newer OPEN one (entry 39.28, SL 38.17)
+    sharing the same broker position -- pos["open"] is IBKR's own BLENDED avgCost across
+    BOTH layers, 38.09, which has no relationship to this specific trade's own SL/TP.
+    Pairing that blended price with THIS trade's own SL made the risk denominator collapse
+    toward zero (38.09 sits almost exactly on this trade's 38.17 stop) and the displayed R
+    explode to +24.3 -- a real trade with a completely ordinary ~+0.76R position. R-multiple
+    math is only meaningful relative to the SAME trade's own entry/stop pair, never a
+    cross-layer blended average -- use the paper-recorded entry unconditionally."""
+    price = _current_price(t, pos)
+    entry = t["entry"]
+    risk = abs(entry - t["sl"]) or 1e-9
+    return ((price - entry) if t["direction"] == "long" else (entry - price)) / risk
+
+
 def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
                 status: str | None = None) -> None:
     key = t["instrument"]
-    live = service.STATE.get("live", {}).get(key)
-    # FIXED 2026-07-30: for an open position, STATE["live"]'s price is only genuinely fresh
-    # under MT5 (real tick data); for BROKER=ib it falls back to get_history()'s WEEKLY
-    # yfinance bars (scoring interval=1wk), stale by up to a week -- confirmed live: showed
-    # QQQ at 675.49 (last Tuesday's close) vs a real 664.37, silently wrong unrealized-R too.
-    # ib_exec.live_positions() now reports the broker's own live mark (ib.portfolio()'s
-    # marketPrice) as "current_price" -- prefer that whenever a real position exists; only
-    # fall back to STATE["live"] for PENDING signals (no broker position yet) or under MT5
-    # (which never sets current_price -- its STATE["live"] price is already tick-fresh).
-    price = (pos.get("current_price") if pos and pos.get("current_price") else
-             (live["price"] if live else t["entry"]))
-    # FIXED 2026-08-05: this used to prefer pos["open"] (the REAL fill price) over the
-    # paper-recorded entry -- fine for a single-fill position (the two are nearly identical,
-    # differing only by tiny slippage), but WRONG once this instrument has multiple separate
-    # paper trades layered into ONE aggregate broker position (confirmed live: paper CPER had
-    # an older EXPIRED trade (entry 37.45) plus a newer OPEN one (entry 39.28, SL 38.17)
-    # sharing the same broker position -- pos["open"] is IBKR's own BLENDED avgCost across
-    # BOTH layers, 38.09, which has no relationship to this specific trade's own SL/TP.
-    # Pairing that blended price with THIS trade's own SL made the risk denominator collapse
-    # toward zero (38.09 sits almost exactly on this trade's 38.17 stop) and the displayed R
-    # explode to +24.3 -- a real trade with a completely ordinary ~+0.76R position. R-multiple
-    # math is only meaningful relative to the SAME trade's own entry/stop pair, never a
-    # cross-layer blended average -- use the paper-recorded entry unconditionally, which also
-    # keeps the "entry X · SL Y · TP Z" line below internally consistent (X/Y/Z always
-    # describe the SAME signal, not a mix of this trade's SL/TP with a different trade's
-    # broker-blended fill price).
+    price = _current_price(t, pos)
+    # entry: always this trade's OWN recorded price, never a broker cross-layer blended
+    # average -- keeps both the R math below and the "entry X · SL Y · TP Z" display line
+    # internally consistent (X paired with the SL/TP it was actually set relative to). See
+    # _unrealized_r()'s docstring for the full 2026-08-05 bug this fixed.
     entry = t["entry"]
-    risk = abs(entry - t["sl"]) or 1e-9
-    ur = ((price - entry) if t["direction"] == "long"
-          else (entry - price)) / risk
+    ur = _unrealized_r(t, pos)
     from dashboard.execution import broker as _bk
     if pos:
         col = "bg-green-1" if ur >= 0 else "bg-red-1"
@@ -1400,6 +1443,13 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
         if not pos:
             ui.badge("⏳ PENDING", color="grey-7").classes("text-xs")
         ui.label(f"{price:,.4f}").classes("text-base")
+        # ADDED 2026-08-05: capital committed at entry (size_units * entry, i.e. cost basis)
+        # -- NOT current market value (pos["volume"] * price), which fluctuates with price and
+        # would double-report the same movement the "unrealized R"/P&L line below already
+        # conveys. Uses t["size_units"]/t["entry"] rather than pos["volume"]/pos["open"] so
+        # this is available identically for PENDING trades too (no broker fill yet).
+        ui.label(f"invested: ${t['size_units'] * entry:,.0f} "
+                f"({t['size_units']:,.0f} units)").classes("text-xs text-grey-6")
         spark = service.STATE.get("spark", {}).get(key)
         if spark:                                  # same sparkline as Top Opportunities
             up = spark[-1] >= spark[0]
@@ -1409,7 +1459,7 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
             _acct = service.STATE.get("account") or {}
             _ccy = _acct.get("_ccy", "")
             _f = 1.0 / ib_client._PEG_USD_PER.get(_ccy, 1.0)
-            pnl = f"  ({_ccy} {pos['profit'] * _f:+,.0f})"
+            pnl = f"  ({_ccy} {_unrealized_pnl_native(t, pos) * _f:+,.0f})"
             # ADDED 2026-07-14: after this session's CWB/ASHR confusion (local records
             # showing a status the broker no longer agreed with), show WHEN this position
             # was last actually cross-checked against the broker, not just trust the display
@@ -1552,6 +1602,32 @@ def _fundable_count(eq: float | None) -> tuple[int | None, int]:
     return fundable, len(universe)
 
 
+def _active_sort_value(t: dict, pos: dict | None):
+    """Value _sort_active() sorts on, per SETTINGS["active_sort"]. "r"/"profit" only mean
+    anything for a CONFIRMED trade (a real position); a pending trade (pos is None) has no
+    live figure yet, so it gets a constant sentinel -- combined with sorted()'s stability,
+    every pending trade in a group ties and the group's original order is left untouched
+    (matches the design: sorting by R/profit visibly reorders Confirmed, not the pending
+    groups, rather than pending trades all clumping at one end)."""
+    key = SETTINGS.get("active_sort", "entry_date")
+    if key == "r":
+        return _unrealized_r(t, pos) if pos else float("-inf")
+    if key == "profit":
+        return _unrealized_pnl_native(t, pos) if pos else float("-inf")
+    if key == "invested":
+        return t["size_units"] * t["entry"]
+    return t["ts"]                       # entry_date -- ISO strings sort chronologically
+
+
+def _sort_active(items: list, get_trade, get_pos) -> list:
+    """Sort a group's card list by the current Active Trades sort control. `get_trade`/
+    `get_pos` adapt this to both shapes used below: plain trade dicts (confirmed) and
+    (trade, reason_msg) tuples (each pending sub-group)."""
+    reverse = SETTINGS.get("active_sort_dir", "desc") == "desc"
+    return sorted(items, key=lambda it: _active_sort_value(get_trade(it), get_pos(it)),
+                 reverse=reverse)
+
+
 @ui.refreshable
 def active_panel() -> None:
     """Open positions shown on the Board with live unrealized P&L in R. Splits
@@ -1566,7 +1642,30 @@ def active_panel() -> None:
     pending = [t for t in open_t if not positions.get(t["id"])]
     hdr = f"Active Trades ({len(confirmed)} open"
     hdr += f" · {len(pending)} pending)" if pending else ")"
-    ui.label(hdr).classes("text-lg font-bold")
+    with ui.row().classes("items-center justify-between w-full flex-wrap gap-2"):
+        ui.label(hdr).classes("text-lg font-bold")
+        # ADDED 2026-08-05: sorts WITHIN each existing group below (Confirmed, then each
+        # pending sub-group) rather than flattening them into one list -- the grouping itself
+        # is meaningful (see the docstring above + the 2026-07-13 pending-grouping note), a
+        # global sort would bury that distinction.
+        def _set_active_sort(e) -> None:
+            SETTINGS["active_sort"] = e.value
+            _save_settings()
+            active_panel.refresh()
+        def _toggle_active_sort_dir() -> None:
+            SETTINGS["active_sort_dir"] = ("asc" if SETTINGS.get("active_sort_dir", "desc") == "desc"
+                                           else "desc")
+            _save_settings()
+            active_panel.refresh()
+        with ui.row().classes("items-center gap-1"):
+            ui.label("Sort by:").classes("text-xs text-grey-6")
+            ui.select(ACTIVE_SORT_KEYS, value=SETTINGS.get("active_sort", "entry_date"),
+                     on_change=_set_active_sort).props("dense options-dense").classes("text-xs w-40")
+            _desc = SETTINGS.get("active_sort_dir", "desc") == "desc"
+            ui.button(icon="arrow_downward" if _desc else "arrow_upward",
+                     on_click=_toggle_active_sort_dir).props("flat dense round")\
+                .tooltip("Descending (biggest/most recent first)" if _desc
+                        else "Ascending (smallest/oldest first)")
     from dashboard.execution import broker as _bk
     # computed ONCE for the whole render -- both _fundable_count() and _pending_reason()
     # used to each call _bk.equity_usd() independently (a real broker round-trip), once per
@@ -1590,6 +1689,7 @@ def active_panel() -> None:
                  "qualifying signals.").classes("text-sm text-grey")
         return
     if confirmed:
+        confirmed = _sort_active(confirmed, lambda t: t, lambda t: positions.get(t["id"]))
         with ui.row().classes("w-full flex-wrap gap-3"):
             for t in confirmed:
                 _trade_card(t, positions.get(t["id"]))
@@ -1650,7 +1750,7 @@ def active_panel() -> None:
                 ui.badge(f"{_label} ({len(items)})", color=_chip_color[_status])\
                     .classes("text-xs").tooltip(_tip)
         for _status in ("placed", "retrying", "stuck"):
-            items = groups[_status]
+            items = _sort_active(groups[_status], lambda it: it[0], lambda it: None)
             if not items:
                 continue
             with ui.row().classes("w-full flex-wrap gap-3"):

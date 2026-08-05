@@ -5,6 +5,64 @@ Last updated 2026-08-05.
 
 ---
 
+### ADDED 2026-08-05: Active Trades cards show invested amount + a sort control; found+fixed a second instance of the multi-layer P&L bug along the way
+
+User request: each Active Trades card should show invested amount, plus a sort control
+(suggested: by +R, profit $, entry date, asc/desc). Confirmed the design with the user first
+(persist the choice like other `ui_settings`; sort WITHIN each existing group -- Confirmed /
+Waiting to fill / On hold / Needs bigger account -- rather than flattening them, since that
+grouping is itself meaningful) before building.
+
+**Invested amount**: `size_units * entry` (cost basis at entry), not `pos["volume"] *
+current_price` (fluctuating market value, which would double-report the same movement the
+unrealized R/P&L line already shows) -- also means it's available identically for PENDING
+trades (no broker fill yet).
+
+**Sort control**: one dropdown (`ACTIVE_SORT_KEYS`: entry date / unrealized R / profit $ /
+invested amount) + a direction toggle, next to the "Active Trades (N open...)" header.
+"desc" = biggest/most-recent-first for every key, one consistent mental model. Persisted via
+the existing `ui_settings` cache mechanism (`SETTINGS["active_sort"]`/`["active_sort_dir"]`).
+Sorts each group (`_sort_active()`) independently, keeping the pending-reason grouping
+intact; a pending trade's "r"/"profit" sort value is a constant sentinel (no live position
+yet), so combined with Python's stable sort, sorting by R/profit only visibly reorders
+Confirmed, leaving pending groups' original order untouched.
+
+Refactored `_trade_card()`'s inline price/R logic into two reusable helpers,
+`_current_price()`/`_unrealized_r()`, specifically so the new "sort by R" option can never
+drift from what the card itself displays -- this formula was the exact subject of the
+CPER +24.3R bug fixed earlier today.
+
+**Found a SECOND instance of that same bug class while live-verifying this in the browser**:
+CPER's card showed a self-consistent `+0.93 R` right next to a wildly inconsistent
+`(HKD +12,980)` next to only `$885` invested -- the R math had already been fixed to use this
+trade's own entry/SL, but the dollar P&L line was still reading `pos["profit"]`, IBKR's own
+unrealizedPNL for the AGGREGATE broker position (both an already-resolved older layer's 453
+shares, still physically sitting in the account -- resolving a paper trade via the
+deterministic tick path does NOT itself sell the broker position -- plus this trade's own 293
+shares (23 after unit-price scaling), 746 combined). Confirmed the arithmetic directly:
+blended-position profit ≈ HKD 12,500 (matches the observed 12,980 within rounding/live-price
+drift) vs. this trade's own 293-share share ≈ HKD 2,370, a ~5.5x overstatement. Fixed with a
+third helper, `_unrealized_pnl_native()`, computing dollar P&L from this trade's own
+entry/size the same way `_unrealized_r()` already did -- now used both for the card's display
+line AND the new "profit $" sort key. Verified live post-redeploy: CPER now shows
+`invested: $885 (23 units)` · `unrealized: +0.93 R (HKD +182)`, fully self-consistent
+(23 * (40.3169-39.28) * ~7.8 HKD/USD ≈ 182). Same root-cause family as the pie-chart/R fix
+earlier today, worth remembering: **any per-trade dollar figure sourced from `pos[...]`
+directly (not derived from `t["entry"]`/`t["size_units"]`) is suspect on any instrument with
+more than one paper trade layered into the same broker position** -- `pos["volume"]` itself
+would have the same problem if it's ever displayed per-trade in the future.
+
+Verified live in the browser (paper instance) post-redeploy: all 7 confirmed cards render
+`invested: $X (N units)`, self-consistent R/profit figures, correctly sorted entry-date-desc
+by default (2026-08-04 23:32 -> 2026-07-08 14:13). Sort math independently verified against
+all 4 keys x both directions with the real card data (matches). Full suite: 158 passed
+(unchanged -- app.py UI code has no existing test_app.py per this project's established
+practice of never importing `dashboard.app` directly, since it triggers `ui.run()` at import
+time; verified via live redeploy + browser inspection instead, per this session's UI-change
+discipline).
+
+---
+
 ### CHANGED 2026-08-05: board_scan's OPENAI_MODEL bumped gpt-5-mini -> gpt-5.4-mini; verified LLM cadence from history
 
 `analyst/.env`'s `OPENAI_MODEL=gpt-5-mini` -> `gpt-5.4-mini` (gitignored, not in the repo diff).
