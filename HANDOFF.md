@@ -5,6 +5,103 @@ Last updated 2026-08-06.
 
 ---
 
+### 🔬 2026-08-06: two pasted research critiques (infrastructure/risk-measurement + joint-parameter/regime-adaptation) — premises verified, justified items backtested
+
+User pasted two long Chinese-language critiques proposing 9 total research directions (6 from
+critic 1, framed as "infrastructure, not alpha-search"; 3 from critic 2, framed as "joint
+parameter optimization + dynamic regime adaptation"). Every factual claim in both was verified
+against the real codebase/HANDOFF FIRST (via a dedicated research pass), not accepted at face
+value — several claims turned out imprecise or outright wrong once checked.
+
+**Verification corrections**: "82 DSR validations" is actually ONE DSR calculation applied
+jointly across 82 combined trials, not 82 separate runs. "80+ ideas rejected" overstates —
+README says "80+ tested," no rejected-count tally exists. `CONVICTION_SIZE` was claimed
+"already in use" by one critique — it's a mechanism that exists but defaults `False`, zero
+live effect, explicitly "not adopted."
+
+**Rejected without backtesting (premise didn't survive verification)**:
+- **SGOV settlement-lag matrix** (critic 1 #1): this account is on MARGIN (buying power
+  ~5.6x NLV, confirmed via code comments) — new entries don't literally wait for SGOV to
+  settle, margin buying power funds them immediately. Also: live's NAV (~$16.9k) sits below
+  `CASH_SWEEP_MIN_NAV_USD=75_000`, so it currently holds ZERO SGOV at all. The premise (new
+  entries blocked on SGOV redemption) doesn't hold for this account structure. Also flagged a
+  technical category-error risk: the entire backtest pipeline is `interval="1wk"` only, no
+  daily-resolution data anywhere to simulate a 1-5 TRADING DAY lag against without a separate,
+  much bigger data-pipeline build.
+- **Synthetic correlation-collapse** (critic 1 #4, force ρ=0.8 during 2008-10/2020-03):
+  redundant — the EXISTING VIX>40 stress test (`sleeve_blackswan_stress_retest.py`) already
+  answers this using REAL historical clustering during real panics (maxDD -6.83%→-14.75%,
+  Calmar 1.349→0.414), more rigorous than an artificial uniform-correlation overlay.
+- **Refined vol-horizon formula** (critic 2 #2): optimizing a mechanism that's already
+  marginal AT the setting that matters (live 1% risk: -5%, "not adopted" per the 2026-07-XX
+  vol-horizon test). Low expected value; critic 2 themselves ranked this lowest priority.
+- **Smooth/sigmoid regime-based risk scaling** (critic 2 #3, VIX- or ADX-based): both
+  sub-variants are smoothed versions of a 3-TIMES-already-rejected idea family
+  (`--vix-regime`, class-tilt, momentum-based `--conviction-size`) sharing the IDENTICAL
+  stated failure mode -- "sizing up on stronger [signal] tends to load up right before the
+  reversals hit hardest." Smoothing the step function doesn't fix a lagging/coincident-signal
+  problem.
+
+**Backtested (justified) -- new scripts in `dashboard/research/`**:
+
+1. **`drawdown_time_stats.py`** (critic 1 #5): per-episode `dd_days`/`rec_days` data already
+   existed in `backtest.py::_drawdown_episodes()`, just never aggregated into headline stats.
+   Deployed config (core+gate+sleeve@10%, full history): only **1.2% of time >5% underwater**,
+   worst recovery **376 trading days (~18mo)**, mean underwater depth -0.97%. Core-only is
+   meaningfully worse: 8.4% underwater, ~34mo worst recovery. **Folded into README.md.**
+
+2. **`rate_sensitivity_test.py`** (critic 1 #2): same methodology as the documented
+   CAGR 6.06%/Calmar 0.887 headline. Calmar 0.909 (current 4.3%) → 0.747 (real tiled
+   2000-2015 pattern, mean 1.69%) → 0.504 (0% ZIRP floor). Cross-checked against the SAME
+   rate scenarios for the risk-matched-passive comparison row: passive Calmar falls to 0.441
+   (2%) / 0.185 (0%) -- proportionally MORE hurt by low rates (87.5% cash weight) than this
+   system, so the RELATIVE edge over passive actually widens at low rates even as this
+   system's own absolute Calmar degrades. **Folded into README.md.**
+
+3. **`congestion_slippage_test.py`** (critic 1 #6): premise checked empirically first --
+   24.1% of core signal-weeks (161/668) have 3+ simultaneous signals, genuinely common, not
+   rare. Applied critic's own escalating penalty (0/2/5bps by same-week rank, deterministic
+   alphabetical tie-break, hits 48.3% of trades): Calmar 0.601→0.574 full history,
+   1.357→1.306 OOS -- real but modest ~4% relative decline. The flat ~1bp-round-trip cost
+   assumption (note: NOT "~10bp" as some HANDOFF prose elsewhere describes -- that figure is
+   from a different context, disclosed in the script) holds up reasonably well. Not folded
+   into README (a real but small effect, doesn't change any headline number) -- logged here
+   for the record.
+
+4. **`portfolio_vol_scale_downside_only_test.py`** (critic 1 #3): reused the EXISTING
+   `_portfolio(target_vol=...)` machinery (already tested symmetric and REJECTED --
+   "pure leverage, DD tripled"), forcing `VOLTARGET_FACTOR_CAP=1.0` to isolate a downside-
+   only variant (never levers up in calm markets, per the critique's own distinction from the
+   already-rejected symmetric version). Result: essentially INERT (Calmar 0.601→0.617 full,
+   1.357→1.368 OOS, floor value 0.25x vs 0.5x makes zero difference -- it never binds). 4th
+   confirmation of this project's repeated "lagging-signal risk scaling doesn't help" finding
+   (after DD_SCALE, `--vix-regime`, momentum-`--conviction-size`). Not adopted.
+
+5. **`joint_param_grid_search.py`** (critic 2 #1): premise verified real and grounded --
+   `param_sensitivity.py`'s existing "COMBINED" 3-parameter corner test found 3 individually-
+   favorable one-at-a-time nudges (SL_ATR_MULT -20%, RR_DEFAULT +20%, tighter OVEREXT) combine
+   to WORSE (0.468) than baseline (0.533), not better -- exactly the kind of interaction a
+   systematic search should check more broadly. Random search over SL_ATR_MULT [1.0,2.5],
+   RR_DEFAULT [2.5,4.0], HORIZON_DAYS [3,7], OVEREXT_HI [65,75] (paired LO=100-HI), guarded by
+   requiring a candidate to beat baseline on BOTH full-history AND OOS Calmar (the critic's
+   own proposed overfitting guard), DSR-corrected via this project's existing
+   `deflated_sharpe_ratio()`. **Real computational ceiling discovered**: each combination
+   costs ~54-56s (`_signals()` recomputes `compute_facts()` bar-by-bar for every candidate) --
+   critic's suggested 500 trials would take ~8 hours, not minutes. Ran 15 trials (~14min):
+   **0/15 beat baseline on both Full and OOS Calmar** -- consistent with, and extends, the
+   existing one-at-a-time evidence that this config isn't easily dominated. A modest sample
+   for a 4D space; a larger batch (e.g. 50 trials, ~47min) is a cheap, well-defined follow-up
+   if more confidence is wanted later -- script is reusable via `[n_trials]` CLI arg.
+
+**Net effect**: nothing here overturned the current live config. The two genuinely new,
+now-documented findings (drawdown duration, rate-cycle sensitivity) are folded into README's
+key-findings and comparison-table sections. Everything else either confirms an existing
+decision with a sharper number, or closes out a proposal whose premise didn't survive contact
+with the real code -- consistent with this project's own standard of not chasing an idea
+further than the evidence supports.
+
+---
+
 ### FIXED 2026-08-06 (same day, minutes later): the displayed "unrealized ... HKD" profit was STILL on the reference scale -- a second instance of the exact bug the invested-amount fix had just fixed elsewhere
 
 Direct follow-up: after the "invested" line was fixed to use the real broker quantity, user

@@ -79,6 +79,15 @@ the full project; the honest conclusions:
   intra-window DD -3.11%), **2020 COVID -0.81%** (-3.20%), **2022 rate-hike drawdown +3.61%**
   (-5.11%, the worst of the three) — consistent with trend-following's classic profile, well
   inside the -13% halt threshold.
+- **Drawdown DURATION, not just depth** (2026-08-06, `dashboard/research/drawdown_time_stats.py`):
+  depth (maxDD) has always been reported, but duration matters at least as much for real
+  trading psychology — an -8% drawdown that recovers in 3 weeks vs one that drags 8 months are
+  very different to actually live through. Deployed config (core+gate+sleeve@10%, full
+  history): only **1.2% of time spent >5% underwater**, worst-case recovery **376 trading
+  days (~18 months)**, mean underwater depth just -0.97%. Core-only (no sleeve) is
+  meaningfully worse on this dimension too, not just on Calmar: 8.4% of time >5% underwater,
+  worst recovery ~34 months — the sleeve's diversification benefit shows up in TIME spent
+  recovering, not only in depth.
 - **Edge survives aggressive multiple-comparisons correction.** Deflated Sharpe Ratio stays
   **100% even at 82 combined search trials** (49 universe-selection candidates + 18
   exit-method variants + 15 parameter-sweep configs, corrected together).
@@ -337,6 +346,19 @@ without saying so is exactly the kind of self-deception this whole project tries
 | 60/40 (SPY/AGG) | ~7% | ~-22% | ~0.32 | Rough estimate, not re-run this project |
 | All-weather (25% equity/25% long bonds/25% short-duration/25% commodities) | ~6% | ~-15% | ~0.40 | Rough estimate, not re-run this project |
 | 100% cash (SGOV) | ~4.3% | ~0% | n/a | Current rate, no drawdown risk but no growth engine either |
+
+**Rate-cycle sensitivity, the full curve not just the breakeven point** (2026-08-06,
+`dashboard/research/rate_sensitivity_test.py`, same core-only/after-tax methodology as the
+headline row above): Calmar **0.909** at today's 4.3% constant rate → **0.747** at a real,
+tiled 2000-2015 low-rate-era pattern (mean 1.69%) → **0.504** at a genuine 0% ZIRP floor. The
+system's OWN absolute risk-adjusted return is real and worth tracking. But — reconciled
+against the SAME rate scenarios for the risk-matched passive alternative in the table above —
+the RELATIVE advantage over passive actually WIDENS at lower rates, not narrows: passive
+Calmar falls to 0.441 at 2% and just 0.185 at 0% (it holds 87.5% cash, so it's hurt
+proportionally MORE by low rates than this system, which only holds a small buffer). The
+"breakeven ~5.5%" framing below is specifically about RISING rates eroding the advantage, not
+falling ones — falling rates are a real headwind for this system in absolute terms, but not a
+threat to its edge over the passive comparison.
 
 **The honest reading**: at today's interest rates, this system's core-only Calmar (0.887,
 reconciled, after-tax) beats a naive risk-matched passive alternative (0.735) by a real,
