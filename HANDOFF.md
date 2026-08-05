@@ -1,7 +1,44 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-05.
+Last updated 2026-08-06.
+
+---
+
+### FIXED 2026-08-06: Active Trades "invested" now shows the REAL broker-requested quantity, not a backtest-reference estimate
+
+Direct follow-up to yesterday's clarification -- user pushed back correctly: a number
+labelled "invested" that isn't real money is a mistake, not just a labeling nuance ("so it's
+misleading. it should show actual invested money?!"). Agreed and fixed properly rather than
+just adding more caveat text.
+
+**Fix**: `active_panel()` now reads the REAL per-trade order quantity once, from
+`ib_mirror.qty`/`mt5_mirror.volume` (whichever the active backend uses -- new
+`broker.mirror_qty_column()` abstraction, mirroring the existing `mirror_table()` one) keyed
+by paper_id. `_trade_card()`'s "invested" line uses this `real_qty` whenever a real order
+exists (filled OR still resting -- IBKR has already committed to that size either way), and
+ONLY falls back to `t["size_units"]` (the fixed-$10,000-reference figure) for a signal that's
+never been placed at the broker at all -- and for that case, the label itself now says so
+explicitly ("~USD X reference size (N units, not yet placed)") rather than calling it
+"invested". The "Invested amount" sort key matches the same logic.
+
+This is exact, not an approximation -- `ib_mirror.qty` is the REAL quantity ib_exec.py's
+`_place_etf_bracket()` requested for THIS SPECIFIC trade's own bracket order (verified
+earlier today: per-trade, not aggregated across layers on the same instrument, unlike the
+pie chart's real position sum). No parallel sizing formula to drift out of sync with the real
+one -- just reads what already happened.
+
+Verified live on the LIVE account: SPY card now reads "invested: USD 2,967 (4 units)" (4 x
+entry 741.69 = 2,966.76) vs. the pie chart's "USD 3,082" (4 x current price 770.53) -- same
+REAL 4-share quantity in both places now, the remaining ~USD 115 gap is exactly the
+unrealized gain (cost basis vs. current market value), a normal and self-explanatory
+difference instead of the previous ~67% structural mismatch. Checked several more
+instruments (EFA, QQQ, AMLP, DBC, VNQ, IWM, EEM) -- all show the same small, price-movement-
+only gap between the card and the pie now.
+
+Added `broker.mirror_qty_column()` + a test (`test_mirror_qty_column_matches_the_active_
+backend` in `test_broker.py`). Full suite: 166 passed (genuine, via `pytest -q`, post the
+check()/pytest-blindness fix). Redeployed both instances, verified in the browser.
 
 ---
 

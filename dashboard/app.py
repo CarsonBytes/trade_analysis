@@ -1459,7 +1459,7 @@ def _unrealized_r(t: dict, pos: dict | None) -> float:
 
 
 def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
-                status: str | None = None) -> None:
+                status: str | None = None, real_qty: float | None = None) -> None:
     key = t["instrument"]
     price = _current_price(t, pos)
     # entry: always this trade's OWN recorded price, never a broker cross-layer blended
@@ -1495,30 +1495,32 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
         if not pos:
             ui.badge("⏳ PENDING", color="grey-7").classes("text-xs")
         ui.label(f"{price:,.4f}").classes("text-base")
-        # ADDED 2026-08-05: capital committed at entry (size_units * entry, i.e. cost basis)
-        # -- NOT current market value (pos["volume"] * price), which fluctuates with price and
-        # would double-report the same movement the "unrealized R"/P&L line below already
-        # conveys. Uses t["size_units"]/t["entry"] rather than pos["volume"]/pos["open"] so
-        # this is available identically for PENDING trades too (no broker fill yet).
-        # CLARIFIED 2026-08-05 (same day): t["size_units"] is sized against paper.py's FIXED
-        # $10,000 backtest-reference account (ACCOUNT constant), NOT the real broker quantity
-        # -- ib_exec.py independently sizes the REAL order against the real account equity +
-        # position caps at placement time, which can differ from this figure by anywhere from
-        # ~0.5x to ~13x depending on equity/caps at the time (confirmed live on both paper and
-        # live accounts). This label is a stable, backtest-consistent risk-reference size, not
-        # a claim about real dollars at the broker -- the pie chart's per-instrument USD/HKD
-        # figure is the real market value. Tooltip added after a user was confused seeing this
-        # figure disagree with the pie chart for the same instrument (e.g. live SPY: this line
-        # read "USD 5,132 (7 units)" while the pie chart showed "USD 3,084" for the SAME real
-        # 4-share position -- both numbers were independently correct, just answering different
-        # questions).
-        ui.label(f"invested: USD {t['size_units'] * entry:,.0f} "
-                f"({t['size_units']:,.0f} units)").classes("text-xs text-grey-6").tooltip(
-            "Sized against this system's fixed $10,000 backtest-reference account (for "
-            "R-multiple/backtest consistency) -- NOT the real quantity bought at the broker, "
-            "which is sized independently against your real account equity and can differ "
-            "substantially. For real dollar exposure, see this instrument's slice in the "
-            "allocation pie chart below.")
+        # FIXED 2026-08-06: this used to show t["size_units"] * entry -- paper.py's OWN
+        # sizing, against a fixed $10,000 backtest-reference account, NOT real money -- and a
+        # user correctly called it out as misleading once it was labelled "invested" (it once
+        # read "invested: USD 5,132" for a real position that only ever cost USD 3,084 at the
+        # broker). Now uses `real_qty` (the ACTUAL quantity ib_exec.py/executor.py requested
+        # from the broker for THIS specific trade, read from ib_mirror/mt5_mirror -- present
+        # once a real order has been placed, filled or not) whenever it exists -- exact, no
+        # estimation, and per-trade (not the pie chart's aggregate across multiple layers on
+        # the same instrument). Only falls back to the backtest-reference figure for a signal
+        # that has NEVER been placed at the broker at all, and says so explicitly rather than
+        # calling it "invested" -- nothing has actually been invested yet in that case.
+        if real_qty is not None:
+            ui.label(f"invested: USD {real_qty * entry:,.0f} "
+                    f"({real_qty:,.0f} units)").classes("text-xs text-grey-6").tooltip(
+                "The real quantity requested from the broker for this trade (from "
+                f"{_bk.mirror_table()}) x entry price -- matches what you'd see in "
+                f"{_bk.name()} for this order.")
+        else:
+            ui.label(f"~USD {t['size_units'] * entry:,.0f} reference size "
+                    f"({t['size_units']:,.0f} units, not yet placed)").classes(
+                "text-xs text-grey-6").tooltip(
+                "No real order exists at the broker yet for this signal -- this is a "
+                "backtest-consistency reference size (sized against this system's fixed "
+                "$10,000 reference account), not a prediction of the real quantity. The real "
+                "size is set independently, against your actual account equity, once this "
+                "signal actually places.")
         spark = service.STATE.get("spark", {}).get(key)
         if spark:                                  # same sparkline as Top Opportunities
             up = spark[-1] >= spark[0]
@@ -1671,7 +1673,7 @@ def _fundable_count(eq: float | None) -> tuple[int | None, int]:
     return fundable, len(universe)
 
 
-def _active_sort_value(t: dict, pos: dict | None):
+def _active_sort_value(t: dict, pos: dict | None, real_qty_by_id: dict):
     """Value _sort_active() sorts on, per SETTINGS["active_sort"]. "r"/"profit" only mean
     anything for a CONFIRMED trade (a real position); a pending trade (pos is None) has no
     live figure yet, so it gets a constant sentinel -- combined with sorted()'s stability,
@@ -1684,16 +1686,21 @@ def _active_sort_value(t: dict, pos: dict | None):
     if key == "profit":
         return _unrealized_pnl_native(t, pos) if pos else float("-inf")
     if key == "invested":
-        return t["size_units"] * t["entry"]
+        # FIXED 2026-08-06: matches _trade_card()'s own "invested" line -- the REAL
+        # broker-requested quantity when one exists, only falling back to the backtest-
+        # reference size_units for a signal that's never been placed at all.
+        qty = real_qty_by_id.get(t["id"])
+        return (qty if qty is not None else t["size_units"]) * t["entry"]
     return t["ts"]                       # entry_date -- ISO strings sort chronologically
 
 
-def _sort_active(items: list, get_trade, get_pos) -> list:
+def _sort_active(items: list, get_trade, get_pos, real_qty_by_id: dict) -> list:
     """Sort a group's card list by the current Active Trades sort control. `get_trade`/
     `get_pos` adapt this to both shapes used below: plain trade dicts (confirmed) and
     (trade, reason_msg) tuples (each pending sub-group)."""
     reverse = SETTINGS.get("active_sort_dir", "desc") == "desc"
-    return sorted(items, key=lambda it: _active_sort_value(get_trade(it), get_pos(it)),
+    return sorted(items, key=lambda it: _active_sort_value(get_trade(it), get_pos(it),
+                                                            real_qty_by_id),
                  reverse=reverse)
 
 
@@ -1705,8 +1712,19 @@ def active_panel() -> None:
     account too small to fund it) -- these used to be silently counted together as
     one misleading "Active Trades (N)" total with no distinction."""
     from dashboard.core import paper
+    from dashboard.execution import broker as _bk
     open_t = paper.open_trades()
     positions = service.STATE.get("positions", {})
+    # ADDED 2026-08-06: REAL per-trade order quantity (the actual size ib_exec.py/executor.py
+    # requested from the broker for THIS specific trade -- present once a real order has been
+    # placed, whether filled yet or not) -- see _trade_card()'s "invested" line, which uses
+    # this instead of t["size_units"] (a separate, fixed-$10,000-backtest-reference-scale
+    # figure that isn't real money -- confirmed live to differ from the real broker qty by
+    # anywhere from ~0.5x to ~13x, which a user correctly flagged as misleading once it was
+    # labelled "invested"). One query for the whole panel, not per-card.
+    with paper._LOCK, paper._conn() as c:
+        real_qty_by_id = dict(c.execute(
+            f"SELECT paper_id, {_bk.mirror_qty_column()} FROM {_bk.mirror_table()}").fetchall())
     confirmed = [t for t in open_t if positions.get(t["id"])]
     pending = [t for t in open_t if not positions.get(t["id"])]
     hdr = f"Active Trades ({len(confirmed)} open"
@@ -1735,7 +1753,6 @@ def active_panel() -> None:
                      on_click=_toggle_active_sort_dir).props("flat dense round")\
                 .tooltip("Descending (biggest/most recent first)" if _desc
                         else "Ascending (smallest/oldest first)")
-    from dashboard.execution import broker as _bk
     # computed ONCE for the whole render -- both _fundable_count() and _pending_reason()
     # used to each call _bk.equity_usd() independently (a real broker round-trip), once per
     # pending CARD for the latter; see the 2026-07-13 fix note on _pending_reason().
@@ -1758,10 +1775,11 @@ def active_panel() -> None:
                  "qualifying signals.").classes("text-sm text-grey")
         return
     if confirmed:
-        confirmed = _sort_active(confirmed, lambda t: t, lambda t: positions.get(t["id"]))
+        confirmed = _sort_active(confirmed, lambda t: t, lambda t: positions.get(t["id"]),
+                                 real_qty_by_id)
         with ui.row().classes("w-full flex-wrap gap-3"):
             for t in confirmed:
-                _trade_card(t, positions.get(t["id"]))
+                _trade_card(t, positions.get(t["id"]), real_qty=real_qty_by_id.get(t["id"]))
     if pending:
         # GROUPED BY REASON CATEGORY (2026-07-13, replacing one flat "Pending" list):
         # user feedback was that lumping "a real order is genuinely waiting to fill" together
@@ -1819,12 +1837,14 @@ def active_panel() -> None:
                 ui.badge(f"{_label} ({len(items)})", color=_chip_color[_status])\
                     .classes("text-xs").tooltip(_tip)
         for _status in ("placed", "retrying", "stuck"):
-            items = _sort_active(groups[_status], lambda it: it[0], lambda it: None)
+            items = _sort_active(groups[_status], lambda it: it[0], lambda it: None,
+                                 real_qty_by_id)
             if not items:
                 continue
             with ui.row().classes("w-full flex-wrap gap-3"):
                 for t, msg in items:
-                    _trade_card(t, None, reason=msg, status=_status)
+                    _trade_card(t, None, reason=msg, status=_status,
+                               real_qty=real_qty_by_id.get(t["id"]))
 
 
 @ui.refreshable

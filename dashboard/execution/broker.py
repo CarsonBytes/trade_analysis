@@ -118,6 +118,14 @@ def mirror_table() -> str:
     return "ib_mirror" if is_ib() else "mt5_mirror"
 
 
+def mirror_qty_column() -> str:
+    """ADDED 2026-08-06: the column holding the REAL order quantity in mirror_table() --
+    ib_mirror calls it "qty", mt5_mirror calls the same concept "volume". Lets a caller read
+    the ACTUAL broker-requested size for a specific trade (not paper.py's separate, fixed-
+    $10,000-reference-scale t["size_units"]) without hardcoding either backend's column name."""
+    return "qty" if is_ib() else "volume"
+
+
 def executed_ids() -> set:
     """paper_ids the active broker actually placed (have a mirror row) -- the
     'broker truth' set for the retrospective. Empty set on any error.

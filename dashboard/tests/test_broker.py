@@ -76,6 +76,32 @@ def test_portfolio_room_usd_dispatch():
         check("backend without support -> None", broker.portfolio_room_usd(), None)
 
 
+def test_mirror_qty_column_matches_the_active_backend():
+    print("mirror_qty_column(): picks the real per-trade quantity column name for whichever "
+          "backend is active -- ib_mirror calls it 'qty', mt5_mirror calls the same concept "
+          "'volume' -- used by app.py's Active Trades 'invested' line to read the REAL "
+          "broker-requested size for a specific trade (added 2026-08-06 after a user "
+          "correctly flagged the previous figure, sized against a fixed $10,000 backtest-"
+          "reference account, as misleading once labelled 'invested'):")
+    from dashboard.execution import broker
+    old_broker = os.environ.get("BROKER")
+    old_live = os.environ.get("IB_ALLOW_LIVE")
+    try:
+        os.environ["BROKER"] = "ib"
+        check("IB backend -> 'qty' (matches ib_mirror's column)",
+              broker.mirror_qty_column(), "qty")
+        os.environ["BROKER"] = "mt5"
+        os.environ.pop("IB_ALLOW_LIVE", None)
+        check("MT5 backend -> 'volume' (matches mt5_mirror's column)",
+              broker.mirror_qty_column(), "volume")
+    finally:
+        for k, v in (("BROKER", old_broker), ("IB_ALLOW_LIVE", old_live)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
