@@ -5,6 +5,46 @@ Last updated 2026-08-05.
 
 ---
 
+### CLARIFIED 2026-08-05: LIVE account confusion (SPY invested vs pie chart) walked through the same "two size bases" distinction, plus every bare "$" replaced with an explicit "USD"/"(USD)" label
+
+User was confused seeing (live) SPY's Active Trades card read "invested: USD 5,132 (7 units)"
+while the SAME instrument's pie-chart slice showed "USD 3,084 / HKD 24,051" -- and separately
+couldn't tell whether the card's `$` figures were USD or HKD at all.
+
+**Verified precisely**: SPY paper trade id=33, entry=741.69, `size_units=6.92` (backtest-
+reference scale, rounds to "7 units" on the card) -> 6.92*741.69 = USD 5,132.5, matches the
+card exactly. The REAL broker order (`ib_mirror` paper_id=33, the ONLY open row for this
+con_id) requested `qty=4` -- the REAL number of shares IBKR holds. Pie chart mv_usd =
+4 * current_price (~770.88) = USD 3,083.5, matches the pie slice exactly. Both numbers are
+independently correct; they answer different questions (see today's earlier "two size bases"
+finding above -- same root explanation, confirmed again on a live-account instrument where
+the real qty happens to be SMALLER than the reference size_units, the opposite direction from
+most of paper's examples, because live's real equity (~$16.9k) is much closer to the
+$10,000 reference constant than paper's ~$132k account was).
+
+**Fixed the actual confusion trigger**: added a tooltip directly on the "invested" line
+(`app.py::_trade_card()`) explaining the backtest-reference-vs-real-broker-qty distinction
+inline, pointing to the pie chart for real dollar exposure -- so this doesn't need
+re-explaining from scratch next time.
+
+**Also fixed, per direct user request**: every bare `$` currency prefix in `app.py` replaced
+with an explicit 3-letter code (`USD {x}` / `(USD)` column headers) -- the "invested" line,
+the pie chart's per-slice label, both `_pending_reason()` "needs ~$X" messages, the cash-
+breakdown "USD $X" (had a redundant double-marker), the PHASE2 equity-threshold badge, the
+monthly attribution table's "trend $"/"sleeve $"/"other $"/"total $" column headers, and the
+Active Trades sort-control's "Profit ($)" option (simplified to just "Profit" -- the sort key
+internally uses the native-currency, pre-HKD-conversion value while the card displays the
+HKD-converted figure; harmless for pure ordering since HKD conversion is a positive constant
+multiplier, but not worth claiming a specific currency in the dropdown label). Left informal
+prose uses of the word "$" alone (e.g. "the real $ risked x R" in a tooltip) and PowerShell/
+Vue `$variable` syntax untouched -- neither is an ambiguous currency-value display.
+
+Redeployed both instances, verified live in the browser (both pie chart and Active Trades
+cards on the LIVE account) that every figure now reads "USD X" / "HKD Y" explicitly. Full
+suite: 165 passed (`pytest -q`, now a genuine check post the check()/pytest-blindness fix).
+
+---
+
 ### VERIFIED + BUG FOUND/FIXED 2026-08-05: audited every pie-chart/Active-Trades figure against raw DB data; found + fixed a real orphaned-position bug from earlier today's own sync_closures() change
 
 User request: verify and explain the pie chart / Active Trades figures for specific

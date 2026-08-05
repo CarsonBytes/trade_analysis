@@ -65,7 +65,7 @@ SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             "active_sort": "entry_date", "active_sort_dir": "desc"}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
-                    "profit": "Profit ($)", "invested": "Invested amount"}
+                    "profit": "Profit", "invested": "Invested amount"}
 CHART_PERIODS = {"1W": 7, "1M": 30, "3M": 90, "All": None}   # label -> lookback days (None = all)
 _busy = {"flag": False}
 
@@ -1075,7 +1075,7 @@ def portfolio_panel() -> None:
             hkd_c = fx.get("hkd_cash", 0.0)
             _neg = hkd_c < 0 or usd_c < 0
             _cash_bits.append(f"HKD {hkd_c:,.0f}")
-            _cash_bits.append(f"USD ${usd_c:,.0f}" + (" ⚠" if _stuck else ""))
+            _cash_bits.append(f"USD {usd_c:,.0f}" + (" ⚠" if _stuck else ""))
         if _cash_bits:
             with ui.column().classes("items-start gap-0"):
                 ui.label("Cash breakdown").classes("text-xs text-grey-6 uppercase")
@@ -1282,7 +1282,7 @@ def portfolio_panel() -> None:
     # FULLY precomputed labels (USD actual + ccy converted + %) baked into the slice name
     # -> no ECharts {..} templates rendered; details sit on each slice's title, not the tooltip.
     slices = [{"value": round(b, 2),
-               "name": f"{s} {b / total_base * 100:.0f}%\n${u:,.0f} / {ccy} {b:,.0f}"}
+               "name": f"{s} {b / total_base * 100:.0f}%\nUSD {u:,.0f} / {ccy} {b:,.0f}"}
               for s, b, u in raw]
     if slices:
         # MOBILE-FRIENDLY 2026-08-05: outside labels with leader lines (the previous style)
@@ -1364,8 +1364,8 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     needed = contracts.min_equity_for_1_share(stop_per_share, paper.RISK_PER_TRADE)
     if eq < needed:
         return (f"Account isn't big enough yet to buy even 1 share of this at the current "
-                f"risk setting (needs ~${needed:,.0f}, you have ~${eq:,.0f}) — this will sit "
-                f"here until the account grows, it won't place on its own.", "stuck")
+                f"risk setting (needs ~USD {needed:,.0f}, you have ~USD {eq:,.0f}) — this "
+                f"will sit here until the account grows, it won't place on its own.", "stuck")
     if t["id"] in _bk.executed_ids():
         return ("Order is already sitting with the broker, just waiting to fill (e.g. it "
                 "was placed outside market hours, or the fill is simply taking a moment) — "
@@ -1388,7 +1388,7 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
                 eta = f" ETA (outer bound): {d} at the latest, could be sooner."
             except ValueError:
                 pass
-        return (f"Needs ~${t['entry']:,.0f}/share, ~${room:,.0f} of room left.{eta}",
+        return (f"Needs ~USD {t['entry']:,.0f}/share, ~USD {room:,.0f} of room left.{eta}",
                "retrying")
     # ADDED 2026-07-31: execution-window gate (ib_exec.within_entry_execution_window(),
     # 10:00am-3:30pm ET, entries only) -- give this its own message rather than falling
@@ -1500,8 +1500,25 @@ def _trade_card(t: dict, pos: dict | None, reason: str | None = None,
         # would double-report the same movement the "unrealized R"/P&L line below already
         # conveys. Uses t["size_units"]/t["entry"] rather than pos["volume"]/pos["open"] so
         # this is available identically for PENDING trades too (no broker fill yet).
-        ui.label(f"invested: ${t['size_units'] * entry:,.0f} "
-                f"({t['size_units']:,.0f} units)").classes("text-xs text-grey-6")
+        # CLARIFIED 2026-08-05 (same day): t["size_units"] is sized against paper.py's FIXED
+        # $10,000 backtest-reference account (ACCOUNT constant), NOT the real broker quantity
+        # -- ib_exec.py independently sizes the REAL order against the real account equity +
+        # position caps at placement time, which can differ from this figure by anywhere from
+        # ~0.5x to ~13x depending on equity/caps at the time (confirmed live on both paper and
+        # live accounts). This label is a stable, backtest-consistent risk-reference size, not
+        # a claim about real dollars at the broker -- the pie chart's per-instrument USD/HKD
+        # figure is the real market value. Tooltip added after a user was confused seeing this
+        # figure disagree with the pie chart for the same instrument (e.g. live SPY: this line
+        # read "USD 5,132 (7 units)" while the pie chart showed "USD 3,084" for the SAME real
+        # 4-share position -- both numbers were independently correct, just answering different
+        # questions).
+        ui.label(f"invested: USD {t['size_units'] * entry:,.0f} "
+                f"({t['size_units']:,.0f} units)").classes("text-xs text-grey-6").tooltip(
+            "Sized against this system's fixed $10,000 backtest-reference account (for "
+            "R-multiple/backtest consistency) -- NOT the real quantity bought at the broker, "
+            "which is sized independently against your real account equity and can differ "
+            "substantially. For real dollar exposure, see this instrument's slice in the "
+            "allocation pie chart below.")
         spark = service.STATE.get("spark", {}).get(key)
         if spark:                                  # same sparkline as Top Opportunities
             up = spark[-1] >= spark[0]
@@ -1931,10 +1948,10 @@ def retrospective_panel() -> None:
                     for a in reversed(attrib)]   # most recent month first
             ui.table(rows=rows,
                      columns=[{"name": "month", "label": "month", "field": "month", "align": "left"},
-                              {"name": "trend", "label": "trend $", "field": "trend", "align": "right"},
-                              {"name": "sleeve", "label": "sleeve $", "field": "sleeve", "align": "right"},
-                              {"name": "other", "label": "other $", "field": "other", "align": "right"},
-                              {"name": "total", "label": "total $", "field": "total", "align": "right"}])\
+                              {"name": "trend", "label": "trend (USD)", "field": "trend", "align": "right"},
+                              {"name": "sleeve", "label": "sleeve (USD)", "field": "sleeve", "align": "right"},
+                              {"name": "other", "label": "other (USD)", "field": "other", "align": "right"},
+                              {"name": "total", "label": "total (USD)", "field": "total", "align": "right"}])\
                 .classes("w-full").props("dense")\
                 .tooltip("'other' is cash interest + an untracked residual -- not separately "
                          "modeled, not an error")
@@ -2677,7 +2694,7 @@ def main_page() -> None:
                     _txt, _color = ((("Phase 2 threshold · sleeve NOT enabled") if _gate_active
                                      else "Sleeve NOT enabled"), "grey")
                 _threshold_txt = (
-                    f"equity threshold ~US${_pp.PHASE2_NAV_USD:,.0f} "
+                    f"equity threshold ~USD {_pp.PHASE2_NAV_USD:,.0f} "
                     f"(~HKD {_pp.PHASE2_NAV_USD * 7.8:,.0f}); "
                     if _gate_active else
                     "no equity threshold currently (gate removed, PHASE2_NAV_USD=0); ")
