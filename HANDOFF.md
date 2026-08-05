@@ -5,6 +5,40 @@ Last updated 2026-08-05.
 
 ---
 
+### CHANGED 2026-08-05: board_scan's OPENAI_MODEL bumped gpt-5-mini -> gpt-5.4-mini; verified LLM cadence from history
+
+`analyst/.env`'s `OPENAI_MODEL=gpt-5-mini` -> `gpt-5.4-mini` (gitignored, not in the repo diff).
+Confirmed this is the ONLY live consumer of `OPENAI_MODEL` -- `board_scan.py` calls
+`invoke_with_key_fallback()` with no explicit `model=`, so it falls through to
+`make_llm()`'s env default; the older `analyst/nodes.py`/`analyst/graph.py` multi-agent
+pipeline that also reads this var is legacy, nothing in `dashboard/` imports it. Neither
+launch script (`C:\Scripts\dashboard.ps1`, `run_dashboard_live.ps1`) sets `OPENAI_MODEL`
+itself, and the shared `.env` is loaded by both instances identically -- one edit covers
+both. Smoke-tested `gpt-5.4-mini` against the real chatanywhere.tech proxy directly
+(`make_llm(model="gpt-5.4-mini").invoke(...)`) before redeploying -- succeeded -- to avoid
+silently breaking every board_scan call on a bad model string.
+
+**LLM cadence verified from the shared Supabase `llm_calls` ledger** (72h of real history,
+2026-08-03 to 2026-08-04, `purpose like 'quant:*'`): LIVE ticks every ~15-16min during
+9:30am-3:30pm ET (13:30-19:30 UTC) on both trading days, matching its default
+`ui_settings.llm_min=15`; zero calls outside that window or on the weekend, confirming the
+2026-07-31 market-hours gate is holding. **PAPER ticks only ~hourly** over the same window --
+NOT a bug, its own persisted `ui_settings.llm_min=60` (paper's own `dashboard.db` cache
+table) is set 4x looser than live's, a real pre-existing config difference worth knowing
+about but not changed here (no report of it being unintentional). Also noted:
+`llm_rate_limited_until` in paper's cache is a long-expired stale flag (2026-07-31), inert.
+
+**Redeploy hit the SAME hung-process class already known from 2026-07-24/07-29** (Stop-
+ScheduledTask succeeds, task state goes "Ready", but the OLD PID stays bound to its port and
+still responds to HTTP for 5-10s+ afterward) -- happened on BOTH ports this session (twice on
+8081/live, once on 8080/paper). `Stop-Process -Force` on the still-alive PID cleared it every
+time; both instances' own auto-recovery (watchdog.ps1 for live, Task Scheduler itself for
+paper) picked the port back up within seconds without needing an explicit `Start-
+ScheduledTask` call. Final verified state: paper PID 728772 (15:46:02), live PID 107968
+(15:46:14), both HTTP 200, both fresh vs. the pre-redeploy PIDs.
+
+---
+
 ### 🐞 FIXED 2026-08-05: paper CPER showed a nonsensical +24.3R; allocation pie chart double-counted market value -- both traced to the same root cause: stale `ib_mirror` rows never closing on a layered (multi-fill) position
 
 User report: "piechart seems not uptodate... also on paper account, us copper shows +24.3 R,
