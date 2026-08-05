@@ -38,6 +38,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def _isolated_db():
@@ -176,10 +177,12 @@ def test_non_rate_limit_exception_still_propagates():
 
 
 if __name__ == "__main__":
-    test_rate_limit_error_sets_backoff_and_returns_none()
-    test_second_call_skips_llm_entirely_while_in_backoff()
-    test_permission_denied_error_also_backs_off()
-    test_non_rate_limit_exception_still_propagates()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

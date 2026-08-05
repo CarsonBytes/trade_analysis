@@ -15,6 +15,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 class _FakeResp:
@@ -244,18 +245,12 @@ def test_invoke_with_key_fallback_does_not_retry_unrelated_errors():
 
 
 if __name__ == "__main__":
-    test_provider_decision_defaults_chatanywhere_when_not_configured()
-    test_provider_decision_uses_edge_function_response()
-    test_provider_decision_fails_open_to_chatanywhere_on_error()
-    test_provider_decision_caches_within_ttl()
-    test_make_llm_stays_chatanywhere_without_deepseek_key()
-    test_make_llm_switches_to_deepseek_when_decided()
-    test_make_llm_uses_fallback_key_when_requested()
-    test_make_llm_fallback_key_raises_clearly_when_unset()
-    test_is_chatanywhere_unavailable_classifies_correctly()
-    test_invoke_with_key_fallback_retries_on_primary_failure()
-    test_invoke_with_key_fallback_reraises_when_no_fallback_configured()
-    test_invoke_with_key_fallback_does_not_retry_unrelated_errors()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

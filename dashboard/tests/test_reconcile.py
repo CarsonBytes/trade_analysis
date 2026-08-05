@@ -20,6 +20,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_compare_positions_clean_match():
@@ -214,20 +215,12 @@ def test_reconcile_with_broker_no_followup_when_already_clean():
 
 
 if __name__ == "__main__":
-    for t in (test_compare_positions_clean_match, test_compare_positions_ghost_trade,
-              test_compare_positions_untracked_broker_position,
-              test_compare_positions_zero_qty_excluded, test_compare_positions_mixed,
-              test_compare_positions_empty_both,
-              test_compare_positions_pending_order_not_a_ghost,
-              test_compare_positions_pending_order_mixed_with_real_ghost,
-              test_compare_positions_no_pending_arg_unchanged,
-              test_compare_positions_excludes_cash_sweep_holding,
-              test_compare_positions_excluded_does_not_hide_a_real_ghost,
-              test_compare_positions_no_excluded_arg_unchanged,
-              test_mirrored_open_symbols_isolated_db,
-              test_reconcile_with_broker_records_cleared_after_previous_mismatch,
-              test_reconcile_with_broker_no_followup_when_already_clean):
-        t()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

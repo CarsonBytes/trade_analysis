@@ -19,6 +19,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def approx(name, got, want, tol=1e-6):
@@ -26,6 +27,7 @@ def approx(name, got, want, tol=1e-6):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want ~{want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want ~{want!r}"
 
 
 def test_deposit_adjusted_series():
@@ -449,21 +451,12 @@ def test_withdraw_trade_noop_on_unknown_or_already_closed_id():
 
 
 if __name__ == "__main__":
-    test_deposit_adjusted_series()
-    test_current_drawdown_pct()
-    test_drawdown_series()
-    test_resolve_open_tags_unfunded_trades()
-    test_resolve_open_leaves_funded_trades_unqualified()
-    test_resolve_open_skips_check_when_executed_ids_omitted()
-    test_reentry_blocked_gates_until_buffer_reclaimed()
-    test_reentry_blocked_ignores_opposite_direction()
-    test_reentry_blocked_win_does_not_gate()
-    test_reentry_blocked_no_prior_trade()
-    test_reentry_blocked_uses_most_recent_trade_only()
-    test_set_trade_paused_toggles_flag_on_open_trade()
-    test_set_trade_paused_noop_on_closed_trade()
-    test_withdraw_trade_cancels_a_pending_trade()
-    test_withdraw_trade_noop_on_unknown_or_already_closed_id()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

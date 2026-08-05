@@ -20,6 +20,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_executed_ids_excludes_void():
@@ -76,8 +77,12 @@ def test_portfolio_room_usd_dispatch():
 
 
 if __name__ == "__main__":
-    test_executed_ids_excludes_void()
-    test_portfolio_room_usd_dispatch()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

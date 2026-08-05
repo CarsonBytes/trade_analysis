@@ -20,6 +20,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def _seed_trade(paper, instrument, method, realized_r, days_ago=10):
@@ -213,13 +214,12 @@ def test_entry_signal_vix_still_drives_sizing_not_gating():
 
 
 if __name__ == "__main__":
-    test_ticker_breaker_isolated()
-    test_sleeve_ignores_tech_paused_entirely()
-    test_entry_signal_fires_without_a_vix_spike()
-    test_entry_signal_still_requires_rsi_below_35()
-    test_entry_signal_requires_adx_above_25()
-    test_entry_signal_still_requires_close_below_20ma()
-    test_entry_signal_vix_still_drives_sizing_not_gating()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

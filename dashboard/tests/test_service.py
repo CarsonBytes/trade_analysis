@@ -20,6 +20,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def approx(name, got, want, tol=1e-6):
@@ -27,6 +28,7 @@ def approx(name, got, want, tol=1e-6):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want ~{want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want ~{want!r}"
 
 
 def test_heal_series_bracketed_zero_spike():
@@ -395,19 +397,12 @@ def test_refresh_pending_ticks_noop_when_nothing_pending():
 
 
 if __name__ == "__main__":
-    for t in (test_heal_series_bracketed_zero_spike, test_heal_series_real_sustained_jump_kept,
-              test_heal_series_unresolved_anomaly_left_alone,
-              test_heal_series_normal_fluctuations_untouched,
-              test_heal_series_empty_and_singleton, test_is_nl_implausible,
-              test_pending_confirms, test_is_equity_jump_implausible, test_reconcile_due,
-              test_hist_cash_gpv, test_detect_external_cash_flow,
-              test_pnl_crosscheck_agrees_when_clean,
-              test_pnl_crosscheck_flags_unrecorded_deposit,
-              test_pnl_crosscheck_not_enough_data,
-              test_refresh_pending_ticks_fetches_only_for_pending_instruments,
-              test_refresh_pending_ticks_noop_under_mt5,
-              test_refresh_pending_ticks_noop_when_nothing_pending):
-        t()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

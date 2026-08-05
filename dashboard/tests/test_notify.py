@@ -14,6 +14,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_is_configured():
@@ -115,12 +116,12 @@ def test_send_handles_exception_gracefully():
 
 
 if __name__ == "__main__":
-    test_is_configured()
-    test_send_noop_when_not_configured()
-    test_send_skips_info_level_no_push()
-    test_send_success_and_cooldown()
-    test_send_handles_non_200_gracefully()
-    test_send_handles_exception_gracefully()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

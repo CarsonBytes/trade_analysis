@@ -16,6 +16,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_record_and_recent_isolated_db():
@@ -130,10 +131,12 @@ def test_record_never_raises_if_notify_fails():
 
 
 if __name__ == "__main__":
-    test_record_and_recent_isolated_db()
-    test_recent_limit_respected()
-    test_record_calls_notify()
-    test_record_never_raises_if_notify_fails()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

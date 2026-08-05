@@ -25,6 +25,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def _score(signal: str, strength: int = 5) -> Score:
@@ -182,18 +183,12 @@ def test_tech_resumed_lets_qqq_through_again():
 
 
 if __name__ == "__main__":
-    test_no_llm_sig_watch_is_plain_noise()
-    test_llm_agrees_watch_is_plain_noise()
-    test_llm_vetoes_real_buy_signal()
-    test_llm_vetoes_real_sell_signal()
-    test_llm_rationale_semicolons_are_sanitized()
-    test_journal_canonicalizes_the_new_reason()
-    test_llm_agrees_buy_passes_the_action_gate()
-    test_tech_paused_blocks_a_strong_qqq_buy()
-    test_tech_paused_blocks_xlk_too()
-    test_tech_paused_blocks_spy_eem_ashr()
-    test_tech_paused_does_not_affect_non_tech_instruments()
-    test_tech_resumed_lets_qqq_through_again()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

@@ -17,6 +17,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_is_us_trading_day_real_2026_dates():
@@ -164,15 +165,12 @@ def test_market_status_fails_to_no_answer_on_calendar_fetch_error():
 
 
 if __name__ == "__main__":
-    test_is_us_trading_day_real_2026_dates()
-    test_year_cache_actually_caches()
-    test_fails_open_on_calendar_fetch_error()
-    test_market_status_before_open_same_day()
-    test_market_status_during_hours()
-    test_market_status_after_close_rolls_to_next_trading_day()
-    test_market_status_skips_weekend_and_holiday()
-    test_market_status_caches_within_ttl()
-    test_market_status_fails_to_no_answer_on_calendar_fetch_error()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

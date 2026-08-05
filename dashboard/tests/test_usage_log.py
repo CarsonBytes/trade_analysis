@@ -15,6 +15,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 class _FakeResp:
@@ -204,17 +205,12 @@ def test_shared_calls_ok_fails_closed_when_unreachable():
 
 
 if __name__ == "__main__":
-    test_hkt_boundary_is_exactly_midnight_in_hkt()
-    test_hkt_boundary_is_16_00_utc_and_within_the_last_24h()
-    test_fetch_uses_hkt_boundary()
-    test_project_of_prefixes()
-    test_fetch_returns_zeros_when_not_configured()
-    test_fetch_aggregates_by_project()
-    test_fetch_caches_within_ttl()
-    test_fetch_handles_request_failure_gracefully()
-    test_shared_calls_ok_true_when_under_cap()
-    test_shared_calls_ok_false_when_near_cap()
-    test_shared_calls_ok_fails_closed_when_unreachable()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

@@ -19,6 +19,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def approx(name, got, want, tol=1e-6):
@@ -26,6 +27,7 @@ def approx(name, got, want, tol=1e-6):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want ~{want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want ~{want!r}"
 
 
 def test_risk_per_contract():
@@ -126,9 +128,12 @@ def test_cost_points():
 
 
 if __name__ == "__main__":
-    for t in (test_risk_per_contract, test_size_contracts, test_choose_contract,
-              test_roll, test_front_month, test_cost_points, test_spec_integrity):
-        t()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

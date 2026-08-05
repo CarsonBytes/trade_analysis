@@ -16,6 +16,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 class FakeRow:
@@ -216,17 +217,12 @@ def test_filter_by_account_regression_ghost_account_no_longer_wins():
 
 
 if __name__ == "__main__":
-    for t in (test_single_account_no_filter, test_ignores_tags_outside_whitelist,
-              test_bad_value_skipped, test_empty_rows_returns_none,
-              test_two_managed_accounts_regression, test_no_target_acct_includes_everything,
-              test_account_summary_caches_within_ttl,
-              test_account_summary_refetches_after_ttl_expires,
-              test_account_summary_not_connected_bypasses_cache,
-              test_filter_by_account_keeps_only_target,
-              test_filter_by_account_no_target_returns_everything,
-              test_filter_by_account_keeps_items_with_no_account_set,
-              test_filter_by_account_regression_ghost_account_no_longer_wins):
-        t()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

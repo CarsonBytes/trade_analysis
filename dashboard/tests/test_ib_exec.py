@@ -27,6 +27,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 def test_cap_qty_to_portfolio_room():
@@ -318,6 +319,65 @@ def test_sync_closures_closes_stale_mirror_row_when_position_still_open_via_othe
             s2 = c.execute("SELECT status FROM ib_mirror WHERE paper_id=2").fetchone()[0]
         check("older, already-resolved trade's mirror row is now CLOSED", s1, "CLOSED")
         check("newer, genuinely open trade's mirror row stays OPEN", s2, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_sync_closures_does_not_orphan_the_last_mirror_row_for_a_position():
+    print("\nsync_closures(): a SINGLE resolved paper trade, no other layer -- the aggregate "
+          "broker position is still non-zero (resolving via the deterministic tick path does "
+          "NOT itself sell the broker position) but this is the ONLY ib_mirror row for that "
+          "con_id. The 2026-08-05 same-day fix above closed this unconditionally -- correct "
+          "for CPER/CWB (a newer layer keeps tracking it) but WRONG here: closing the LAST "
+          "open row for a con_id orphans a REAL, still-open position with ZERO local tracking "
+          "anywhere (live_positions() only reads status='OPEN' rows) -- confirmed live: VNQ "
+          "and QQQ both went fully broker-only-invisible this way within hours of that fix's "
+          "first deploy, caught only because the project's OWN broker reconciliation "
+          "separately flagged 'broker-only (no local record): [\"QQQ\", \"VNQ\"]'. Must leave "
+          "the row OPEN when nothing else is tracking that con_id:")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-06-24T00:00:00','VNQ','long','ATR rr3.0',97.86,94.67,110.0,3.0,"
+                     "15.7,'EXPIRED')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,222,'VNQ',15.7,50.0,'','2026-06-24T00:00:00','OPEN','etf')")
+
+        fake_pos = SimpleNamespace(contract=SimpleNamespace(conId=222), position=203.0)
+
+        class _FakeIB:
+            def positions(self):
+                return [fake_pos]
+
+        fake_ib = _FakeIB()
+        with mock.patch.object(ib_exec, "_guard", return_value=fake_ib), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            ib_exec.sync_closures()
+
+        with ib_exec._conn() as c:
+            s1 = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
+        check("the ONLY mirror row for this position stays OPEN (not orphaned)", s1, "OPEN")
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)
@@ -1203,32 +1263,12 @@ def test_live_positions_current_price_none_when_broker_omits_it():
 
 
 if __name__ == "__main__":
-    test_cap_qty_to_portfolio_room()
-    test_mirror_new_dd_halt_end_to_end()
-    test_pending_entry_notional_usd()
-    test_current_portfolio_room_usd()
-    test_sync_closures_cancels_stale_order_when_paper_already_resolved()
-    test_sync_closures_auto_cancels_dead_entry_past_grace_period()
-    test_sync_closures_leaves_recent_dead_entry_candidate_within_grace_period()
-    test_resolve_from_broker_elevates_loss_to_warning_level()
-    test_stale_signal_check_cancels_when_drifted_past_threshold()
-    test_stale_signal_check_leaves_fresh_signals_alone()
-    test_stale_signal_check_fails_open_on_no_live_price()
-    test_mirror_new_cancels_stale_signal_instead_of_funding()
-    test_cancel_pending_order_cancels_the_resting_order()
-    test_cancel_pending_order_noop_when_never_reached_broker()
-    test_cancel_pending_order_noop_when_broker_unreachable()
-    test_within_entry_execution_window_boundaries()
-    test_mirror_new_holds_entry_outside_execution_window()
-    test_mirror_new_places_entry_inside_execution_window()
-    test_mirror_new_cancels_pending_tech_signal_when_paused()
-    test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused()
-    test_mirror_new_does_not_cancel_tech_signals_when_resumed()
-    test_commission_estimate_usd()
-    test_is_commission_viable()
-    test_place_etf_bracket_skips_commission_not_viable_crumb()
-    test_live_positions_reports_current_price_from_broker()
-    test_live_positions_current_price_none_when_broker_omits_it()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")

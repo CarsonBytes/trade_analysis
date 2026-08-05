@@ -22,6 +22,7 @@ def check(name, got, want):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}: got {got!r} want {want!r}")
     if not ok:
         _fails.append(name)
+    assert ok, f"{name}: got {got!r} want {want!r}"
 
 
 async def _run_n_iterations(fn, n, interval_sec=0.0):
@@ -84,9 +85,12 @@ def test_no_on_error_handler_still_safe():
 
 
 if __name__ == "__main__":
-    test_survives_every_call_failing()
-    test_survives_intermittent_failure()
-    test_no_on_error_handler_still_safe()
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError:
+                pass
     print()
     if _fails:
         print(f"{len(_fails)} FAILED: {_fails}")
