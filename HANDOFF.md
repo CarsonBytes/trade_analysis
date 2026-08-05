@@ -5,6 +5,58 @@ Last updated 2026-08-05.
 
 ---
 
+### ADDED 2026-08-05: "market: closed · opens in Xh Ym" row in System health; IMPORTANT test-suite finding along the way
+
+User request: show time until next market open/close. Confirmed the spec with the user
+first: real NYSE regular hours (9:30am-4:00pm ET), not this system's own narrower
+10:00am-3:30pm ET entry-execution window -- "market open/close" should mean what it says.
+
+**`dashboard/core/market_calendar.py::market_status()`** (new): `{"is_open", "next_change"
+(aware UTC datetime), "next_change_type" ("open"|"close")}`, built on `nyse.schedule()`'s
+per-day `market_open`/`market_close` columns -- already exact (handles early-close days and
+holidays for free, no hardcoded 9:30/16:00 assumption anywhere). Separate 60s TTL cache from
+`is_us_trading_day()`'s per-year cache (different data shape: exact timestamps vs. a
+whole-day yes/no set). Fails to `{False, None, None}` (not a wrong concrete time) if the
+calendar package errors.
+
+**`app.py::health_banner()`**: new `market:` row in the System health strip, between
+`cheap/llm:` (which it directly explains -- that row's existing "(paused, outside hours)"
+hint said WHY nothing was happening, this says how much longer) and `broker:`. IB/US-equity
+path only (MT5 forex has no "market hours" concept, mirrors `_market_open()`'s own scoping).
+New `_format_duration()` helper renders "Xd Yh Zm", dropping leading zero units per user
+request (a 10-minute countdown reads as "10m", not "0d 0h 10m"). Tooltip gives the exact
+next-open/close time in both ET and HKT (fixed UTC+8 offset, matching
+`analyst/usage_log.py`'s existing HKT convention rather than trusting the Windows host's
+local-tz name resolution).
+
+Verified live in the browser on BOTH instances post-redeploy: at 13:19:33 UTC (confirmed via
+direct Python `zoneinfo` check), displayed "closed · opens in 10m" -- matches the real
+13:30 UTC open exactly. New tests (`test_market_calendar.py`, 6 new: before-open/during-
+hours/after-close-rolls-to-next-day/skips-weekend-AND-holiday-in-one-step/caches-within-
+TTL/fails-to-no-answer) all independently verified against the real NYSE schedule before
+writing expected values.
+
+**IMPORTANT, unrelated finding surfaced while re-verifying tests for this change**: this
+project's entire test suite (`check()`/`_fails` pattern, used in ALL 16
+`dashboard/tests/test_*.py` files) is **invisible to `pytest`** -- `check()` only prints and
+appends to a list, never asserts/raises, so `pytest -q` reports every test "passed"
+regardless of whether the checks inside actually failed. Proved this with a throwaway
+deliberately-wrong `check("x", 1, 2)` under the exact same pattern: `pytest -q` reported
+"1 passed". Every "N passed" logged in this doc's history via `pytest`/`python -m pytest`
+was **only proof the code didn't crash on import**, never a real correctness check -- the
+REAL verification this project has always relied on is each file's own `if __name__ ==
+"__main__":` block (`uv run python -m dashboard.tests.test_X`), which DOES check `_fails`
+and `raise SystemExit(1)` on failure. Re-ran every one of the 16 files via that real runner
+directly (not just the 3 touched this session) to confirm nothing was actually broken
+underneath the false pytest "passing" -- all 16 genuinely pass. **Flagged as a separate
+background task** (not fixed here, out of scope for a UI request) to make `check()` itself
+assert, so `pytest` becomes a meaningful check going forward: task_e9a06c60, "Fix
+pytest-blind check()/_fails pattern in dashboard/tests". Until that lands, treat `pytest -q`
+results on this project as "nothing crashed," not "the assertions held" -- verify anything
+that matters via the file's own `-m dashboard.tests.test_X` runner instead.
+
+---
+
 ### ADDED 2026-08-05: Active Trades cards show invested amount + a sort control; found+fixed a second instance of the multi-layer P&L bug along the way
 
 User request: each Active Trades card should show invested amount, plus a sort control

@@ -325,6 +325,23 @@ def header_status() -> None:
                      f"seen: {lk.get('history', {})}")
 
 
+def _format_duration(delta: dt.timedelta) -> str:
+    """"Xd Yh Zm" for a countdown -- e.g. market open/close -- dropping leading zero units
+    (a 20-minute countdown reads as "20m", not "0d 0h 20m"). Negative/zero deltas (the target
+    moment already passed, e.g. a stale cache during the exact transition second) floor to
+    "0m" rather than showing a confusing negative duration."""
+    total_min = max(0, int(delta.total_seconds() // 60))
+    days, rem_min = divmod(total_min, 24 * 60)
+    hours, minutes = divmod(rem_min, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:              # show 0h once a day-figure is already present, for readability
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
 @ui.refreshable
 def health_banner() -> None:
     """ADDED 2026-07-14: a single at-a-glance row for 'is anything actually wrong', after
@@ -364,6 +381,24 @@ def health_banner() -> None:
     if (SETTINGS.get("auto_pause") and
             "market closed (auto-pause)" in (service.STATE.get("last_status") or "")):
         llm_txt += " (paused, outside hours)"
+
+    # ADDED 2026-08-05, user-requested: time until the next real NYSE open/close, right next
+    # to the cheap/llm row above that it directly explains (that row's "(paused, outside
+    # hours)" hint said WHY nothing was happening; this says how much longer). Deliberately
+    # REAL exchange hours (9:30am-4:00pm ET, exact per-day incl. early closes), not this
+    # system's own narrower 10:00am-3:30pm ET entry-execution window -- "market open/close"
+    # should mean what it says. US-equity path only (IB) -- MT5 forex trades ~24/5, "market
+    # hours" isn't a meaningful concept there, mirroring _market_open()'s own scoping.
+    from dashboard.execution import broker as _mkt_bk
+    market_txt, market_colour = None, "text-grey-5"
+    if _mkt_bk.is_ib():
+        from dashboard.core import market_calendar
+        ms = market_calendar.market_status()
+        if ms["next_change"]:
+            delta = ms["next_change"] - dt.datetime.now(dt.timezone.utc)
+            market_txt = (("open · closes in " if ms["is_open"] else "closed · opens in ")
+                          + _format_duration(delta))
+            market_colour = "text-green" if ms["is_open"] else "text-grey-5"
 
     bc = service.STATE.get("broker_conn") or {}
     broker_ok = bc.get("ok")
@@ -423,6 +458,23 @@ def health_banner() -> None:
         with ui.row().classes("items-baseline gap-1"):
             ui.label("cheap/llm:").classes("text-xs text-grey-6")
             ui.label(f"{cheap_txt} / {llm_txt}").classes("text-xs text-grey-5")
+        if market_txt:
+            with ui.row().classes("items-baseline gap-1"):
+                ui.label("market:").classes("text-xs text-grey-6")
+                from zoneinfo import ZoneInfo
+                # HKT via a fixed offset, not .astimezone() (system-local) -- matches
+                # analyst/usage_log.py's existing convention (its own HKT constant's
+                # docstring: HKT has no DST, always UTC+8, no zoneinfo/tzdata dependency
+                # needed) rather than trusting the Windows host's local-tz name resolution.
+                _hkt = dt.timezone(dt.timedelta(hours=8))
+                _et = ms["next_change"].astimezone(ZoneInfo("America/New_York"))
+                _hkt_t = ms["next_change"].astimezone(_hkt)
+                ui.label(market_txt).classes(f"text-xs {market_colour}").tooltip(
+                    f"Real NYSE regular hours (not this system's own narrower "
+                    f"10:00am-3:30pm ET entry-execution window) -- "
+                    f"{'closes' if ms['is_open'] else 'opens'} "
+                    f"{_et.strftime('%a %I:%M%p ET')} ({_hkt_t.strftime('%a %I:%M%p HKT')}). "
+                    "Holidays and early-close days are already accounted for.")
         with ui.row().classes("items-baseline gap-1"):
             ui.label("broker:").classes("text-xs text-grey-6")
             ui.label(broker_txt).classes(f"text-xs {broker_colour}")
