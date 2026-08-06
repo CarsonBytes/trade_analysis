@@ -31,6 +31,14 @@ the full project; the honest conclusions:
   gross-exposure cap — added 2026-07-11 after confirming several concurrent near-cap
   positions could otherwise stack past 100%), `DD_HALT_PCT=-13%` (live-only safety net,
   pauses new entries, never touches existing ones).
+- **Parameter freeze, effective 2026-08-06.** The core signal parameters (`SL_ATR_MULT`,
+  `RR_DEFAULT`, `HORIZON_DAYS`, `OVEREXT_HI`/`OVEREXT_LO`) and the live risk/execution
+  parameters above are frozen — a change requires beating the current config on both
+  full-history AND OOS Calmar, at least 30 real trades of forward observation (combined
+  core+sleeve, both paper and live), written up with the numbers, and the user's explicit
+  go-ahead even once all of that checks out. Doesn't apply to bug fixes, new universe
+  additions, or execution/infrastructure changes that don't touch these parameters — the
+  point is preventing low-conviction fiddling, not freezing all improvement. See HANDOFF.md.
 - **Performance, reconciled and bootstrapped (not a bare point estimate):** core-only,
   after-tax (30% US NRA dividend withholding) + cash-yield — **CAGR 6.06%, Calmar 0.887**
   point estimate; 500-draw block-bootstrap (calendar-year resampling, the real portfolio
@@ -87,7 +95,10 @@ the full project; the honest conclusions:
   days (~18 months)**, mean underwater depth just -0.97%. Core-only (no sleeve) is
   meaningfully worse on this dimension too, not just on Calmar: 8.4% of time >5% underwater,
   worst recovery ~34 months — the sleeve's diversification benefit shows up in TIME spent
-  recovering, not only in depth.
+  recovering, not only in depth. **Now also live on the dashboard** (a `drawdown:` row next
+  to `market:` in System Health): tracks days since the account's own deposit-adjusted equity
+  last touched a new high, against this same worst-case reference — a real-time behavioral
+  anchor, not just a static backtest number.
 - **Edge survives aggressive multiple-comparisons correction.** Deflated Sharpe Ratio stays
   **100% even at 82 combined search trials** (49 universe-selection candidates + 18
   exit-method variants + 15 parameter-sweep configs, corrected together).

@@ -5,6 +5,110 @@ Last updated 2026-08-06.
 
 ---
 
+### 🔬 TESTED 2026-08-06: sleeve-specific DD circuit breaker — REJECTED (decisively)
+
+Critic 1's proposal #4: pause NEW sleeve entries once the SLEEVE'S OWN (not the whole
+portfolio's) closed-trade equity DD breaches -10%, resume once it recovers to -5%
+(hysteresis). Premise for testing rather than dismissing outright: 3 prior drawdown/vol-based
+gates (`DD_SCALE`, `--vix-regime`, portfolio-level vol-targeting) were all tested and found
+inert-to-worse, but always at the WHOLE-PORTFOLIO level -- this is scoped narrower (sleeve's
+own P&L gates only the sleeve's own new entries), different enough in scope to be worth
+checking directly rather than assuming the same prior result generalizes.
+
+`dashboard/research/sleeve_dd_gate_test.py`: reproduces `core/sleeve.py`'s exact entry/exit
+logic across all 11 `SLEEVE_UNIVERSE` tickers, merged into one chronological candidate
+stream so the gate can see the sleeve's AGGREGATE running P&L (not per-ticker in isolation).
+Gate uses only already-CLOSED trades' P&L at each candidate's own entry moment (no
+look-ahead, matches this project's existing walk-forward gates e.g. `_class_factor()`).
+
+**Result: rejected, decisively, not just marginally worse like the prior 3 variants.**
+
+| | Full Calmar | OOS Calmar |
+|---|---|---|
+| core+sleeve@10% UNGATED (deployed) | 1.363 | 0.757 |
+| core+sleeve@10% GATED | 0.684 | 0.541 |
+
+Sleeve-only isolated (removes the core's own noise): Calmar 0.825 (ungated) -> 0.181 (gated),
+a ~78% collapse -- CAGR fell from +37.84% to +2.67%, and the gate skipped **822 of 872**
+candidate entries (94%). Root cause is structural, not a tuning-threshold issue: this is a
+MEAN-REVERSION sleeve that buys into oversold dips by design -- it naturally enters during
+exactly the stretches that also look like "the sleeve's own equity is drawing down", so a
+strict DD gate blocks it from doing its job almost entirely, rather than filtering out a
+smaller set of genuinely bad entries. Confirms the a priori skepticism (4th variant of
+"gate exposure on a lagging/coincident P&L signal" in this project's history) and explains
+WHY this failure mode is much more severe than the whole-portfolio DD_SCALE (merely inert) --
+the signal here isn't just lagging, it's actively anti-correlated with what the strategy is
+supposed to be doing. Not adopted. Script kept for the record (matches this project's
+"every finding, adopted or not, gets logged with the numbers" policy).
+
+---
+
+### ⭐ ADOPTED 2026-08-06: parameter freeze policy
+
+User pasted two more critiques following up on the 2026-08-06 drawdown-duration/rate-
+sensitivity work. One (labeled "critic 2" in that turn) was a VERBATIM duplicate of an
+earlier same-day critique already fully verified and backtested (SGOV settlement lag,
+correlation collapse, portfolio vol-scaling, drawdown recovery stats, congestion slippage --
+see the "🔬 2026-08-06: two pasted research critiques" entry above) -- not re-run. The other
+("critic 1") reviewed the UPDATED README/HANDOFF and proposed 5 new, mostly non-backtest
+suggestions (behavioral anchor for the 18mo recovery figure, annual rate checkup, deposits-
+vs-returns visualization, an independent sleeve-specific DD stop-line, and a formal parameter
+freeze). Two of these were built/adopted today; the sleeve-DD-stop-line proposal and the
+deposits-vs-returns chart are open follow-ups, not yet built.
+
+**Adopted, effective 2026-08-06** -- the core signal parameters (`SL_ATR_MULT`,
+`RR_DEFAULT`, `HORIZON_DAYS`, `OVEREXT_HI`/`OVEREXT_LO`) and the live risk/execution
+parameters (`RISK_PER_TRADE`, `ETF_POS_CAP`, `PORTFOLIO_CAP`, `ADX_THRESHOLD`,
+`REENTRY_BUFFER_R`) are frozen at their current values. A change requires:
+
+1. A backtest showing the change beats the current config on **both full-history and OOS**
+   Calmar (the standard already applied to every adopted change in this project).
+2. **At least 30 real trades of forward observation** on the config being replaced --
+   **combined core+sleeve count** (both venues run at once, so this is roughly 1-2 months at
+   current combined trade frequency, not the 6-12 months a core-only count would take).
+3. Applies to **both paper and live** -- paper isn't exempted just because it's cheaper to
+   experiment on; the freeze is about discipline, not capital at risk.
+4. Written down in HANDOFF.md with the numbers, not adopted silently.
+5. **Even once 1-4 all check out, still requires the user's explicit go-ahead before
+   deploying** -- a clean backtest + enough forward trades is necessary but not sufficient;
+   this is not a "ships automatically once the bar is cleared" policy. Matches how every
+   backtest has actually been handled this session: report findings, user decides.
+
+**Does NOT apply to**: bug fixes (correcting something factually wrong -- a miscalculated
+stop, a broken sizing formula, a display bug -- is not "tuning"); new universe/instrument
+additions that don't touch the frozen parameters; execution/infrastructure/dashboard changes
+that don't touch the trading logic itself.
+
+The point is to prevent low-conviction fiddling with parameters that have already been
+extensively tested -- not to freeze all improvement. A change that clears the same bar every
+other adopted change here has cleared is still welcome.
+
+---
+
+### ADDED 2026-08-06: live "days underwater" stat on the dashboard, vs the backtest's own worst case
+
+Direct follow-up to the drawdown-duration finding folded into README earlier today -- a
+"behavioral anchor" so a long flat/underwater stretch on the REAL account reads as "expected,
+within the documented worst case" instead of "something's wrong", rather than only existing
+as a static number in README.
+
+New `BACKTEST_MAX_RECOVERY_DAYS` constant in `app.py` (~526 calendar days, converted from
+`drawdown_time_stats.py`'s 376 TRADING days via x7/5 so it's directly comparable to the live
+dashboard's own calendar-time tracking -- disclosed as the same simpler additive-blend
+methodology as `full_live_config_retest.py`, not byte-for-byte the same method
+`BACKTEST_MAX_DD_PCT` was measured with). New `drawdown:` row in `health_banner()`'s System
+Health strip, next to the `market:` countdown: walks `paper.drawdown_series()` backward from
+the latest snapshot to the most recent "at a new high" point, shows either "at new high"
+(green) or "Nd underwater (record: ~526d)" (grey/orange/red by proximity to the record). Falls
+back honestly (tooltip-disclosed) if tracked history never shows an earlier peak -- the
+displayed figure is then a lower bound, not a confirmed episode start.
+
+Verified live on both instances: renders correctly next to `market:`, both currently show
+"0d underwater" (a very small, very recent dip, not a bug -- confirmed by the surrounding
+system state). Full suite: 166 passed. Redeployed both instances.
+
+---
+
 ### ADDED 2026-08-06: paper-account disclaimer, placed for legal conspicuousness not just presence
 
 User asked for disclaimer text to avoid legal issues on the paper account specifically (not

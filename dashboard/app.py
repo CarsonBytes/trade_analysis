@@ -199,6 +199,17 @@ BACKTEST_SIGNAL_FREQ_WK = 0.7
 # changes again (a new gate variant, a pos_cap/risk change, a new universe member, etc.).
 BACKTEST_MAX_DD_PCT = -8.83
 
+# ADDED 2026-08-06, user-requested (a "behavioral anchor" for the worst-case recovery wait):
+# from dashboard/research/drawdown_time_stats.py's "core+gate+sleeve@10% (deployed config)"
+# full-history run -- 376 TRADING days, trough to next new equity high. NOTE: that script
+# uses the SAME simpler additive-blend methodology as full_live_config_retest.py, not the
+# byte-for-byte joint-sizing method BACKTEST_MAX_DD_PCT (-8.83%) above was measured with --
+# directionally comparable, not a like-for-like reproduction (see that script's own
+# docstring for why). Converted trading days -> CALENDAR days (x7/5) so it's directly
+# comparable to the live dashboard's own days-underwater count below, which is measured in
+# real elapsed calendar time (hist timestamps), not trading days.
+BACKTEST_MAX_RECOVERY_DAYS = round(376 * 7 / 5)   # ~526 calendar days, ~17-18 months
+
 
 # ---- refreshable panels ----------------------------------------------------
 
@@ -400,6 +411,50 @@ def health_banner() -> None:
                           + _format_duration(delta))
             market_colour = "text-green" if ms["is_open"] else "text-grey-5"
 
+    # ADDED 2026-08-06, user-requested "behavioral anchor": how many days into the CURRENT
+    # drawdown (if any), vs the historical worst case (BACKTEST_MAX_RECOVERY_DAYS above) -- so
+    # a long flat/underwater stretch reads as "expected, within the documented worst case"
+    # instead of "the system might be broken", the exact failure of nerve trend-following's
+    # own literature warns is the real risk (not the drawdown itself). Same hist/flows source
+    # portfolio_panel()'s own drawdown chart uses (paper.drawdown_series()), fetched
+    # independently here since health_banner() renders earlier on the page and doesn't
+    # otherwise share state with that later panel.
+    from dashboard.core import paper as _dd_paper, store as _dd_store
+    _hist, _ = _dd_store.cache_get("equity_history")
+    _hist = _hist or []
+    _flows, _ = _dd_store.cache_get("cash_flows")
+    dd_dur_txt, dd_dur_colour, dd_dur_tooltip = None, "text-grey-5", ""
+    if len(_hist) >= 2:
+        _dd_series = _dd_paper.drawdown_series(_hist, _flows)
+        _cur_dd = _dd_series[-1] if _dd_series else 0.0
+        if _cur_dd >= -0.05:      # essentially at/within noise of the all-time peak
+            dd_dur_txt, dd_dur_colour = "at new high", "text-green"
+            dd_dur_tooltip = ("Deposit-adjusted equity is at (or within 0.05% of) its "
+                              "all-time peak -- no active drawdown right now.")
+        else:
+            # walk backward to the most recent "at a new high" point in TRACKED history --
+            # if tracking started mid-drawdown, this understates the true age (the real peak
+            # predates what's tracked), disclosed in the tooltip rather than silently assumed.
+            _peak_i = 0
+            _found_peak = False
+            for _i in range(len(_dd_series) - 1, -1, -1):
+                if _dd_series[_i] >= -0.05:
+                    _peak_i = _i; _found_peak = True
+                    break
+            _days = (_hist[-1][0] - _hist[_peak_i][0]) / 86400.0
+            dd_dur_colour = ("text-red" if _days >= BACKTEST_MAX_RECOVERY_DAYS * 0.8 else
+                             "text-orange" if _days >= 30 else "text-grey-5")
+            dd_dur_txt = f"{_days:.0f}d underwater (record: ~{BACKTEST_MAX_RECOVERY_DAYS}d)"
+            dd_dur_tooltip = (
+                f"Days since the deposit-adjusted equity curve last touched its all-time "
+                f"peak. The backtest's own worst case for this exact config (core+gate+"
+                f"sleeve@10%, full 30y history) was ~{BACKTEST_MAX_RECOVERY_DAYS} calendar "
+                "days (~18 months) trough-to-new-high -- staying under that isn't a promise "
+                "it can't take longer, but it's the documented reference point, not a guess."
+                + ("" if _found_peak else " NOTE: tracked history never shows an earlier new "
+                                          "high, so this is a lower bound -- the real peak "
+                                          "may predate when tracking began."))
+
     bc = service.STATE.get("broker_conn") or {}
     broker_ok = bc.get("ok")
     broker_colour = "text-green" if broker_ok else "text-orange" if bc else "text-red"
@@ -475,6 +530,10 @@ def health_banner() -> None:
                     f"{'closes' if ms['is_open'] else 'opens'} "
                     f"{_et.strftime('%a %I:%M%p ET')} ({_hkt_t.strftime('%a %I:%M%p HKT')}). "
                     "Holidays and early-close days are already accounted for.")
+        if dd_dur_txt:
+            with ui.row().classes("items-baseline gap-1"):
+                ui.label("drawdown:").classes("text-xs text-grey-6")
+                ui.label(dd_dur_txt).classes(f"text-xs {dd_dur_colour}").tooltip(dd_dur_tooltip)
         with ui.row().classes("items-baseline gap-1"):
             ui.label("broker:").classes("text-xs text-grey-6")
             ui.label(broker_txt).classes(f"text-xs {broker_colour}")
