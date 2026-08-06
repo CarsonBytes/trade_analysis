@@ -2619,6 +2619,21 @@ def _open_info_modal() -> None:
             ui.label("Auto-trades qualifying signals on the IBKR paper account "
                      "(simulated fills, no real money).")\
                 .classes("text-sm text-grey-7")
+            # ADDED 2026-08-06: fuller disclaimer, paper only (see the short always-visible
+            # version on the main page for why placement matters -- this is the supplementary
+            # detail for anyone who opens this modal, not the primary carrier of the point).
+            with ui.column().classes("gap-1 bg-orange-1 rounded p-2"):
+                ui.label("Disclaimer").classes("text-xs font-bold text-orange-9")
+                ui.label(
+                    "Hypothetical/simulated performance has inherent limitations and differs "
+                    "from real trading in ways impossible to fully account for (real "
+                    "liquidity, execution slippage, behavioral factors). No representation is "
+                    "made that any account will achieve similar results. This is a personal "
+                    "research project, not operated by a licensed investment adviser or "
+                    "broker-dealer; its logic is automated, in part LLM-assisted, and may "
+                    "contain errors or bugs. Provided as-is, without warranty of accuracy. "
+                    "Past performance, real or simulated, does not indicate future results.")\
+                    .classes("text-xs text-orange-8")
 
         ui.separator()
         clock_row()
@@ -2757,6 +2772,18 @@ def main_page() -> None:
         # on every visit -- the sentence is redundant with the "● LIVE — REAL MONEY" /
         # "● PAPER" badge right above it, and the clocks are rarely the first thing anyone
         # needs. Both moved into the ⓘ info modal next to the title (_open_info_modal()).
+
+        # ADDED 2026-08-06, PAPER ONLY (user-requested; live intentionally excluded): short
+        # legal/informational disclaimer, ALWAYS visible (not behind the info-modal click) --
+        # placement matters for a disclaimer to actually count: it needs to be unavoidable on
+        # page load and sit near the numbers it's disclaiming, not buried in a footer (easy to
+        # scroll past) or a tab (most visitors never click it). The fuller version lives in
+        # _open_info_modal() for anyone who wants the detail; this line carries the actual
+        # legal weight since it's the one nobody can miss.
+        if not _live:
+            ui.label("Paper trading — simulated fills, no real capital at risk. Personal "
+                     "research project, not investment advice or a solicitation to buy or "
+                     "sell any security.").classes("text-xs text-orange-8 bg-orange-1 rounded px-2 py-1")
 
         # 2026-07-23: this account-health block used to render BELOW the settings row --
         # meaning the thing you check on every visit (is my real money okay) sat under a

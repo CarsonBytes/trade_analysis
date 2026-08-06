@@ -5,6 +5,43 @@ Last updated 2026-08-06.
 
 ---
 
+### ADDED 2026-08-06: paper-account disclaimer, placed for legal conspicuousness not just presence
+
+User asked for disclaimer text to avoid legal issues on the paper account specifically (not
+live -- explicit user instruction to exclude live). Before drafting, discussed WHERE it should
+go: a disclaimer is only as effective as whether a visitor actually encounters it -- buried
+placements (footer, a separate tab) are weak because most visitors never see them, which
+undermines the "the user was reasonably informed" purpose a disclaimer exists for in the first
+place. Recommended an ALWAYS-VISIBLE inline section near the top of the page, proximate to the
+actual performance figures it's disclaiming, over a footer or tab.
+
+**Found a real existing gap while researching placement**: the dashboard's only prior
+disclaimer-adjacent text ("simulated fills, no real money") was already in the WEAKEST
+position possible -- inside `_open_info_modal()`, which only renders on an explicit click of
+the small ⓘ icon. Functionally equivalent to a tab: opt-in, easy to never see.
+
+**Implemented, paper-only** (`dashboard/app.py::main_page()`):
+- Short version, ALWAYS visible, right after the "● PAPER"/mode badges, before any other
+  content: *"Paper trading — simulated fills, no real capital at risk. Personal research
+  project, not investment advice or a solicitation to buy or sell any security."* This is the
+  version that actually carries the legal weight, since it's unavoidable on page load.
+- Fuller version added to `_open_info_modal()`'s paper branch (supplementary detail for
+  anyone who opens it, not the primary carrier) -- covers hypothetical-performance
+  limitations, not-a-licensed-adviser, automated/may-contain-errors, no-warranty, and
+  past-performance framing.
+- Live branch deliberately left untouched (explicit user instruction) -- its existing
+  "REAL MONEY... verify positions directly in IBKR" warning stays as the only live-side text.
+
+Verified live in the browser: paper shows the short disclaimer directly under the badges;
+live shows nothing beyond its existing warning line, confirming no live-side change occurred.
+Full suite: 166 passed. Redeployed both instances (shared codebase).
+
+**Not a substitute for real legal review** if this page becomes more public-facing or
+commercial (e.g. linked from the portfolio site) -- this is reasonable good-faith boilerplate
+for a personal project, not jurisdiction-specific (SEC/CFTC/SFC) compliance language.
+
+---
+
 ### 🔬 2026-08-06: two pasted research critiques (infrastructure/risk-measurement + joint-parameter/regime-adaptation) — premises verified, justified items backtested
 
 User pasted two long Chinese-language critiques proposing 9 total research directions (6 from
