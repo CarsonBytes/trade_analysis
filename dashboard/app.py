@@ -442,7 +442,13 @@ def health_banner() -> None:
                     _peak_i = _i; _found_peak = True
                     break
             _days = (_hist[-1][0] - _hist[_peak_i][0]) / 86400.0
-            dd_dur_colour = ("text-red" if _days >= BACKTEST_MAX_RECOVERY_DAYS * 0.8 else
+            # ADJUSTED 2026-08-06: threshold moved to 60% of the record (was an arbitrary
+            # 80%/30d split) per a user-reviewed critique's specific reasoning -- 60% is
+            # early enough to prompt a REVIEW (not an automatic size cut, see the "does NOT
+            # apply" list in HANDOFF's parameter-freeze entry) while still well short of the
+            # record, giving genuine lead time rather than only flagging once already close.
+            _dd_alert_days = BACKTEST_MAX_RECOVERY_DAYS * 0.6
+            dd_dur_colour = ("text-red" if _days >= _dd_alert_days else
                              "text-orange" if _days >= 30 else "text-grey-5")
             dd_dur_txt = f"{_days:.0f}d underwater (record: ~{BACKTEST_MAX_RECOVERY_DAYS}d)"
             dd_dur_tooltip = (
@@ -450,10 +456,38 @@ def health_banner() -> None:
                 f"peak. The backtest's own worst case for this exact config (core+gate+"
                 f"sleeve@10%, full 30y history) was ~{BACKTEST_MAX_RECOVERY_DAYS} calendar "
                 "days (~18 months) trough-to-new-high -- staying under that isn't a promise "
-                "it can't take longer, but it's the documented reference point, not a guess."
+                "it can't take longer, but it's the documented reference point, not a guess. "
+                f"Flagged red past {_dd_alert_days:.0f}d (60% of the record) as a prompt to "
+                "review, not an automatic size cut -- see the parameter-freeze policy."
                 + ("" if _found_peak else " NOTE: tracked history never shows an earlier new "
                                           "high, so this is a lower bound -- the real peak "
                                           "may predate when tracking began."))
+
+    # ADDED 2026-08-06, user-requested: a warning when filled + pending exposure is
+    # approaching PORTFOLIO_CAP, so the pressure is visible BEFORE it hits the hard gate
+    # (which just silently scales/skips new entries) rather than only being discoverable by
+    # noticing several "retrying" pending cards at once. Reuses the SAME cached
+    # account_summary() read active_panel()'s own eq/room already use -- calling this a
+    # second time here doesn't add a broker round-trip (ib_client.account_summary() has its
+    # own short TTL cache, confirmed by reading it directly), just reads the shared result.
+    from dashboard.execution import broker as _cap_bk
+    cap_txt, cap_colour, cap_tooltip = None, "text-grey-5", ""
+    if _cap_bk.is_ib():
+        _cap_eq = _cap_bk.equity_usd()
+        _cap_room = _cap_bk.portfolio_room_usd()
+        if _cap_eq and _cap_room is not None:
+            _cap_total = _cap_eq * float(os.environ.get("PORTFOLIO_CAP", "1.0"))
+            _cap_used_pct = (1 - _cap_room / _cap_total) if _cap_total > 0 else 0.0
+            if _cap_used_pct >= 0.90:
+                cap_colour = "text-red" if _cap_used_pct >= 0.98 else "text-orange"
+                cap_txt = f"{_cap_used_pct*100:.0f}% of PORTFOLIO_CAP committed"
+                cap_tooltip = (
+                    "Filled positions (GrossPositionValue) plus pending (not-yet-filled) "
+                    "broker orders, as a fraction of equity x PORTFOLIO_CAP. Only ~"
+                    f"USD {_cap_room:,.0f} of room remains -- new signals will scale down or "
+                    "get held back (see Active Trades' 'retrying' cards) until room frees up "
+                    "or the cap changes. Informational; the hard gate already enforces this "
+                    "regardless of whether you see this warning.")
 
     bc = service.STATE.get("broker_conn") or {}
     broker_ok = bc.get("ok")
@@ -534,6 +568,10 @@ def health_banner() -> None:
             with ui.row().classes("items-baseline gap-1"):
                 ui.label("drawdown:").classes("text-xs text-grey-6")
                 ui.label(dd_dur_txt).classes(f"text-xs {dd_dur_colour}").tooltip(dd_dur_tooltip)
+        if cap_txt:
+            with ui.row().classes("items-baseline gap-1"):
+                ui.label("capacity:").classes("text-xs text-grey-6")
+                ui.label(cap_txt).classes(f"text-xs {cap_colour}").tooltip(cap_tooltip)
         with ui.row().classes("items-baseline gap-1"):
             ui.label("broker:").classes("text-xs text-grey-6")
             ui.label(broker_txt).classes(f"text-xs {broker_colour}")

@@ -5,6 +5,67 @@ Last updated 2026-08-06.
 
 ---
 
+### ADDED 2026-08-06: PORTFOLIO_CAP capacity warning; drawdown alert threshold moved to 60% of record; another hung-process incident (paper, unrelated to this change)
+
+User pasted a follow-up critique reviewing the day's earlier changes (parameter freeze,
+sleeve-DD-gate rejection, drawdown-duration stat, paper disclaimer) and proposing further
+practical improvements within the freeze's constraints. Verified before building:
+
+- **Commission-viability floor "already dynamic" claim**: imprecise as stated.
+  `MIN_VIABLE_COMMISSION_PCT`'s cost formula (`COMM_PER_SHARE`/`COMM_MIN`/`COMM_MAX_PCT`) is a
+  FIXED snapshot of IBKR's Fixed-plan schedule, not self-updating -- the guard's real-world
+  behavior improves as equity grows because realized risk per trade grows too (diluting
+  commission as a %), not because the code re-fetches a live rate schedule. Worth periodically
+  re-verifying IBKR's actual current schedule hasn't changed, but that's a manual check, not
+  a code gap.
+- **UCITS/estate-tax framing**: verified accurate and already extensively discussed
+  (HANDOFF's "$60k US estate-tax line... ~470K HKD/month-12" entries) -- not fabricated, and
+  correctly deprioritized (live NAV ~$16.9k is well below the $60k threshold).
+- **Fill-quality/slippage ledger**: checked whether this could be verified RETROACTIVELY
+  (real historical fills) rather than only built as new forward-logging infrastructure.
+  Confirmed empirically it can't, cheaply: `ib.fills()` returned 0 results on a fresh
+  diagnostic connection (client ID 9) -- IBKR's local fills cache is session-scoped, only
+  populated by fills the CURRENT client session has been subscribed to since they happened.
+  `reqExecutionsAsync()` with a 30-day filter also returned 0 -- IBKR's execution-report API
+  scopes visibility per API client by default (only sees orders THAT client placed), and the
+  diagnostic's client ID had placed nothing. Getting genuine account-wide history safely
+  would need either the master client (clientId=0, untested risk) or reusing the running
+  dashboard's own client ID (would collide with the live connection -- not attempted). NOT
+  built -- this remains a real, open idea, but requires NEW forward logging inside the
+  already-connected live process, not a quick backtest; flagged as a future addition if
+  wanted, not implemented today.
+
+**Built** (`dashboard/app.py::health_banner()`):
+- New `capacity:` row -- warns when filled + pending exposure reaches 90% of
+  `PORTFOLIO_CAP`, using the SAME cached `account_summary()` read `active_panel()` already
+  uses (confirmed no extra broker round-trip). Verified live: paper showed 97% committed,
+  live showed 100% -- both genuinely at-capacity right now, not test data.
+- `drawdown:` row's alert threshold moved from an arbitrary 80%-of-record/30-day split to
+  **60% of the record** (~316 days), per the critique's specific reasoning: early enough to
+  prompt a review, not just fire once already close to the worst case.
+
+**Real incident during redeploy, unrelated to this change**: paper's dashboard process hung
+completely (port bound, process alive, but every HTTP request timed out, even at 70s).
+Isolated the cause methodically before assuming: reverted app.py to the last commit and
+redeployed -- STILL hung, proving this session's new code wasn't the cause (live, meanwhile,
+kept running the new code successfully the whole time, having never needed restarting).
+`Stop-Process -Force` also failed to kill the hung PID -- matches this project's own
+documented "hung process survives Stop-Process" pattern. Used the same WMI
+`Invoke-CimMethod -MethodName Terminate` approach `app.py`'s own gateway-restart button
+already uses for exactly this failure class, targeted at the stuck dashboard process instead
+of the gateway this time -- worked immediately, fresh process came up healthy. Root cause
+(why paper's process wedged) not further investigated -- out of scope for this turn, but
+worth noting this is now a recurring failure MODE across multiple different processes in
+this system (gateway, dashboard app, from different root causes each time), not a single
+fixed bug.
+
+Full suite: 166 passed (unchanged by this incident -- confirmed via the isolation test
+above). Both instances redeployed and verified live.
+
+---
+
+---
+
 ### 🔬 TESTED 2026-08-06: sleeve-specific DD circuit breaker — REJECTED (decisively)
 
 Critic 1's proposal #4: pause NEW sleeve entries once the SLEEVE'S OWN (not the whole
