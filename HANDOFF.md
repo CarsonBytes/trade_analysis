@@ -5,6 +5,73 @@ Last updated 2026-08-06.
 
 ---
 
+### 🔬 TESTED 2026-08-06: adding short exposure via inverse ETFs — REJECTED (SH/PSQ never fire; TBT/GLL hurt)
+
+User pasted a critique proposing short exposure be added to shorten the 526-day worst-case
+recovery period. Correctly rejects naked shorting outright (unbounded loss, borrow cost,
+squeeze risk) and options (README already rejected all option sleeves). Proposes "Option A":
+add inverse ETFs (SH, PSQ, TBT, GLL) as ordinary NEW long-only universe members -- buying SH
+when SH itself trends up is economically shorting SPY, with bounded risk (can only lose the
+notional, same as any long position), zero borrow cost, and the exact same 1.5xATR/3:1RR/1%
+engine unmodified -- correctly falls under the parameter freeze's "new universe/instrument
+addition" exception, not a core-parameter change.
+
+**Premise correction found before testing**: the critique's own 4-ticker list mixes two
+structurally different products without flagging it. Verified directly (2y daily beta vs
+each named underlying): SH beta=-0.97, PSQ beta=-0.99 (genuine 1x inverse) -- but **TBT
+beta=-1.99, GLL beta=-1.98 (2x LEVERAGED inverse)**, exactly the product class this project
+already tested and rejected for the sleeve ("real product price history... textbook decay...
+Calmar worse than the 1x sleeve at every weight, IS and OOS, no exceptions" -- README). Also
+disclosed: none of the 4 have this project's usual ~30-32y history (SH/PSQ launched 2006,
+~20y; TBT launched May 2008 mid-GFC with zero pre-crisis history, ~18y; GLL launched Dec
+2008, ~18y).
+
+`dashboard/research/inverse_etf_universe_test.py`: added SH/PSQ and TBT/GLL to the 22-ETF
+universe in 2 SEPARATE tiers (so a leverage-decay effect, if present, doesn't get laundered
+into one blended "just add inverse ETFs" headline number), ran the real `_signals()`/
+`_portfolio()` pipeline unmodified.
+
+**Result: decisive, more so than expected.**
+
+| | Full Calmar | OOS Calmar |
+|---|---|---|
+| Baseline (22 ETFs) | 0.599 | 1.349 |
+| + SH/PSQ (1x inverse) | 0.599 (IDENTICAL) | 1.349 (IDENTICAL) |
+| + SH/PSQ + TBT/GLL (2x) | 0.529 | 0.918 |
+
+**SH and PSQ generated ZERO qualifying signals across 20 years of real data** -- not a bad
+result, a complete non-event. Root cause, confirmed by the mechanism: the core engine only
+enters long on a genuine sustained weekly UPTREND; the inverse of a secularly-rising index is,
+by mathematical construction, in a near-permanent downtrend, so it can never produce the setup
+this system looks for. This generalizes the ALREADY-DOCUMENTED "dip-sell sleeve... fights
+secular positive drift" finding (found for the sleeve, 2026-07-31) to the core engine too, and
+is the cleanest possible confirmation of the critique's own cited warning -- via an actual
+backtest, not just the a priori reasoning both the critique and this note already agreed on.
+
+TBT/GLL DID fire (40 trades, ~18y) and made the book meaningfully worse, especially OOS
+(Calmar 1.349->0.918, ~32% relative decline) -- consistent with the a priori 2x-leverage-decay
+concern, now empirically confirmed for this specific pair of products too.
+
+**Rejected outright.** Also flagged a real internal inconsistency in the critique's proposed
+execution-layer safety mechanisms: the ex-dividend-trap and "2% intraday force-liquidate"
+circuit breaker are both naked-short defenses (unlimited-loss risk), but Option A as correctly
+designed (buying bounded-risk inverse ETFs) never has that risk profile in the first place --
+those defenses solve a problem this specific proposal doesn't have.
+
+**Option B (macro hedge pairs, e.g. long TLT/short SHY)** -- not built. This project's
+existing pairs/stat-arb finding (DSR <=17%, a serious overfitting red flag) already covers the
+core concern; the critique's "weekly macro, not daily technical" distinction is real but
+doesn't obviously escape that prior, and a genuine dollar-neutral pairs execution wrapper is
+substantial new engineering. Given Option A's clean rejection already answers the motivating
+question, not worth the build effort right now.
+
+**Option C (options tail hedge)** -- critique's own "distant future, after ~5x asset growth"
+framing agreed with; no action.
+
+---
+
+---
+
 ### ADDED 2026-08-06: PORTFOLIO_CAP capacity warning; drawdown alert threshold moved to 60% of record; another hung-process incident (paper, unrelated to this change)
 
 User pasted a follow-up critique reviewing the day's earlier changes (parameter freeze,
