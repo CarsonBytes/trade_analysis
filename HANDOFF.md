@@ -5,6 +5,62 @@ Last updated 2026-08-06.
 
 ---
 
+### 🔬 TESTED 2026-08-06: agricultural commodities + intl/EM bonds — REJECTED (all 4, no exceptions); SGOV threshold lowered
+
+Follow-up critique (post inverse-ETF rejection) proposing 3 directions: universe breadth
+(CORN/WEAT/JO agricultural + BNDX intl bonds + LEMB EM local bonds), an execution-layer
+"patience limit order" idea, and lowering `CASH_SWEEP_MIN_NAV_USD`.
+
+**Breadth expansion -- rejected, all 4 tested candidates.** `JO` (coffee ETN) confirmed
+DELISTED (data ends 2023-07-17) -- excluded before testing, not tradable regardless of
+performance. Prior-art check: `LEMB` is economically close to `EMLC`, already tested +
+rejected in this project's Batch-3 screen (expR -0.261). `dashboard/research/
+breadth_expansion_test.py`: 2-stage screen (cheap isolation stats first, matching this
+project's own Batch-3/4 screen methodology) --
+
+| Ticker | class | n | win% | expR | verdict |
+|---|---|---|---|---|---|
+| CORN | commodity | 12 | 25% | -0.239 | reject |
+| WEAT | commodity | 14 | 43% | -0.001 | reject |
+| BNDX | intl_rate | 6 | 33% | -0.127 | reject |
+| LEMB | em_local_debt | 18 | 39% | -0.031 | reject |
+
+All 4 negative -- none advanced to the full portfolio Calmar comparison. LEMB's rejection
+directly confirms the EMLC prior. The 22-ETF pool appears genuinely exhausted for these
+specific classes (agricultural commodities, intl/EM bonds), not just under-sampled.
+
+**`CASH_SWEEP_MIN_NAV_USD` lowered 75,000 -> 10,000** (`ib_exec.py`), after confirming with
+the user first (real-money account setting). The original "T+1 settlement friction isn't
+worth it" reasoning rests on a premise this session already found doesn't hold for this
+account (margin buying power covers new entries regardless of SGOV settlement timing --
+see the earlier SGOV-settlement-lag rejection entry). Checked live's ACTUAL current state
+before treating the critique's "$215/year" estimate as urgent: live is currently at 100% of
+`PORTFOLIO_CAP` committed, cash buffer ~HKD -18 (essentially zero) -- there's almost nothing
+idle to sweep right now regardless of the threshold, so the dollar benefit is real but not as
+immediate as the critique implied; the principle (idle cash should earn yield when it exists,
+between a position closing and the next signal deploying it) is still sound. Kept at $10k,
+not $0 -- `CASH_SWEEP_MIN_USD=1,500` is a SEPARATE anti-churn delta-guard, not a floor on
+whether sweeping is worth it at all; $10k stays comfortably past the point SGOV's yield
+clearly outweighs residual friction without assuming the original premise is FULLY gone
+rather than just weakened. Paper is already well above both old and new thresholds (~$132k
+NAV) -- unaffected either way. Full suite: 166 passed. Redeployed both instances (hit and
+cleared the same hung-PID pattern from earlier today via the WMI hard-kill, on live this
+time).
+
+**Execution-layer "patience limit order" proposal -- design only, NOT built this turn.**
+Idea: place ETF entries as a LIMIT order (ask -1 tick for a buy) instead of MKT, with a
+15-30min timeout that cancels and falls back to a real MKT order if unfilled -- correctly
+scoped by the critique to PAPER ONLY initially (collect real fill-price data over ~30 trades
+before considering live). Deliberately not built without user review first: this touches
+actual order-placement state machinery (limit -> timeout -> cancel -> market fallback,
+avoiding a double-order or a silently-stuck limit order), a materially higher-risk category
+than the dashboard-stat/config changes made elsewhere today, even scoped to paper only. See
+next session/user response for the design proposal and go-ahead.
+
+---
+
+---
+
 ### 🔬 TESTED 2026-08-06: adding short exposure via inverse ETFs — REJECTED (SH/PSQ never fire; TBT/GLL hurt)
 
 User pasted a critique proposing short exposure be added to shorten the 526-day worst-case

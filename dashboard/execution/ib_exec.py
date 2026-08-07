@@ -1245,9 +1245,21 @@ SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MK
 CASH_SWEEP_TARGET = 0.60      # park 60% of (idle cash + SGOV); keep 40% buffer for the strategy
 CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas (anti-churn ONLY -- not a
                               # substitute for CASH_SWEEP_MIN_NAV_USD below; see 2026-07-08 HANDOFF)
-CASH_SWEEP_MIN_NAV_USD = 75_000   # per the ADOPTED PLAN: T+1 settlement friction isn't worth it
-                                  # on a tiny contribution-fed account -- skip sweeping ENTIRELY
-                                  # below this NAV, regardless of the delta-size check above
+CASH_SWEEP_MIN_NAV_USD = 10_000   # LOWERED 2026-08-06 (was 75_000): the ORIGINAL "T+1
+                                  # settlement friction isn't worth it" reasoning turned out
+                                  # to rest on a premise that doesn't hold for this account --
+                                  # confirmed 2026-08-06 that this is a MARGIN account (buying
+                                  # power ~5.6x NLV), so a new ETF entry does NOT actually wait
+                                  # for SGOV to settle; margin covers it immediately regardless
+                                  # of SGOV timing (see HANDOFF's SGOV-settlement-lag rejection
+                                  # entry). Kept well above $0 (not fully removed) since
+                                  # CASH_SWEEP_MIN_USD above is only an anti-CHURN guard (skips
+                                  # a rebalance under a $1,500 delta), not a floor on whether
+                                  # sweeping is worth doing at all on a genuinely small account
+                                  # -- $10k is comfortably past the point where SGOV's ~4.3%
+                                  # yield on the swept portion clearly outweighs any residual
+                                  # operational friction, without assuming the ORIGINAL $75k
+                                  # figure's premise is fully gone rather than just weakened.
 
 
 def _sweep_on() -> bool:
