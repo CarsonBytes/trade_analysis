@@ -1,0 +1,81 @@
+services:
+  dashboard:
+    build: .
+    container_name: quant-dashboard-docker
+    restart: unless-stopped
+    environment:
+      - BROKER=ib
+      - UNIVERSE=etf
+      - DASH_FIXED_MODE=paper
+      - DASH_PORT=8090
+      # Absolute path -> pathlib's `parents[1] / DASH_DB_NAME` resolves to exactly this,
+      # discarding the base (standard pathlib join-with-absolute-path behavior). Keeps this
+      # deployment's data in the container's own volume, never anywhere near the native
+      # Windows deployment's dashboard/dashboard.db or dashboard_live.db.
+      - DASH_DB_NAME=/data/dashboard_docker.db
+      - IB_HOST=ib-gateway
+      - IB_PORT=4002
+      # Distinct from the native deployment's clientId=7 (paper) / 21 (live) -- avoids any
+      # collision if this container and the native paper Gateway ever run against the IB API
+      # at the same time.
+      - IB_CLIENT_ID=31
+    ports:
+      # Host 18080 -> container 8090, deliberately far from the native deployment's
+      # 8080 (paper) / 8081 (live) -- fully parallel, nothing to collide with.
+      - "18080:8090"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - quant_docker_data:/data
+      - quant_docker_logs:/app/logs
+    depends_on:
+      - ib-gateway
+
+  # SCAFFOLDING ONLY for this pass -- TWS_USERID/TWS_PASSWORD are intentionally blank.
+  # IBKR allows only ONE active session per username across all services (confirmed via
+  # research, not assumed) -- a real login here would conflict with the native Windows paper
+  # Gateway already connected on port 4002. This proves the container/networking/IBC
+  # mechanics work (Xvfb, the gateway process starting, ports publishing correctly) without
+  # ever attempting real authentication. Filling in real credentials is a deliberate, separate
+  # decision for later (e.g. a dedicated second paper username, or a scheduled-non-overlap
+  # arrangement with the native Gateway) -- not something to do casually given the shared-
+  # session constraint.
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: quant-ibgateway-docker
+    restart: unless-stopped
+    environment:
+      - TWS_USERID=
+      - TWS_PASSWORD=
+      - TRADING_MODE=paper
+      - VNC_SERVER_PASSWORD=
+      - TWOFA_TIMEOUT_ACTION=restart
+    ports:
+      # Host 14002 purely for my own debugging (docker/wsl2-local only, not published
+      # further) -- the dashboard service reaches it via the compose network's internal DNS
+      # (ib-gateway:4002), this host mapping is optional convenience, not load-bearing.
+      - "127.0.0.1:14002:4002"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+volumes:
+  quant_docker_data:
+  quant_docker_logs:
+
+networks:
+  default:
+    # Distinct from study-platform's 172.28.0.0/16 (this machine's other WSL2 Docker project)
+    # -- explicit subnet sidesteps Docker's auto-allocated pool running out after repeated
+    # network create/destroy cycles during iteration.
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+    driver_opts:
+      # WSL2's real uplink (eth0) is MTU 1380 here (confirmed via `ip link show eth0`) but
+      # Docker's bridge defaults to 1500 -- small packets (TCP handshake, DNS) succeed, larger
+      # ones (a TLS ClientHello, e.g. yfinance/OpenAI calls) get silently blackholed since
+      # PMTUD's "frag needed" ICMP replies don't make it back. Matching the bridge MTU to the
+      # real uplink avoids generating oversized packets in the first place.
+      com.docker.network.driver.mtu: "1380"

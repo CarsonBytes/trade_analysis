@@ -1,0 +1,11 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+dashboard/dashboard.db
+dashboard/dashboard_live.db
+dashboard/dashboard_mode.db
+logs/
+*.db
+.env
+DashboardAppLive-recovery.xml
