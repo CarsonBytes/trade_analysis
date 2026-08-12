@@ -42,7 +42,11 @@ services:
   # arrangement with the native Gateway) -- not something to do casually given the shared-
   # session constraint.
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
+    # Digest-pinned (2026-08-12), not :stable -- :stable is a floating tag by the image's own
+    # convention, so the SAME quant commit could deploy a different Gateway build depending on
+    # what gnzsnz published that week. This is the exact digest already verified working
+    # (Xvfb+IBC start correctly, reach the login dialog) -- bump deliberately, not by drift.
+    image: ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
     container_name: quant-ibgateway-docker
     restart: unless-stopped
     environment:

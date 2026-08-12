@@ -1,9 +1,413 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-06.
+Last updated 2026-08-12.
 
 ---
+
+### 🚀 ADDED 2026-08-12 (same day, later): deterministic pre-push auto-deploy for the WSL2/Docker parallel deployment
+
+User develops mainly on the native Windows machine and wants pushes to land in the WSL2/Docker
+deployment (see the earlier 2026-08-12 entry) fast, without manually re-running the
+rsync+build+up cycle each time -- asked for a pre-push hook, explicitly "deterministic."
+
+**Design, given the explicit "push asap" constraint:** the hook must NEVER block or slow down
+`git push` itself -- a Docker rebuild can take 10s-3min. `.githooks/pre-push` (tracked in git,
+unlike `.git/hooks/` which is per-clone and never version-controlled -- `git config
+core.hooksPath .githooks` wires it up, done for this clone already) does the absolute minimum:
+detect a push to `refs/heads/master`, hand the actual deploy to a genuinely independent OS
+process via `Start-Process` (not a backgrounded bash job -- Git-Bash's MSYS process model isn't
+reliably safe from tearing down a `&`-backgrounded child when the short-lived hook script exits
+a moment later), then exit. Measured hook overhead: ~1.4s. A failed deploy does NOT fail the
+push -- "can I save my code" and "did the parallel deployment redeploy cleanly" are deliberately
+independent concerns.
+
+**What "deterministic" means here, concretely (not just an adjective):**
+1. **Same commit -> same deployed image, always.** `Dockerfile` and `docker-compose.yml` were
+   both floating on `python:3.11-slim`, `ghcr.io/astral-sh/uv:latest`, and `ghcr.io/gnzsnz/
+   ib-gateway:stable` -- any of these could resolve to a different upstream image between two
+   otherwise-identical pushes. All three are now digest-pinned (`@sha256:...`) to the exact
+   images already verified working earlier today. Bumping any of them is now a deliberate,
+   visible diff, not silent drift.
+2. **Same fixed step sequence every time, no conditional branching.** `scripts/
+   wsl2-docker-deploy.sh` (tracked, independently testable without a real push -- run directly:
+   `wsl -d Ubuntu -- bash /mnt/d/quant/scripts/wsl2-docker-deploy.sh`) always does: rsync
+   --delete (Windows source -> WSL2 native copy) -> `docker compose build dashboard` -> `docker
+   compose up -d` -> a bounded 10x3s health check against localhost:18080. Every step's exit
+   code is checked explicitly; a failure logs clearly and stops rather than limping into an
+   undefined partial state.
+3. **Idempotent / safe to re-run.** `rsync --delete` + `docker compose up -d` converge to the
+   correct result regardless of what was running before -- confirmed directly: running the
+   script back-to-back (once triggered manually, once via the hook's simulated stdin) both
+   succeeded cleanly, and `ib-gateway` (whose definition hadn't changed) was correctly left
+   running untouched while only `dashboard` (whose base image had) got recreated.
+
+**Verified without a real push** (git commits/pushes are the user's own action per this
+project's convention) -- fed `.githooks/pre-push` simulated stdin matching git's real pre-push
+format (`local_ref local_sha remote_ref remote_sha` for `refs/heads/master`) and confirmed: hook
+exits 0 in ~1.4s, the detached deploy actually runs and logs `triggered by: push`, ends with
+`deploy OK ... http://localhost:18080 answering`. Log lives at `~/quant-deploy.log` inside WSL2.
+
+**Also switched the base image to `python:3.12-slim`** (from 3.11), matching study-platform's
+own Dockerfile (this machine's other WSL2/Docker project) -- Docker's local image cache is
+content-addressed (by digest, not reference string), so pinning quant to the same underlying
+base-OS digest study-platform already pulled means that one layer is stored once and shared
+between both, for free, with zero coupling to either project's actual dependency layers above
+it. Re-verified the full deploy end to end after the switch -- clean build, clean recreate,
+health check passed.
+
+**One thing worth recording honestly, not glossing over:** during this work, native paper
+(port 8080) briefly returned connection-refused right after a `docker compose build` finished,
+recovered on its own within ~20s with a freshly-created process. Checked for a causal link to
+the Docker/WSL2 work and didn't find a plausible one (different ports, different process trees,
+WSL2 has no mechanism to touch a native Windows Task Scheduler process) -- native live (8081)
+was unaffected throughout the same window, which argues against broad resource contention too.
+Almost certainly the same native Task-Scheduler flakiness pattern documented extensively
+elsewhere in this file (today alone: the missing-task incident, multiple hung-process
+restarts) rather than anything new -- but flagging the timing correlation rather than silently
+assuming "unrelated," since resource contention during a heavy image-layer unpack is at least
+theoretically plausible and worth knowing about if this recurs.
+
+
+
+### 🚀 ADDED 2026-08-12: parallel WSL2/Docker deployment, built and verified -- NOT cut over, native deployment untouched and still the only one trading
+
+User asked to deploy via WSL2 Docker (same playbook already used for study-platform/
+event-radar), in parallel with the existing native Windows Task Scheduler deployment -- not
+replacing it. Motivation: this session's whole Task-Scheduler saga (UAC walls, a silently-
+DELETED scheduled task, console flashes, the duplicate-process races, the market-open-window
+2FA debugging) -- Docker's own restart policy + WSL2 replaces all of that class of problem.
+
+**Reused the existing shared WSL2 Ubuntu + Docker setup** (already running study-platform's own
+container) rather than building anything new -- confirmed `docker group` membership (no sudo
+needed for docker commands), compose v2 plugin present, and all of the known pitfall fixes
+from that prior deployment already applied at the WSL2-system level: DNS (`generateResolvConf
+= false` + static resolved.conf.d drop-in), the `docker-user-accept.service` iptables
+DOCKER-USER fix, MTU 1380 (confirmed via `ip link show eth0`, matched in this project's own
+compose file too). Cloudflared is active but NOT touched -- this stays localhost-only per the
+user's own explicit instruction, no public hostname wired up.
+
+**Scope decision (asked the user directly given real ambiguity):** dashboard + IB Gateway
+(paper), containerized together. **Broker connection is a stub for now**, not a real login --
+researched first (not tested live against the running native paper Gateway): IBKR allows only
+ONE active session per username across all services, no paper-account exemption. A real
+container login would have kicked the native paper Gateway's already-connected session, which
+the user explicitly said not to affect. Fix: the `ib-gateway` container (image `ghcr.io/
+gnzsnz/ib-gateway:stable`, real Xvfb+IBC) runs with BLANK `TWS_USERID`/`TWS_PASSWORD` --
+verified live it correctly starts, launches the actual Gateway GUI under Xvfb, reaches the
+login dialog, sets paper trading mode, and safely sits there rather than crash-looping or
+attempting a real login. The dashboard container points at it anyway (`IB_HOST=ib-gateway`)
+and uses the codebase's OWN EXISTING graceful-degradation path ("gateway down") rather than
+any new mock/stub code -- confirmed live: clean render, `IBKR Paper: gateway down`, tick loop
+still running, zero crashes. A real login is a deliberate future step (e.g. a dedicated second
+paper username), not something to flip on casually.
+
+**Full isolation from the native deployment, verified directly, not assumed:**
+- Host port 18080 (dashboard) / 14002 (gateway, localhost-only) -- nothing near native's
+  8080/8081/4001/4002.
+- `DASH_DB_NAME=/data/dashboard_docker.db` in a Docker-managed named volume -- never touches
+  the native `dashboard/dashboard.db` or `dashboard_live.db` files.
+- `IB_CLIENT_ID=31` -- distinct from native paper's 7 / live's 21.
+- Confirmed BOTH native dashboards (8080, 8081) AND both native gateways (4001, 4002) stayed
+  up and responsive (HTTP 200 / TCP UP) throughout this entire build-and-verify session.
+
+**Two real bugs found and fixed during the build (both from this being the FIRST WSL2/Docker
+pass for quant specifically, not from anything wrong with the reused infrastructure):**
+1. `Dockerfile` only copied `dashboard/`, but `dashboard/web/service.py` imports the top-level
+   `analyst/` module (and other root-level files) -- crashed on every startup with
+   `ModuleNotFoundError: No module named 'analyst'` until the Dockerfile was fixed to copy the
+   whole top-level project, not just the `dashboard/` subdirectory.
+2. Piloting `wsl.exe` calls through Git Bash mangles WSL-style paths (`/mnt/d/...` silently
+   became `C:/Program Files/Git/mnt/d/...`) and multi-layer quoting (PowerShell -> wsl.exe ->
+   bash -c -> python -c) breaks unpredictably -- switched to PowerShell for all `wsl.exe`
+   invocations, and to writing real script files (not inline one-liners) for anything with
+   nontrivial quoting. Also hit a real footgun: a `docker compose up -d` that looked "stuck"
+   at 180s was actually still genuinely pulling a 239MB image layer -- killing and retrying it
+   (twice) left THREE stray `docker compose up` processes running concurrently in WSL2, which
+   had to be cleaned up before a clean run would succeed. `sudo` also hangs indefinitely with
+   no TTY to answer its password prompt in this environment -- avoid it; use the `docker` group
+   membership instead, which needs no elevation for any of this.
+
+**Verification methodology followed (the playbook's own layer-by-layer approach, not just an
+end-to-end check):** container-internal `connect_ex` (0 = listening), WSL2-host curl to the
+published port, `curl -4` vs plain `curl` (near-identical timing, no MTU/dual-stack signal),
+Windows-host `Invoke-WebRequest` directly (the layer that actually matters for the user: HTTP
+200 in 1.5s), then 10 consecutive checks over ~30s (all HTTP 200, 573ms-3.2s) before calling it
+stable. Also fetched and read the actual rendered page content, not just status codes.
+
+**Files added:** `Dockerfile`, `docker-compose.yml`, `.dockerignore` (all at repo root). WSL2
+holds its own synced copy at `/home/cap/quant` (plain `rsync`, same pattern study-platform's
+WSL2 copy uses -- NOT a git clone, deliberately avoids putting this repo's embedded-PAT remote
+URL into a new environment unnecessarily) -- re-sync with `rsync -a --delete --exclude=...`
+before any rebuild if files change on the Windows side.
+
+**Not done, deliberately, this pass:** no Cloudflare Tunnel ingress added (stays
+localhost-only), no real broker login, no cutover of the native deployment's scheduled
+tasks/watchdog (still the only thing actually trading, live or paper). All of that is a
+separate, later decision.
+
+
+
+### 🔬 TESTED 2026-08-11: emerging-ETF addition test (URNJ, ARKX, NLR, PHO, CHAT) — REJECTED, all five
+
+User asked to add these 5 directly as "emerging ETFs." Tested first rather than adding blind,
+same as every other universe change this session -- this is a live, real-money universe.
+
+Data-availability check (yfinance, direct) done BEFORE any signal generation: **URNJ (185
+weekly bars, ~3.5y) and CHAT (170 bars, ~3.2y) both fall below this project's own 220-bar
+minimum** used in every research script this session -- excluded entirely, not tested on a
+too-thin sample. Worth revisiting once they have 2-3 more years of history.
+
+Of the three with enough history (`dashboard/research/emerging_etf_test.py`):
+
+```
+Stage 1 (isolation):         n     win%    expR       verdict
+ARKX (Space Exploration)     14    28.6%   -0.139     reject (negative edge, tiny n)
+NLR  (Uranium & Nuclear)     55    36.4%   -0.036     reject (negative edge)
+PHO  (Water Resources)       76    40.8%   +0.157     advances to Stage 2
+
+Stage 2 (portfolio, PHO only -- baseline Full Calmar 0.613, OOS Calmar 1.389):
++ PHO   Full 0.619 (marginal improvement)   OOS 1.258 (worse, maxDD -6.62%->-7.45%)
+```
+
+PHO fails the same "must improve both Full and OOS" bar used for every other addition/removal
+this session (most recently HYD's removal, same day) -- helps marginally on the long full-
+history window, clearly hurts OOS. **No additions made** -- this is a clean reject across all
+five, no code changes.
+
+
+
+### 🔬 TESTED + 🐞 FIXED 2026-08-11: HYD (Muni High-Yield) removed from the universe after re-justification failed the "must win on both" bar -- removal briefly took BOTH dashboards down (real lesson on retiring a previously-TRADED instrument)
+
+User noticed HYG/CWB/HYD sitting pending/unfilled for an unusually long time and asked whether
+to exclude them; asked to backtest if justified (same bar this project always uses: a change
+must improve BOTH Full and OOS Calmar to be adopted). Ran `dashboard/research/
+bond_exclusion_test.py` -- new script, same methodology as every other universe test this
+session -- against the current full dataset:
+
+```
+                          Full Calmar    OOS Calmar
+Baseline (all 3 in)          0.598          1.345
+Without HYG                  0.589 worse    1.298 worse   -> KEEP (removal hurts both)
+Without CWB                  0.585 worse    1.393 better  -> KEEP (mixed, doesn't clear bar)
+Without HYD                  0.605 better   1.409 better  -> REMOVE (clears bar on both)
+```
+
+HYD's own isolation stats looked fine (n=21, win 57.1%, expR +0.394) -- this is a genuine
+PORTFOLIO-level diversification cost invisible in isolation, not a standalone dud, and the
+smallest sample of the three so treat the magnitude as real-but-modest. HYG is clearly a net
+positive (best isolated stats of the three too) and stays; CWB's evidence is genuinely mixed
+and was left alone rather than forcing a call.
+
+**Deploy went wrong the fast/naive way first -- worth remembering for any future "retire an
+adopted instrument" request:** deleting HYD's `Instrument(...)` definition and its
+`ETF_CANDIDATES` entry outright took BOTH paper and live down within minutes with `500
+AttributeError: 'NoneType' object has no attribute 'name'` -- HYD had actually been TRADED
+historically (batch-6 keeper since 2026-07-08, not a rejected-before-adoption candidate like
+BIZD/COPX), so old journal/board-scan rows still reference key "HYD", and several render paths
+(`active_by_key(key).name` in app.py, at least 4 call sites) assume the lookup never returns
+None. Both dashboards crash-looped (repeated identical startup log lines) until fixed.
+
+**Fix:** don't delete the Instrument -- keep it registered in `ETF_CANDIDATE_BY_KEY` (via a
+new `_RETIRED_ETF_CANDIDATES` list, instruments.py) so `active_by_key("HYD")` keeps resolving
+for historical lookups, while leaving it OUT of `ETF_CANDIDATES` itself so it's excluded from
+`ETF_TRADED`/`active_universe()` and generates no new signals. Verified both effects directly:
+`active_universe()` is now 21 instruments with HYD absent, `active_by_key("HYD").name` still
+returns "Muni High-Yield" instead of crashing. Tests 166/166 pass both times (before AND after
+the crash was found -- the test suite doesn't exercise the live-history-render path that broke,
+worth adding coverage for next time this comes up). Redeployed both instances via hard-kill
+(Stop-ScheduledTask alone left stale processes serving old code again, same pattern as every
+other restart today), verified clean via browser + zero new `AttributeError` in the log.
+
+**Lesson for future sessions:** retiring an instrument that was only ever a RESEARCH CANDIDATE
+(never adopted) is safe to delete outright. Retiring one that was actually TRADED (has real
+rows in `paper_trades`/`paper_trades_archive`/`board_scan_signals`) needs the
+"keep-resolvable-but-excluded" pattern used here, or any code path rendering its history will
+crash the moment it tries to look the key back up.
+
+Also: no HYD row existed in the LIVE journal at all by the time this ran (checked directly --
+neither `paper_trades` nor the archive had it, despite the UI showing it pending shortly
+before) -- its earlier pending order appears to have resolved or been cleared on its own
+sometime between the earlier session and this one; not chased further since it made the
+removal simpler, not more urgent.
+
+### 🐞 FIXED 2026-08-11: `equity_history` stopped recording for 22+ hours -- a real HKD ~60K deposit went undetected by both Layer 1 (auto) and the manual "Detect" backstop
+
+User deposited ~HKD 60,000 into the LIVE account; neither the automatic cash-flow detector
+nor the manual "Detect from history" button in the Cash Flows dialog found it ("No unrecorded
+jump found in the tracked history").
+
+**Root cause, confirmed with hard evidence, not inferred:** `store`'s own write-timestamp
+column showed the last successful `equity_history` write was **2026-08-10 20:35:18** -- over
+22 hours before the user reported the bug -- despite `refresh_cheap()` (the function
+containing this logic) demonstrably running cleanly every ~1-2 minutes the whole time (clean,
+uninterrupted `cheap refresh: N scored` log lines, zero exceptions). Both detectors read from
+`equity_history`, so of course they found nothing: every entry recorded during that window was
+byte-identical (the account was still on its old, pre-deposit balance as far as the DB was
+concerned).
+
+Ruled out along the way (each checked directly, not assumed):
+- **Currency conversion (`CASH_USD=1` HKD->USD sweep) as the cause** -- user's own hypothesis.
+  Ran `detect_external_cash_flow()` directly against the real HKD-denominated account numbers
+  (base currency HKD throughout, no mismatch) -- it correctly computed the deposit as
+  ~HKD 59,987, so the detection MATH was never the problem.
+- **A logic bug in the confirm-then-accept state machine** -- traced the exact branch logic by
+  hand, and separately ran `is_equity_jump_implausible()`/`detect_external_cash_flow()` with
+  the real observed numbers -- both correctly signalled "implausible, this is a real external
+  flow." The logic was never wrong.
+- **Silent exception** -- grepped all log rotations for the specific `log.debug("equity_history
+  error: ...")` swallow path used here; zero matches, ruling out a hidden crash.
+
+**What actually fixed it:** added a temporary, purely-additive diagnostic log line (no logic
+change) right before the confirm-then-accept branch, then did a full HARD restart of the live
+task -- `Stop-ScheduledTask` alone left the OLD process running (port 8081/gateway conn still
+owned by the pre-fix PID; this project's own documented "Stop-ScheduledTask succeeding is not
+proof the old process died" pattern, again), so the diagnostic wasn't actually live until the
+old process was WMI-Terminate'd and a genuinely fresh one launched. On the FIRST tick of the
+new process, the diagnostic confirmed `implausible=True` (matching the hand-verified math) and
+the pending-jump candidate was correctly set; on the SECOND tick it confirmed and wrote:
+`"CONFIRMED sustained jump 131894.65 -> 192768.68 -- recorded +59987.14 as a cash flow (cash
+signature), not P&L"`. Removed the diagnostic line, ran `test_service.py` (17/17 pass), and
+redeployed clean (again via hard-kill, not a bare Stop/Start, to guarantee the fix was actually
+running rather than a stale process still serving).
+
+**Best-supported explanation for why it was stuck for 22h with no code bug found:** the OLD
+process instance (running since the watchdog-fix deploy the evening before) most likely had
+some corrupted/wedged in-process state from that same busy deploy window (multiple rapid
+restarts, a duplicate-process race investigated and fixed that same evening -- see the
+2026-08-08/2026-08-10 entries below) that made this ONE code path stop progressing, without
+ever throwing or logging anything -- everything this session could directly test (the
+detection formulas, the branch logic, the SQL layer) checked out correct in isolation. This
+reads as a runtime/process-level wedge in that specific instance, not a defect in the code
+itself -- flagging for a future session in case it recurs, since the exact mechanism wasn't
+pinned down.
+
+**Recorded amount note (HKD 59,987.14, not an even 60,000):** this is correct, not a residual
+bug -- `detect_external_cash_flow()` measures the CASH DELTA (new_cash - prev_cash), and
+prev_cash was HKD -15.22 (the account was already at/near 100% PORTFOLIO_CAP with an
+essentially zero cash buffer beforehand -- documented earlier this project -- so it had drifted
+slightly negative from ordinary margin interest/fees). A full round 60,000 deposit landing on
+top of a -15.22 starting cash balance correctly nets out to a ~59,987 delta; the user's own
+reasoning through this exact arithmetic (independently) matched.
+
+### 🐞 FIXED 2026-08-10: weekend 2FA fix (2026-08-08) was too coarse; also found + recovered a fully-DELETED `DashboardAppLive` scheduled task, minutes before market open
+
+User reported the 2026-08-08 fix didn't hold: 2FA still fired far before market open on
+weekends, AND separately, the gateway didn't auto-reconnect 45min before a real market open --
+required a manual restart.
+
+**Root cause 1 (weekend 2FA):** the 2026-08-08 fix used a blunt day-of-week heuristic (dormant
+all Saturday, active from Sunday 19:00 HKT). `C:\IBC-Live\watchdog.log` showed this was still
+wrong: it went active on schedule Sunday 19:00, but the gateway stayed down for hours (IBKR's
+own weekend server-side maintenance, not a stuck-2FA case) -- burning all 10 auto-kill/2FA
+attempts between 22:29-23:18 HKT, ~23 HOURS before Monday's real 21:30 HKT open. Fixed: replaced
+the day heuristic with a real market-hours calculation in `run_dashboard_live.ps1`'s
+`Test-NearMarketOpen` (new function, DST-aware via .NET's "Eastern Standard Time" zone data,
+not a fixed HKT offset) -- the watchdog is now only active during the real NYSE session or
+within 90min of the next weekday 9:30am ET open. Deliberately does NOT reuse
+`dashboard.core.market_calendar`'s pandas_market_calendars holiday calendar -- kept
+dependency-free since this loop is itself part of live's connection-recovery path; an
+occasional extra-day miscalc from ignoring holidays is harmless, an import failure here isn't.
+Unit-tested against the actual failing timestamps (Sat 21:11, Sun 22:29, Fri close, Mon
+45min-before-open, Mon mid-session) before deploying -- all resolved correctly.
+
+**Root cause 2 (no auto-reconnect near open):** `$autoKillCount` (the 10-attempt cold-login
+budget) only ever reset on a successful `Test-Port` -- an episode that exhausted all 10 attempts
+without ever reconnecting (exactly what the Sunday-night episode above did) left the budget
+permanently capped for the rest of the script's life, silently disabling the aggressive
+kill-and-relaunch path for every SUBSEQUENT episode too, including the next real pre-market
+window -- which fell back to passive-relaunch-only (can't clear an already-stuck process) and
+just sat there until manually restarted. Fixed: the budget now resets fresh every time the
+watchdog newly transitions from dormant into an active window.
+
+**Separately found while redeploying the above, ~30min before Monday's market open:** the
+`DashboardAppLive` scheduled task had been COMPLETELY DELETED from Task Scheduler (confirmed
+via COM `Schedule.Service` enumeration -- not in the list at all, `schtasks /query` and
+`Get-ScheduledTask` both "cannot find" it). The live dashboard PROCESS itself was still running
+fine throughout (HTTP 200, gateway connected) -- so there was no actual outage -- but the
+auto-restart safety net was gone. Likely cause: an earlier same-session `Set-ScheduledTask
+-Settings` call (attempting to strip the task's redundant native `RestartCount`/
+`RestartInterval`, itself since abandoned as based on a wrong diagnosis -- see the 2026-08-08
+entry below) errored "the task XML is missing a required element or attribute" -- `Set-
+ScheduledTask` is evidently NOT atomic and appears to delete the old definition before the new
+one fails validation. Went unnoticed for ~2 days because a running process doesn't depend on
+the task definition that launched it -- only surfaced when a routine `Stop/Start-ScheduledTask`
+redeploy failed outright.
+
+**Recovery:** exported `DashboardApp`'s (paper, still intact) full task XML as a structural
+template, adapted Command/Arguments for live, saved as `D:\quant\DashboardAppLive-recovery.xml`.
+Recreating an elevated (`RunLevel=HighestAvailable`) task hits the same UAC wall as editing one
+-- this session's shell isn't elevated -- so the user ran `schtasks /Create /TN
+"DashboardAppLive" /XML "D:\quant\DashboardAppLive-recovery.xml"` themselves in an elevated
+PowerShell. Confirmed recreated and working with ~26min to spare before Monday's open.
+
+**Also completed in the same pass** (unrelated to the above, held over from 2026-08-08): all
+three quant scheduled tasks (`DashboardApp`, `DashboardAppLive`, `QuantFlattenGridPositions`)
+now launch via the silent `wscript.exe` + VBS-wrapper pattern this machine needs (direct
+`powershell.exe -WindowStyle Hidden` still flashes a console) -- user ran the `Set-ScheduledTask
+-Action` commands from an elevated PowerShell for the two live/paper tasks (the UAC-blocked
+ones); `QuantFlattenGridPositions` had already been fixed non-elevated (no `RunLevel=Highest`).
+Along the way found+fixed an unrelated stale/hung paper process (port 8080 bound but not
+answering, PID dated the previous night) via a routine task restart -- confirmed unrelated to
+today's changes.
+
+**Lesson for future sessions:** `Set-ScheduledTask` failures are not safe to treat as no-ops,
+even when non-terminating and even when the visible symptom (a running process) looks fine --
+verify the TASK OBJECT ITSELF still exists (`Get-ScheduledTask`/COM enumeration, not just
+"is the port answering") after any edit attempt that errored, especially for real-money-adjacent
+infrastructure.
+
+### 🐞 FIXED 2026-08-08: LIVE gateway watchdog was pushing spurious weekend 2FA prompts — added a weekend quiet window
+
+### 🐞 FIXED 2026-08-08: LIVE gateway watchdog was pushing spurious weekend 2FA prompts — added a weekend quiet window
+
+User reported real disturbance: repeated 2FA phone prompts on Saturday/Sunday, when nothing
+trades. Root cause found in `C:\IBC-Live\watchdog.log` (not a guess — directly evidenced):
+the background gateway monitor in `run_dashboard_live.ps1` (the `Start-Job` block, ~line 154)
+runs 24/7 with zero notion of weekends or market hours. Its "stuck" detector treats port 4001
+being down for >= `$stuckThresholdMin` (was 2min) as a hung Gateway and hard-kills + relaunches
+it — but every relaunch is a **full cold login**, which pushes a fresh 2FA approval (see the
+function's own pre-existing comment: "this re-issues a FRESH 2FA push each time"). The daily
+`AutoRestartTime=08:30 PM` (config.ini) is supposed to be a silent warm restart (no 2FA), but
+it briefly drops port 4001 while Gateway cycles — and evidently that cycle can take longer than
+2 minutes, so the watchdog was routinely misreading a normal-but-slow restart as "stuck" and
+escalating it into a cold relogin. Confirmed directly in the log: **2026-08-07 (Fri) 20:33-
+20:57 burned all 10 auto-kill attempts in 24 minutes**, right after the 20:30 restart, and
+**2026-08-08 (Sat) 21:06** fired again — both on evidence, not inference. Same pattern on
+2026-07-11 (Sat), 2026-08-01 (Sat), 2026-07-12 (Sun).
+
+Fix (both changes in the same `Start-Job` block):
+1. `$stuckThresholdMin` 2 -> 5min — gives the ordinary restart transition more room before the
+   watchdog assumes it's genuinely stuck, rather than just the mid-2FA-timeout case it was
+   originally calibrated for.
+2. New `Test-WeekendQuietWindow`: fully dormant (no port-down checks, no relaunch attempts, no
+   kill logic at all) on **Saturday** and **Sunday before 19:00 HKT**. Resumes Sunday evening,
+   shortly before the existing `ColdRestartTime=20:30` (config.ini, IBKR's own mandatory weekly
+   full-session reset — unrelated to this script, fires regardless) so the watchdog is alert to
+   catch/recover a stuck post-ColdRestart login, with a full day of runway before Monday's
+   market open (21:30 HKT). Delivers what the user asked for: the one unavoidable weekly 2FA
+   prompt (IBKR's Sunday reset) lands in the window leading into market open, not scattered
+   across the weekend.
+
+Deployed: `Stop/Start-ScheduledTask DashboardAppLive`, verified live back to HTTP 200 and the
+real IB gateway (port 4001) reconnected (process 305888, matches the last legitimate auto-kill
+cycle at 21:07:02 that completed just before this fix was deployed). This is a pure
+operational/infrastructure change (execution-layer, not signal/risk parameters) — no
+backtesting needed, per the parameter-freeze policy's own carve-out.
+
+**Not fixed / out of scope this pass:** an unrelated recurring ~08:00-08:03 AM cluster (2026-
+07-14, 07-16, 07-28) doesn't line up with `AutoRestartTime` or `ColdRestartTime` at all — cause
+not identified, deferred since it's a weekday occurrence the user didn't flag as disruptive.
+
+Also touched while investigating (separate, from the earlier "fix live site" session):
+`DashboardApp`/`DashboardAppLive` scheduled tasks still launch via `powershell.exe -WindowStyle
+Hidden` directly instead of the wscript.exe+`Run(...,0,False)` silent pattern this machine
+actually needs (console still flashes) — VBS wrappers created
+(`C:\Scripts\dashboard-task.vbs`, `D:\quant\run-dashboard-live-task.vbs`) but swapping the
+task Action is blocked by UAC (both run at `RunLevel=HighestAvailable`, this session's shell
+isn't elevated) — needs the user to run the `Set-ScheduledTask` command from an elevated
+PowerShell (given to the user directly, not repeated here). `QuantFlattenGridPositions` (no
+elevated RunLevel) was fixed the same way, successfully, same session.
 
 ### 🔬 TESTED 2026-08-06: agricultural commodities + intl/EM bonds — REJECTED (all 4, no exceptions); SGOV threshold lowered
 
