@@ -3,6 +3,20 @@ services:
     build: .
     container_name: quant-dashboard-docker
     restart: unless-stopped
+    # ADDED 2026-08-13: this deployment was missing OPENAI_API_KEY/SUPABASE_*/TELEGRAM_* the
+    # whole time -- those only ever lived in analyst/.env (native deployment's config), never
+    # wired into this compose file. Confirmed live: LLM board scan permanently blocked at the
+    # shared-quota budget guard (fails CLOSED when Supabase is unreachable, by design -- see
+    # analyst/usage_log.py::shared_calls_ok()), AND no Telegram alerts ever reached the user's
+    # phone from this deployment. Reuses the SAME file the native deployment already has (no
+    # new secrets to create) -- `environment:` below still takes precedence over anything this
+    # also defines (IB_HOST/IB_PORT/etc.), Docker Compose's documented env_file+environment
+    # precedence. REQUIRES a one-time manual copy of analyst/.env into
+    # /home/cap/quant/analyst/.env inside WSL2 (rsync's `--exclude='.env'` deliberately matches
+    # this file at any depth too, same protection as the root .env -- this script will never
+    # overwrite it once present, matching how the root .env is already handled).
+    env_file:
+      - analyst/.env
     environment:
       - BROKER=ib
       - UNIVERSE=etf

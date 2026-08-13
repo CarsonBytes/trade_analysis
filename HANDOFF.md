@@ -5,6 +5,49 @@ Last updated 2026-08-13.
 
 ---
 
+### 🐞 FIXED 2026-08-13 (same day, later still): the Docker paper deployment was missing 8
+app-level API credentials the whole time -- LLM board scan permanently blocked, Telegram
+alerts never fired
+
+User noticed the dashboard's "llm" stat showed "never" (not just paused-outside-hours) and no
+new pending trades ever appeared, despite the reconcile/P&L fixes earlier today all working.
+Root cause: `OPENAI_API_KEY`, `OPENAI_API_KEY_FALLBACK`, `OPENAI_BASE_URL`, `OPENAI_MODEL`,
+`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` only ever
+lived in `analyst/.env` (the native deployment's config file) -- `docker-compose.yml`'s
+`dashboard` service was never given a way to read them (it only had `env_file: - .env` on the
+`ib-gateway` service, for TWS credentials; the dashboard's own env vars were all set directly
+via `environment:`, which never included these). Confirmed via container env inspection: all
+8 vars were 0 chars. `analyst/usage_log.py::shared_calls_ok()` fails CLOSED by design when the
+shared Supabase ledger is unreachable (correct behavior in general -- "skipping one board-scan
+cycle is free; silently overrunning the shared cap is not") -- but with `SUPABASE_URL` never
+even set, EVERY cycle hit this closed-fail path, permanently, logged every ~30-40s as
+`LLM board scan: budget guard: local 0/200, shared quota unreachable`. Since new paper_trades
+signals originate from a completed LLM board scan, this also explains the "no pending trade"
+symptom. **Also means: zero Telegram alerts (reconcile mismatches, DD-halts, etc.) ever reached
+the user's phone from this deployment since the cutover** -- a real gap, not just a cosmetic one.
+
+**Fix**: added `env_file: - analyst/.env` to the `dashboard` service in `docker-compose.yml`
+(Docker Compose's documented precedence keeps this service's explicit `environment:` entries
+winning for any overlapping key, e.g. `IB_HOST`/`IB_PORT` -- only the vars analyst/.env
+uniquely provides actually flow through). Requires a one-time manual copy of `analyst/.env`
+into `/home/cap/quant/analyst/.env` inside WSL2 (done this session) -- rsync's own
+`--exclude='.env'` pattern matches this file at any depth too, same protection as the root
+`.env`, so it survives every future redeploy without re-copying. Verified live: container env
+now shows all 8 vars populated, log shows `LLM board scan: ok (calls today 1/200)`, dashboard's
+Macro Backdrop shows a real generated summary, "llm" stat shows a real timestamp instead of
+"never".
+
+**Separately**: "no pending trade" also has a second, entirely expected explanation once LLM
+is confirmed working -- the dashboard's own "capacity" stat reads **100% of PORTFOLIO_CAP
+committed** (the 8 backfilled real positions consume essentially all currently-available room),
+so no NEW entry can be placed regardless of signal quality until a position closes or equity
+grows. Not a bug; flagged to the user as the likely reason LIVE (a different, less-deployed
+book) can currently open new positions while paper cannot right now.
+
+**File changed**: `docker-compose.yml` (dashboard service `env_file` addition only).
+
+---
+
 ### 📋 RETROSPECTIVE + HARDENING 2026-08-13 (same day, later still): every pitfall from the
 paper Docker migration, indexed with fixes -- prep work for the eventual LIVE account migration
 
