@@ -1,9 +1,106 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-12.
+Last updated 2026-08-13.
 
 ---
+
+### 🚀 CUTOVER 2026-08-13: paper account fully moved from native Windows to WSL2/Docker, real automated login working end-to-end
+
+User asked to fully cut the paper account over from the native Windows deployment to Docker
+(not just the parallel/stubbed setup from 2026-08-12), since IBKR's one-session-per-username
+limit meant only one could ever hold the real connection. Native `DashboardApp` scheduled task
+is now Disabled (user's own action). This entry covers everything found getting a REAL login
+working reliably, unattended, per the user's explicit spec ask ("without your oversee needed").
+
+**Root causes found and fixed, in the order they were hit:**
+
+1. **JavaFX login form doesn't receive IBC's own keystroke automation** (carried over from
+   2026-08-12's diagnosis, now the confirmed root cause given identical results across dozens
+   of runs with blank vs real credentials). Fix stands: `scripts/gateway-login.sh` uses
+   xdotool's direct X11 XTest injection instead, which works. IBC's own automation IS still
+   used for everything downstream (Warning/Pending-Tasks dialogs) -- confirmed working
+   natively, not reimplemented.
+
+2. **Real accumulated Windows-side persistence layers kept relaunching the native paper
+   Gateway even after `DashboardApp` was disabled** -- disabling the scheduled task only stops
+   FUTURE launches, not processes already running from before. Found and killed, in order:
+   an orphaned `dashboard.ps1` PowerShell process running continuously since 2026-08-09
+   (predates this session by days), THREE separate `watchdog.ps1` instances (Aug 9/12/13,
+   never cleaned up across sessions), each independently polling every 20s and able to trigger
+   a relaunch outside Task Scheduler's own scope entirely. This is why the tug-of-war
+   ("Existing session detected" repeatedly kicking Docker's session) kept recurring even after
+   seemingly-thorough cleanup -- there were multiple independent culprits, discovered one at a
+   time, not a single process.
+
+3. **A genuine mistake, corrected:** mid-cleanup, a broad process-kill filter
+   (`"dashboard|watchdog|IBC"`) matched "IBC" as a substring in BOTH the paper (`IBC\
+   config.ini`) and live (`IBC-Live\config.ini`) Gateway paths -- an explicit PID exclusion
+   only guarded one branch of the filter's OR condition, not the substring match itself. Killed
+   the LIVE gateway by accident. Recovered via `Start-ScheduledTask -TaskName
+   "DashboardAppLive"` (the correct, already-established method) -- the dashboard app came
+   back immediately; the gateway itself stayed down because of the market-open quiet-window
+   logic (2026-08-11 entry) correctly declining to force a reconnect outside the pre-market
+   lead time. Live was never actually down during real trading hours, and recovered normally
+   at the next natural pre-market window. **Lesson: never filter process kills by a substring
+   match near anything live-money-adjacent -- match on the specific identifying signal (in this
+   case, the actual bound PORT) and nothing else, exactly the discipline already used
+   elsewhere in this project's own kill logic (e.g. `run_dashboard_live.ps1`'s own hung-process
+   guard matches on outbound connection to port 4001 specifically, not a name/path pattern).**
+
+4. **`EXISTING_SESSION_DETECTED_ACTION=primary`** (docker-compose.yml) makes IBC handle the
+   "Existing session detected" dialog automatically -- docs claim this is already the default,
+   but live testing showed a manual click was still required, so set explicitly.
+
+5. **Field-clearing bug**: `ctrl+a` + one `BackSpace` before typing wasn't reliable in this
+   specific JavaFX field -- a long-running container (many earlier automated attempts) ended up
+   with garbled/concatenated text in the username field. Fixed to `End` + 40x `BackSpace`
+   (character-by-character, not selection-dependent) in `gateway-login.sh`.
+
+6. **Trading Mode can drift to "Live Trading" selected** on a container that's been up a
+   while through several earlier failed attempts (confirmed live) -- `gateway-login.sh` now
+   explicitly clicks "Paper Trading" before ever touching the credential fields. Never submits
+   without this being certain, given this is real credential entry against a real account.
+
+7. **Wrong API port** -- the single biggest time-sink. The Gateway's own UI showed "API
+   Server: connected" (fully green, genuinely authenticated) while the dashboard endlessly
+   retried with `ConnectionRefused`/`TimeoutError`, looking exactly like a broken login. Root
+   cause: `ghcr.io/gnzsnz/ib-gateway` restricts its real API port (4002) to 127.0.0.1 *inside
+   its own container* by design (confirmed via the image's own README) and runs `socat
+   TCP-LISTEN:4004,fork TCP:127.0.0.1:4002` as the documented way for other containers to
+   reach it. `docker-compose.yml` had `IB_PORT=4002` (the internal-only port) -- fixed to
+   `4004`. Confirmed via `docker exec ... ps aux` inside the gateway container, not guessed.
+
+8. **"API client needs write access action confirmation" dialog** -- unlike Warning/Pending-
+   Tasks, IBC's automation does NOT auto-click this one (confirmed stuck for 150+ seconds
+   across repeated checks). Fixed with `BYPASS_WARNING=yes` (docker-compose.yml), the
+   documented env var for API precaution checkboxes.
+
+9. **Tools installed via `docker exec apt-get install` don't survive a recreate** -- any
+   docker-compose.yml change makes compose recreate BOTH services even when only one's config
+   actually changed (confirmed live, twice), wiping xdotool/imagemagick each time. Fixed
+   properly: `Dockerfile.gateway` extends the same digest-pinned base image with both tools
+   baked in permanently, `docker-compose.yml`'s `ib-gateway` service now `build:`s from it
+   instead of using a bare `image:` reference.
+
+**Verified end-to-end, from a clean `docker compose build` (both services) through to a
+confirmed real account connection, unattended, in ~75 seconds** (`scripts/
+wsl2-docker-deploy.sh full-e2e-test`, 2026-08-13 11:53:42-11:54:57): rsync -> build -> up ->
+dashboard health check -> `gateway-login.sh` (window detection -> Paper Trading mode ->
+credentials -> submit -> "Login has completed" -> dashboard confirms `ib_client: connected`).
+Dashboard shows real data: `IBKR Paper: acct DUK968178`, real balance (HKD 1,027,974). A
+"reconcile: mismatch found" on first connect is expected and correct -- fresh local journal
+meeting a real account with months of prior native-side trading history, not a bug.
+
+**`scripts/wsl2-docker-deploy.sh`** now also: builds both services (was dashboard-only), logs
+an informational (non-blocking) warning if the native Windows paper Gateway still appears
+reachable via the WSL2 default-route gateway IP (`localhost` does NOT route from WSL2 to the
+Windows host here -- confirmed directly, must resolve the actual gateway IP fresh each run,
+not hardcode it), and runs `gateway-login.sh` automatically after a healthy dashboard deploy.
+
+**Native paper (`DashboardApp`) stays Disabled.** Re-enabling it would recreate the exact
+session conflict this cutover was meant to resolve. Native live (`DashboardAppLive`) is
+completely untouched by any of this and remains the only thing trading real money.
 
 ### 🚀 ADDED 2026-08-12 (same day, later): deterministic pre-push auto-deploy for the WSL2/Docker parallel deployment
 

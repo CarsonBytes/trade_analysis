@@ -1,0 +1,13 @@
+# Extends the official gnzsnz IB Gateway image with the tools gateway-login.sh needs
+# (xdotool, imagemagick for diagnostic screenshots) baked in permanently. Without this, every
+# `docker compose up --force-recreate` (or any change to docker-compose.yml, which compose
+# treats as grounds to recreate dependent services too, confirmed live 2026-08-13) wipes a
+# container's writable layer and any tools installed by hand via `docker exec apt-get install`
+# -- discovered the hard way, twice, mid-session.
+FROM ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+
+USER root
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends xdotool imagemagick \
+    && rm -rf /var/lib/apt/lists/*
+USER ibgateway

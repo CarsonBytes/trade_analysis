@@ -38,7 +38,23 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
     cd /home/cap/quant || { echo "!!! /home/cap/quant missing after rsync"; exit 1; }
 
-    docker compose build dashboard
+    # Informational precondition, not a hard abort -- EXISTING_SESSION_DETECTED_ACTION=primary
+    # (docker-compose.yml) makes IBC win a session conflict automatically now, confirmed live
+    # 2026-08-13. But a native paper Gateway left running would still mean the two repeatedly
+    # fight over the same IBKR session (confirmed live: a real tug-of-war loop before the
+    # native DashboardApp task was disabled) -- wasteful even when each individual round
+    # resolves cleanly. `localhost` from WSL2 does NOT reach the Windows host here (confirmed
+    # live -- even a known-open port failed) -- must use the actual default-route gateway IP,
+    # resolved fresh each run since it isn't guaranteed stable across WSL2 restarts.
+    win_ip=$(ip route | awk '/^default/ {print $3; exit}')
+    if [ -n "$win_ip" ] && timeout 2 bash -c "cat < /dev/null > /dev/tcp/$win_ip/4002" 2>/dev/null; then
+        echo "!!! WARNING: native Windows paper Gateway (port 4002) appears to still be up"
+        echo "    ($win_ip:4002 reachable) -- EXISTING_SESSION_DETECTED_ACTION should still"
+        echo "    resolve this, but expect an extra login cycle. Disable the native"
+        echo "    DashboardApp scheduled task for a clean run."
+    fi
+
+    docker compose build
     build_rc=$?
     if [ $build_rc -ne 0 ]; then
         echo "!!! docker compose build failed (exit $build_rc) -- aborting, previous image/"
@@ -67,12 +83,27 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
         sleep 3
     done
 
-    if [ "$ok" = "1" ]; then
-        echo "=== deploy OK $(ts) -- $DASH_URL answering ==="
-        exit 0
-    else
+    if [ "$ok" != "1" ]; then
         echo "!!! $DASH_URL not answering after ~30s"
         echo "=== deploy FAILED health check $(ts) ==="
         exit 1
     fi
+    echo "deploy: $DASH_URL answering, dashboard container healthy"
 } >> "$LOG" 2>&1
+
+# gateway-login.sh has its own log() calls appending to the same $LOG -- run it OUTSIDE the
+# redirect block above so its output isn't double-wrapped, but still sequenced after a
+# confirmed-healthy dashboard container. A login failure here does NOT fail this whole script
+# (the dashboard itself deployed fine and will retry its own connection on the next cheap-
+# refresh cycle regardless) -- logged clearly either way.
+bash /home/cap/quant/scripts/gateway-login.sh "${1:-manual}" >> "$LOG" 2>&1
+login_rc=$?
+{
+    if [ $login_rc -eq 0 ]; then
+        echo "=== deploy OK $(ts) -- dashboard healthy, gateway login confirmed ==="
+    else
+        echo "=== deploy OK $(ts) -- dashboard healthy, gateway login NOT confirmed (see"
+        echo "    gateway-login entries above) -- will retry on its own connection cycle ==="
+    fi
+} >> "$LOG" 2>&1
+exit 0

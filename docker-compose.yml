@@ -14,7 +14,16 @@ services:
       # Windows deployment's dashboard/dashboard.db or dashboard_live.db.
       - DASH_DB_NAME=/data/dashboard_docker.db
       - IB_HOST=ib-gateway
-      - IB_PORT=4002
+      # 4004, NOT 4002 -- confirmed live 2026-08-13 via `ps aux` inside the gateway container:
+      # this image runs `socat TCP-LISTEN:4004,fork TCP:127.0.0.1:4002`, exactly matching the
+      # gnzsnz README's own documented reason ("IB Gateway restricts connections to container's
+      # 127.0.0.1" by default). 4002 is real but only reachable from inside that container;
+      # 4004 is the relay other containers on this network can actually reach. Using 4002 here
+      # produced a real, confusing symptom: the Gateway's own UI showed "API Server: connected"
+      # (green, genuinely logged in to IBKR) while the dashboard endlessly retried with
+      # ConnectionRefused/TimeoutError -- looked like a broken login, was actually just the
+      # wrong port.
+      - IB_PORT=4004
       # Distinct from the native deployment's clientId=7 (paper) / 21 (live) -- avoids any
       # collision if this container and the native paper Gateway ever run against the IB API
       # at the same time.
@@ -32,29 +41,45 @@ services:
     depends_on:
       - ib-gateway
 
-  # SCAFFOLDING ONLY for this pass -- TWS_USERID/TWS_PASSWORD are intentionally blank.
-  # IBKR allows only ONE active session per username across all services (confirmed via
-  # research, not assumed) -- a real login here would conflict with the native Windows paper
-  # Gateway already connected on port 4002. This proves the container/networking/IBC
-  # mechanics work (Xvfb, the gateway process starting, ports publishing correctly) without
-  # ever attempting real authentication. Filling in real credentials is a deliberate, separate
-  # decision for later (e.g. a dedicated second paper username, or a scheduled-non-overlap
-  # arrangement with the native Gateway) -- not something to do casually given the shared-
-  # session constraint.
+  # SWITCHED TO REAL LOGIN 2026-08-12: IBKR allows only ONE active session per username
+  # (confirmed via research) -- since that's a hard constraint, not a workaround-able one, the
+  # user chose to make Docker the operative paper session instead of running two stubs. The
+  # native Windows paper Gateway (C:\IBC\config.ini) must be STOPPED before this container logs
+  # in, or the two fight over the same session -- see scripts/wsl2-docker-deploy.sh /
+  # HANDOFF.md's 2026-08-12 cutover entry for the exact sequencing. Real credentials come from
+  # `.env` (gitignored, never committed -- see .env.example for the two keys this needs) so
+  # they never touch this tracked file or a git history.
   ib-gateway:
-    # Digest-pinned (2026-08-12), not :stable -- :stable is a floating tag by the image's own
-    # convention, so the SAME quant commit could deploy a different Gateway build depending on
-    # what gnzsnz published that week. This is the exact digest already verified working
-    # (Xvfb+IBC start correctly, reach the login dialog) -- bump deliberately, not by drift.
-    image: ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+    # Built from Dockerfile.gateway (2026-08-13), not a bare `image:` reference -- that
+    # Dockerfile FROMs the exact same digest-pinned base as before (still not `:stable`, same
+    # determinism reasoning), just with xdotool + imagemagick baked in permanently. Installing
+    # those by hand via `docker exec apt-get install` doesn't survive a recreate (confirmed
+    # live, twice, mid-session: any docker-compose.yml change makes compose recreate this
+    # service even when only the OTHER service's config actually changed) -- gateway-login.sh
+    # needs xdotool every time this container is rebuilt, not just once.
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
     container_name: quant-ibgateway-docker
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - TWS_USERID=
-      - TWS_PASSWORD=
       - TRADING_MODE=paper
       - VNC_SERVER_PASSWORD=
       - TWOFA_TIMEOUT_ACTION=restart
+      # IBC's native handler for the "Existing session detected" dialog -- docs claim this
+      # defaults to 'primary' already, but live testing (2026-08-12) showed the dialog still
+      # required a manual click, so set explicitly rather than trust an ambiguous default.
+      # 'primary' = this login wins, disconnects whatever other session (e.g. the native
+      # Windows Gateway) is currently holding it.
+      - EXISTING_SESSION_DETECTED_ACTION=primary
+      # Confirmed live 2026-08-13: without this, "API client needs write access action
+      # confirmation" sits unhandled indefinitely (IBC's automation does not auto-click it,
+      # unlike the Warning/Pending-Tasks dialogs it does handle) -- the dashboard's first real
+      # order-placement-capable connection attempt triggers IBKR's standard API-precautions
+      # checkbox, which blocks the connection from ever completing until dismissed.
+      - BYPASS_WARNING=yes
     ports:
       # Host 14002 purely for my own debugging (docker/wsl2-local only, not published
       # further) -- the dashboard service reaches it via the compose network's internal DNS
