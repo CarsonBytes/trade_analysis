@@ -190,7 +190,14 @@ def _guard():
         if not is_paper():
             log.warning("ib_exec: connected account is NOT paper -- refusing to trade")
             return None
-        if port not in (7497, 4002):
+        # 4004 ADDED 2026-08-13: the WSL2/Docker paper deployment's real, externally-reachable
+        # API port -- the gnzsnz ib-gateway image restricts 4002 to 127.0.0.1 INSIDE its own
+        # container (confirmed via `ps aux`: it runs `socat TCP-LISTEN:4004,fork TCP:127.0.0.1:
+        # 4002`), so 4004 is the only port another container on this compose network can reach
+        # at all -- not an arbitrary/external port, still a direct relay to the same paper
+        # Gateway. Confirmed this guard was silently blocking EVERY trade attempt on that
+        # deployment since the 4002->4004 fix (see HANDOFF.md).
+        if port not in (7497, 4002, 4004):
             log.warning("ib_exec: IB_PORT %s is not a paper port -- refusing to trade", port)
             return None
     else:                                              # ---- explicit LIVE opt-in ----

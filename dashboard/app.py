@@ -39,10 +39,23 @@ def _resolve_mode() -> str:
         os.environ["IB_PORT"] = os.environ.get("LIVE_IB_PORT", "4001")
         os.environ["IB_ACCOUNT"] = os.environ.get("LIVE_IB_ACCOUNT", "U12991898")
         os.environ["IB_ALLOW_LIVE"] = "1"                # arms the ib_exec guard for the live acct
-        os.environ["DASH_DB_NAME"] = "dashboard_live.db"  # SEPARATE journal/history from paper
+        # setdefault, NOT unconditional assignment (FIXED 2026-08-13): this used to always
+        # stomp DASH_DB_NAME to the relative native-deployment default, even when a deployment
+        # (e.g. the WSL2/Docker container) had already set it explicitly via its own env --
+        # confirmed live: the Docker paper dashboard silently wrote every trade/reconcile/cache
+        # update to /app/dashboard/dashboard.db (the container's own throwaway image layer,
+        # resolved from this hardcoded relative default) instead of the persistent volume path
+        # docker-compose.yml deliberately set, for its ENTIRE runtime -- invisible because every
+        # individual read/write round-tripped consistently through the SAME wrong path, so
+        # nothing ever errored; only caught by comparing against a fresh diagnostic script that
+        # imported paper.py directly (bypassing this function, since it lives in app.py) and
+        # saw the correct path. setdefault preserves native behaviour exactly (its launch
+        # scripts never set DASH_DB_NAME themselves, so this remains the effective default)
+        # while letting an explicit override actually stick.
+        os.environ.setdefault("DASH_DB_NAME", "dashboard_live.db")  # SEPARATE journal/history
     else:
         os.environ.pop("IB_ALLOW_LIVE", None)            # paper: guard stays paper-only
-        os.environ["DASH_DB_NAME"] = "dashboard.db"       # the original/paper journal
+        os.environ.setdefault("DASH_DB_NAME", "dashboard.db")  # the original/paper journal
     return mode
 
 
