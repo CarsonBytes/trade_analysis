@@ -5,6 +5,110 @@ Last updated 2026-08-13.
 
 ---
 
+### 📋 RETROSPECTIVE + HARDENING 2026-08-13 (same day, later still): every pitfall from the
+paper Docker migration, indexed with fixes -- prep work for the eventual LIVE account migration
+
+Full plan: `C:\Users\Cap\.claude\plans\effervescent-exploring-salamander.md` (this machine).
+The paper cutover (2026-08-12/13, entries above and below) surfaced a long chain of real bugs.
+This entry is a summary/index with the generalizable lesson from each -- see the dated entries
+elsewhere in this file for full detail on any individual item.
+
+**A. Silent data-loss / wrong-path bugs (no error, just silently wrong -- the most dangerous
+class)**
+1. `_resolve_mode()` (now extracted to `dashboard/core/mode.py`) unconditionally overwrote
+   `DASH_DB_NAME` every boot, silently redirecting ALL of Docker's DB writes to a throwaway
+   in-image path for the deployment's entire life. **Lesson: any hardcoded env-var default must
+   use `setdefault()`, never `=`, the moment more than one deployment target exists.** Fixed +
+   regression-tested (`dashboard/tests/test_app_mode.py`).
+2. `ib_exec._guard()`'s port allowlist didn't know about the Docker relay port 4004, silently
+   refusing every trade attempt since the port fix. **Lesson: safety guards with hardcoded
+   allowlists need a checklist entry whenever a new deployment target is added.** Fixed +
+   regression-tested (`test_guard_paper_port_allowlist` in `test_ib_exec.py`).
+3. Wrong `IB_PORT` (4002 vs 4004) was the single biggest time-sink during initial setup --
+   Gateway UI showed "connected" while the dashboard endlessly failed, no error pointed at the
+   cause. **Lesson: when two "connected" indicators disagree, check the actual port/socket path
+   before anything else.**
+4. Five real broker positions (AMLP/CPER/CWB/VNQ/QQQ) were silently orphaned by historical
+   `sync_closures()` bugs; only 1 of 5 had ever been flagged before this session's audit (see
+   the new "Orphan-position audit" runbook in `IBKR_PAPER_RUNBOOK.md` -- **status-only
+   reconciliation misses this class of bug; must compare quantities**).
+
+**B. Startup-race / ordering bugs**
+5. `paper._conn()` created `paper_trades` but not `ib_mirror`/`mt5_mirror`; a page render
+   hitting `active_panel()` between container boot and first IB connect could get a raw
+   `sqlite3.OperationalError: no such table: ib_mirror` → 500 page. **Fixed**: `paper._conn()`
+   now also ensures both mirror tables exist, closing the race regardless of call order.
+6. The deploy script's health-check window (30s) was shorter than a real gateway relogin
+   (60-90s observed) -- misreported as FAILED and, critically, skipped the `gateway-login.sh`
+   call entirely (it lived after an `exit 1` inside the same `{ }` group). **Fixed**: widened to
+   ~120s AND decoupled -- health-check failure no longer skips gateway-login, the two outcomes
+   are reported independently now.
+
+**C. Process-safety mistakes**
+7. A broad process-kill filter (`"dashboard|watchdog|IBC"` substring match) matched "IBC" in
+   BOTH the paper and live config paths -- killed the LIVE gateway by accident during paper
+   cleanup. Recovered immediately, no live-hours impact, but a real near-miss. **Standing rule
+   (in memory + here): never filter a kill by substring near anything live-money-adjacent --
+   match the specific identifying signal only (port, exact PID, or a live-only marker).**
+8. Accumulated orphan `watchdog.ps1`/`dashboard.ps1` processes from THREE separate past
+   sessions kept relaunching the native paper Gateway even after the scheduled task was
+   disabled. **Lesson: disabling a Task Scheduler entry only blocks FUTURE launches, not
+   already-running processes started outside its scope -- check for orphans separately.**
+
+**D. Environment/tooling friction (wasted real time, not dangerous)**
+9. Piping `wsl.exe` through the Bash tool mangles `/mnt/d/...` paths -- use PowerShell for all
+   `wsl.exe` calls, write real script files for anything with nontrivial quoting.
+10. `docker exec`/PowerShell nested-quote hell for Python one-liners -- always write a `.py`
+    file and `docker cp` it in.
+11. Any `docker-compose.yml` edit (or even just `docker compose build`, which always produces a
+    fresh image reference) recreates BOTH services, wiping hand-installed container tooling --
+    bake tools into the Dockerfile (`Dockerfile.gateway`), never install by hand into a running
+    container.
+12. `env_file`-provided vars are not inherited by fresh `docker exec` sessions -- read
+    credentials from `.env` directly when scripting outside the main process.
+13. IBC's own AWT-Robot login automation silently fails against this Gateway build's
+    JavaFX-rendered login form under Xvfb -- fixed via `xdotool` direct X11 injection
+    (`scripts/gateway-login.sh`). Applies identically to any future headless Gateway deployment.
+14. The Cloudflare Tunnel's routing is remotely managed (Zero Trust dashboard/API), NOT the
+    local `config.yml` -- editing the local file silently does nothing. The API needs a
+    **Zero Trust** token permission in addition to **Cloudflare Tunnel**; Claude Code's own
+    permission classifier hard-blocks any tool call combining a credential env var with an
+    outbound API call by design -- always needs the account owner to run the script themselves.
+
+**Hardening completed this session** (all verified live via a real redeploy, full test suite
+green): items 1, 2, 5, 6 above fixed with regression tests where applicable; the orphan-audit
+methodology (item 4) written up as a reusable runbook; this summary entry itself.
+
+**Not done** (deliberately out of scope, written up as a spec only, in the plan file above --
+requires a separate explicit go-ahead given real money is involved): the actual LIVE account
+Docker migration. The plan's Part 3 covers pre-flight (run the orphan audit against LIVE FIRST,
+on native, before adding Docker as a second consumer), the build (separate `.env.live`,
+separate compose file, a real phone-approval 2FA flow instead of paper's automated bypass), and
+cutover sequencing (parallel verify → explicit separate confirmation before disabling
+`DashboardAppLive`, unlike paper's more continuous judgment-call cutover).
+
+**Flag-only backfill procedure** (used for the 5 orphaned positions, reusable for the live
+migration or any future desync): copy `ib_mirror` rows for positions already correctly tracked
+verbatim; add NEW `ib_mirror` rows (never a second row for a con_id that already has one --
+`live_positions()` reads qty/P&L LIVE from the broker via con_id match, so a duplicate row
+double-counts) for genuinely-untracked orphans, clearly noted; do NOT touch `paper_trades` or
+`equity_history`/cache series unless separately asked -- that's a bigger decision (re-engaging
+active stop-loss tracking, correcting historical P&L stats) requiring its own explicit
+go-ahead. Which table drives which UI panel, so a partial backfill's effects are predictable:
+- `ib_mirror` (status='OPEN') → `reconcile.py`'s match/mismatch badge, `live_positions()` →
+  portfolio pie chart, TOTAL VALUE/UNREALIZED, broker-live P&L per position.
+- `paper_trades` (status='OPEN') → "Active Trades" cards (entry/SL/TP/method), Retrospective
+  KPIs (expectancy/win-rate/drawdown), monthly attribution.
+- `cache.equity_history` → the "since tracking began" P&L stat specifically (NetLiquidation
+  minus the FIRST recorded point minus net cash flows) -- a fresh/short history here gives a
+  mathematically-correct but economically-misleading near-zero number even when
+  `ib_mirror`/`paper_trades` are both fully accurate; needs its own backfill/merge if the
+  deployment's tracking start doesn't match the account's real history.
+- `cache.sgov_history` / `cache.spy_benchmark` → cash-sweep breakdown and the "vs SPY" stat
+  respectively; independent of the above, easy to miss.
+
+---
+
 ### 🐞 FIXED 2026-08-13 (same day, later still): the WSL2/Docker paper dashboard's own database
 writes were silently going to the WRONG PATH the entire time -- root-caused + fixed, plus a
 second real bug (a trading-safety guard blocking every order since the port fix)

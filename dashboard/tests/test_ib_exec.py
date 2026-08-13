@@ -1262,6 +1262,28 @@ def test_live_positions_current_price_none_when_broker_omits_it():
             pass
 
 
+def test_guard_paper_port_allowlist():
+    print("\n_guard(): paper-mode port allowlist -- REGRESSION test for the 2026-08-13 bug "
+          "where 4004 (the WSL2/Docker deployment's real paper-Gateway relay port) was "
+          "missing from this tuple, silently refusing every trade attempt on that "
+          "deployment since the 4002->4004 port fix went in. Confirms 7497/4002/4004 are "
+          "all accepted and an arbitrary port is still rejected, so a future edit narrowing "
+          "this list back down fails a test instead of failing silently in production:")
+    from dashboard.execution import ib_exec
+
+    sentinel = object()
+    with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+         mock.patch.object(ib_exec, "is_paper", return_value=True), \
+         mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=sentinel):
+        for port in (7497, 4002, 4004):
+            with mock.patch.dict(os.environ, {"IB_PORT": str(port)}, clear=False):
+                os.environ.pop("IB_ALLOW_LIVE", None)
+                check(f"port {port} accepted", ib_exec._guard(), sentinel)
+        with mock.patch.dict(os.environ, {"IB_PORT": "9999"}, clear=False):
+            os.environ.pop("IB_ALLOW_LIVE", None)
+            check("arbitrary port 9999 still rejected", ib_exec._guard(), None)
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

@@ -512,6 +512,22 @@ def _conn() -> sqlite3.Connection:
         for col, decl in _MIGRATIONS:
             if col not in cols:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # FIXED 2026-08-13: also ensure both mirror tables exist here, not just in their own
+    # executor's _conn() (ib_exec.py / executor.py). Those only get created once the broker
+    # actually connects and something calls THAT module's _conn() -- but app.py's own UI code
+    # (e.g. active_panel()) queries ib_mirror/mt5_mirror via THIS connection directly, on every
+    # page render, regardless of whether a broker connection has happened yet. Confirmed live:
+    # a page render hitting that query in the window between container boot and first IB
+    # connect got a raw `sqlite3.OperationalError: no such table: ib_mirror` -> 500 page.
+    # Creating both here (harmless no-op for whichever broker mode isn't in use) closes the
+    # race regardless of call order, for either broker.
+    c.execute("""CREATE TABLE IF NOT EXISTS ib_mirror (
+        paper_id INTEGER UNIQUE, perm_id INTEGER, con_id INTEGER,
+        local_symbol TEXT, qty REAL, risk_money REAL, expiry TEXT,
+        ts TEXT, status TEXT, note TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS mt5_mirror (
+        paper_id INTEGER UNIQUE, ticket INTEGER, volume REAL, risk_money REAL,
+        ts TEXT, status TEXT, note TEXT)""")
     return c
 
 

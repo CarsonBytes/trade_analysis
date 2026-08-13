@@ -71,11 +71,15 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
         exit 1
     fi
 
-    # Bounded health check -- 10 tries, 3s apart (~30s), same cadence used to verify this
-    # deployment manually. A container that's "Up" but not yet answering (still starting) is
-    # not a failure until this window is exhausted.
+    # Bounded health check -- 40 tries, 3s apart (~120s). WIDENED 2026-08-13 from the original
+    # ~30s: a real gateway relogin (needed whenever `docker compose build` recreates BOTH
+    # services, which it always does since a fresh build always produces a fresh image
+    # reference) observed taking 60-90s, well past the old 30s window -- a slow-but-otherwise-
+    # healthy boot was misreporting as FAILED. This window covers the dashboard's own HTTP
+    # startup, not gateway login (that's still gateway-login.sh's own job below) -- 120s is
+    # generous headroom over the dashboard's typical few-second startup, not a login timeout.
     ok=0
-    for i in $(seq 1 10); do
+    for i in $(seq 1 40); do
         if curl -sf -o /dev/null "$DASH_URL"; then
             ok=1
             break
@@ -84,26 +88,42 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
     done
 
     if [ "$ok" != "1" ]; then
-        echo "!!! $DASH_URL not answering after ~30s"
-        echo "=== deploy FAILED health check $(ts) ==="
-        exit 1
+        echo "!!! $DASH_URL not answering after ~120s"
+        echo "=== deploy health check FAILED $(ts) -- proceeding to gateway-login anyway ==="
+    else
+        echo "deploy: $DASH_URL answering, dashboard container healthy"
     fi
-    echo "deploy: $DASH_URL answering, dashboard container healthy"
+    # DECOUPLED 2026-08-13: this used to `exit 1` here on failure, which skipped the
+    # gateway-login.sh call entirely (it's invoked AFTER this block, outside the redirect --
+    # `exit` inside a `{ }` group exits the whole script, not just the block). Confirmed live:
+    # a slow-but-healthy boot hit exactly this path, meaning gateway-login.sh silently never
+    # ran for that cycle (it self-recovered via IBC's own retry, but this script's own exit
+    # code and log were wrong). A dashboard that isn't answering HTTP yet doesn't mean the
+    # gateway login attempt itself is doomed -- they're independent concerns -- so record the
+    # health-check result and continue regardless; the final summary below reflects both
+    # outcomes accurately instead of a hard binary pass/fail.
+    echo "$ok" > /tmp/_quant_deploy_health_ok
 } >> "$LOG" 2>&1
 
+health_ok=$(cat /tmp/_quant_deploy_health_ok 2>/dev/null || echo 0)
+rm -f /tmp/_quant_deploy_health_ok
+
 # gateway-login.sh has its own log() calls appending to the same $LOG -- run it OUTSIDE the
-# redirect block above so its output isn't double-wrapped, but still sequenced after a
-# confirmed-healthy dashboard container. A login failure here does NOT fail this whole script
-# (the dashboard itself deployed fine and will retry its own connection on the next cheap-
-# refresh cycle regardless) -- logged clearly either way.
+# redirect block above so its output isn't double-wrapped. Runs regardless of the dashboard
+# health-check result (see DECOUPLED note above) -- a login failure here does NOT fail this
+# whole script (the dashboard itself may still recover and will retry its own connection on
+# the next cheap-refresh cycle regardless) -- logged clearly either way.
 bash /home/cap/quant/scripts/gateway-login.sh "${1:-manual}" >> "$LOG" 2>&1
 login_rc=$?
 {
-    if [ $login_rc -eq 0 ]; then
+    if [ "$health_ok" = "1" ] && [ $login_rc -eq 0 ]; then
         echo "=== deploy OK $(ts) -- dashboard healthy, gateway login confirmed ==="
-    else
+    elif [ "$health_ok" = "1" ]; then
         echo "=== deploy OK $(ts) -- dashboard healthy, gateway login NOT confirmed (see"
         echo "    gateway-login entries above) -- will retry on its own connection cycle ==="
+    else
+        echo "=== deploy PARTIAL $(ts) -- dashboard health check did not pass within ~120s"
+        echo "    (login_rc=$login_rc) -- check $DASH_URL and docker logs manually ==="
     fi
 } >> "$LOG" 2>&1
 exit 0
