@@ -73,6 +73,30 @@ Cloudflare Access gate, not Error 1033).
 incident was entirely at the tunnel-connector layer, confirmed by both real backends answering
 locally throughout.
 
+**Same day, extended to a second, related single point of failure**: user asked "for paper
+account, also hardening?" -- found `C:\Scripts\wsl-keepalive.ps1` has the IDENTICAL shape as
+the tunnel watchdog that just failed: an unsupervised `while ($true)` loop with no error
+logging, kept alive only by the `WSLKeepAlive` scheduled task's single **logon-only** trigger
+(no repeating backstop). Per its own header comment, this is THE only thing keeping the WSL2 VM
+attached -- without it, the VM "tears itself down within seconds," which would take dockerd and
+therefore the paper dashboard + gateway containers down too. Unlike the tunnel (remote
+visibility only), this one is functionally load-bearing for paper's actual trading/monitoring.
+Note: could not retroactively confirm whether this was ALSO down during the outage window
+before today's investigation began (this session's own multiple container redeploys since then
+overwrote any historical evidence) -- fixed as a forward-looking hardening regardless of
+whether it specifically contributed to today's incident.
+
+Applied the exact same mirrored fix: `wsl-keepalive.ps1` now has try/catch logging (new
+`C:\Scripts\wsl-keepalive.log`), plus new scheduled task `EnsureWslKeepalive` (logon + 10-min
+repeating trigger, identical shape to `EnsureCloudflaredWatchdog`) with its own one-shot
+supervisor `C:\Scripts\ensure-wsl-keepalive.ps1` + silent VBS launcher
+`ensure-wsl-keepalive-task.vbs`. **Verified non-destructively this time** (not a kill-test,
+deliberately -- killing the real keepalive process risks actually disrupting the live paper
+containers, unlike the tunnel test which only risked remote-visibility downtime): confirmed the
+real `wsl-keepalive.ps1` process (PID unchanged) was left untouched by a manual
+`Start-ScheduledTask` trigger, `LastTaskResult: 0`, no duplicate process launched -- the
+idempotent no-op path works correctly. Paper dashboard confirmed still healthy afterward.
+
 ---
 
 ### 🐞 FIXED 2026-08-13 (same day, later still): the Docker paper deployment was missing 8
