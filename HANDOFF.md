@@ -1,7 +1,77 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-13.
+Last updated 2026-08-14.
+
+---
+
+### 🐞 FIXED 2026-08-14: both quant.carsonng.com AND quant-live.carsonng.com were unreachable --
+the shared Cloudflare Tunnel connector's own watchdog died silently with no supervisor and no
+reboot-survival; both gaps closed
+
+Both sites went dark simultaneously. Confirmed neither BACKEND was actually down -- this was
+purely a tunnel-connector-layer outage: `quant.carsonng.com` showed Cloudflare's own Error 1033
+("Tunnel error" -- the edge can't reach any connector), `quant-live.carsonng.com` showed the
+Cloudflare Access login gate (which sits in front of the same broken tunnel, so it never got far
+enough to show the same error). Verified independently: the native LIVE dashboard's own port
+8081 answered `200 OK` locally the entire time -- **live trading itself was never interrupted,
+only remote visibility into it was.** Docker paper's own container was equally healthy
+underneath once checked.
+
+**Root cause**: `cloudflared.exe` (the one Windows-native tunnel connector both sites' hostnames
+route through) was not running. `C:\cloudflared\watchdog.ps1` -- a `while ($true)` loop, 20s
+poll, previously the ONLY thing keeping it alive -- had itself stopped logging at **18:42 HKT
+on 2026-08-13** and was confirmed not running at all when investigated (~14 hours later). A
+`2026-08-14 08:26` Windows restart was found during investigation but is a confirmed **red
+herring** -- the outage predates it (user confirmation). Checked for a definitive trigger
+(sleep/resume kernel-power events, Application-log crash records around 18:42 on 8/13): **none
+found** -- the proximate cause of the watchdog process's own death is undetermined, because
+nothing was watching it closely enough to leave a trace. This is the exact "who watches the
+watchdog" failure class this project has already hit once before, for a DIFFERENT component
+(the event-radar backend watchdog's own "died silently after a sleep/wake" note, itself living
+inside `C:\cloudflared\watchdog.ps1`'s comments) -- this time it was watchdog.ps1's own turn.
+
+**Two confirmed structural gaps, not assumed**:
+1. No supervisor for the supervisor -- `watchdog.ps1` babysits `cloudflared.exe` but nothing
+   babysat `watchdog.ps1` itself.
+2. No reboot-survival -- checked both the per-user AND all-users Windows Startup folders
+   directly: **neither contains any cloudflared/watchdog launcher**, despite older memory
+   describing "auto-start via Startup-folder VBS." Whatever that registration once was, it's
+   gone now. Even without gap #1, a plain reboot alone would reproduce this exact outage.
+
+**Fix** (mirrors `WSLKeepAlive`, a scheduled task on this same machine already solving the
+identical reboot-survival problem correctly for a different subsystem -- read its actual
+config, not guessed): new Scheduled Task `EnsureCloudflaredWatchdog` with TWO triggers --
+At-logon (fixes reboot-survival) AND a 10-minute repeating trigger starting immediately (fixes
+mid-session silent death, which is what actually happened here -- a logon-only trigger would
+only have recovered this specific incident after today's incidental reboot, many hours late).
+Action is the standard silent `wscript.exe` + VBS pattern (never bare `-WindowStyle Hidden`,
+which still flashes a window). New files, all in `C:\cloudflared\` (shared cross-project tunnel
+infra, intentionally outside the `D:\quant` git repo):
+- `ensure-watchdog.ps1` -- one-shot, NOT a loop: checks if a `watchdog.ps1` process (matched by
+  full path, so it can't accidentally self-match its own similarly-named filename) is running;
+  relaunches it if not. Idempotent.
+- `watchdog-launcher.vbs` -- silent wrapper, identical shape to the proven
+  `wsl-keepalive-task.vbs`.
+- `watchdog.ps1` itself: wrapped its main loop body in try/catch/finally, logging any caught
+  exception's message to `watchdog.log` before continuing. Doesn't change normal behavior --
+  closes the diagnostic gap that made today's proximate-cause investigation inconclusive, so a
+  future death (if the outer scheduled-task supervisor doesn't make this moot first) leaves an
+  actual reason in the log instead of nothing.
+
+**Verified live**: killed both `cloudflared.exe` and `watchdog.ps1` to reproduce the incident,
+manually triggered `EnsureCloudflaredWatchdog` (`Start-ScheduledTask`), confirmed
+`LastTaskResult: 0` and both processes back. (First attempt at this same test errored out
+mid-script on an unrelated `Stop-Process` issue before ever reaching the trigger call -- caused
+a second short, self-inflicted outage during verification, immediately caught and manually
+restored within seconds; the retry in isolation confirmed the real fix works cleanly.) Final
+state confirmed clean: exactly one `cloudflared.exe`, exactly one `watchdog.ps1`, both sites
+reachable (`quant.carsonng.com` loads fully; `quant-live.carsonng.com` correctly reaches its
+Cloudflare Access gate, not Error 1033).
+
+**Not changed**: no `D:\quant` application code, no Docker/native dashboard config -- this
+incident was entirely at the tunnel-connector layer, confirmed by both real backends answering
+locally throughout.
 
 ---
 
