@@ -1,7 +1,59 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-14.
+Last updated 2026-08-17.
+
+---
+
+### 🐞 FIXED 2026-08-17: paper's Docker gateway stuck ~30h on the same "API client needs write
+access" dialog BYPASS_WARNING was supposed to auto-dismiss; live's native gateway independently
+recovered from its own recurring stuck-state before market open
+
+**Paper (quant.carsonng.com down)**: root-caused to `quant-ibgateway-docker`, NOT the tunnel
+(2026-08-13/14's fixes are unrelated and still holding -- `cloudflared`/`watchdog.ps1` both
+confirmed stable ~46h uptime throughout). The gateway's own log showed a repeated
+"Connecting to server..." / "Starting application..." cycle across 2026-08-15/16, ending at
+**2026-08-16 14:25** on `API client needs write access action confirmation` -- the exact dialog
+`BYPASS_WARNING=yes` (docker-compose.yml) was added specifically to auto-dismiss (see the
+2026-08-13 cutover entry). It didn't fire this time; ~30 hours of silence followed. The gateway
+being stuck meant every dashboard request to it hung -- confirmed via `docker logs
+quant-dashboard-docker`: dozens of `Task was destroyed but it is pending!` / `TimeoutError` on
+`sync_closures`/`reqHistoricalData`, eventually backing up the whole asyncio event loop badly
+enough that even the dashboard's OWN HTTP port stopped answering -- **unreachable even from
+inside WSL2 directly, ruling out a Windows↔WSL2 port-forwarding issue** (checked first, before
+assuming the tunnel again). **Hypothesis, not fully confirmed**: `BYPASS_WARNING`'s auto-dismiss
+may only reliably cover the dialog's first appearance at initial login, not a LATER occurrence
+during one of the several reconnect cycles seen in the log beforehand -- consistent with this
+image's already-documented JavaFX/Xvfb automation-reliability gaps (see `scripts/gateway-
+login.sh`'s own xdotool workaround for the login form itself). **Fix**: redeployed via
+`scripts/wsl2-docker-deploy.sh` (fresh containers, clean login) -- confirmed working:
+`reconcile: matched`, `P&L check: agrees`. **Not yet fixed**: WHY `BYPASS_WARNING` didn't
+re-fire on a later reconnect remains unconfirmed; worth a dedicated investigation (or a
+periodic health-check + auto-redeploy safety net, mirroring what native LIVE already has --
+see below) if this recurs.
+
+**Live (checked proactively, market ~1h from open at investigation time)**: found `C:\IBC-
+Live\watchdog.log` showing this is a KNOWN, RECURRING pattern for the native live gateway too
+-- the identical "stuck, no port 4001, auto-kill, confirmed dead, retry" cycle previously hit
+2026-08-09, 08-11, and 08-14, and was actively in progress again RIGHT NOW (started 20:06,
+attempts logged every ~5.2min per `run_dashboard_live.ps1`'s `$stuckThresholdMin=5`,
+`$maxAutoKills=10` budget). Unlike paper, LIVE already has this self-healing mechanism built in
+(`run_dashboard_live.ps1`'s background `$mon` job, active within 90min of market open) -- it
+worked as designed: succeeded on its 4th attempt at **20:30**, confirmed clean login (`IBKR
+Gateway` window activated/focused, normal state-change activity) and dashboard-level `reconcile:
+matched` / `P&L check: agrees` by 20:35 -- comfortably before the ~21:23 open. **No action
+needed**, but flagging: this is the SAME underlying stuck-gateway failure class hitting BOTH
+deployments independently, LIVE just already has the auto-kill/retry safety net paper doesn't.
+Given it's now recurred 4+ times for live alone, worth a dedicated root-cause investigation
+(what specifically triggers the stuck dialog/session -- 2FA timing? a specific reconnect path?)
+rather than continuing to rely solely on kill-and-retry, which costs a fresh 2FA push each
+attempt and has a finite (10-attempt) budget that could theoretically exhaust before a
+particularly bad morning's open.
+
+**Not done, flagged for a future decision**: building paper an equivalent to live's own
+proactive pre-market health-check + auto-recovery loop (today's paper fix was reactive, only
+because the user asked -- there's no standing mechanism watching for this on paper the way
+there is for live).
 
 ---
 
