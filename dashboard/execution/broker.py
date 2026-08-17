@@ -83,6 +83,16 @@ def live_positions() -> dict:
     return _backend().live_positions()
 
 
+def reprotect_naked_positions() -> list[str]:
+    """Re-arm or actively close a funded position whose broker-side TP/SL bracket has
+    vanished (IB only; see ib_exec.reprotect_naked_positions()'s docstring). No-op on
+    backends that don't support it (e.g. MT5)."""
+    b = _backend()
+    if hasattr(b, "reprotect_naked_positions"):
+        return b.reprotect_naked_positions()
+    return []
+
+
 def reconcile() -> list[dict]:
     return _backend().reconcile()
 

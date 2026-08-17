@@ -1197,3 +1197,76 @@ def resolve_open(get_ohlc_fn, executed_ids: set[int] | None = None) -> int:
                  t["instrument"], t["method"], status, r, t["entry"], exit_price, exit_time)
         resolved += 1
     return resolved
+
+
+def close_expired_trades() -> list[str]:
+    """Exit side for the CORE method (mirrors sleeve.py::close_expired_sleeves(),
+    generalized): for each OPEN, FUNDED, non-sleeve trade whose horizon_end has passed,
+    actively submit a real closing order via ib_exec.manual_close_position() -- IBKR has no
+    native time-based auto-close, so unlike SL/TP (enforced by a real resting broker bracket
+    order that fills on its own), nothing else would ever actually flatten the position.
+
+    MUST run BEFORE resolve_open() in the refresh cycle (see service.py's call order, and
+    sleeve.py's own horizon_end padding -- TIME_CAP_DAYS*1.5 -- which exists for exactly this
+    reason: to guarantee its dynamic check wins the race). resolve_open() is a pure, broker-
+    independent price/horizon check that would otherwise mark the trade EXPIRED from OHLC data
+    alone on the SAME cycle, before this function ever got a chance to submit a real order.
+    Confirmed live: this exact race silently orphaned 5 real LIVE positions + 1 real PAPER
+    position for days, invisible in the UI, with zero exit-logic oversight the whole time --
+    see HANDOFF.md 2026-08-17 for the full incident writeup.
+
+    Does NOT resolve paper_trades itself -- matches manual_close_position()'s own contract;
+    sync_closures() picks up the resulting broker-truth closing fill next cycle, exactly like
+    any other exit (that code path is already method-agnostic)."""
+    from dashboard.execution import ib_exec
+    from dashboard.core.sleeve import SLEEVE_METHOD    # local import -- sleeve.py imports paper
+    logs: list[str] = []
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    with _LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='OPEN' AND method!=? AND horizon_end<=? "
+            "AND horizon_end!=''", (SLEEVE_METHOD, now_iso)).fetchall()
+        cols = [d[0] for d in c.execute("SELECT * FROM paper_trades WHERE 1=0").description]
+    for r in rows:
+        trade = dict(zip(cols, r))
+        with _LOCK, _conn() as c:
+            funded = c.execute("SELECT 1 FROM ib_mirror WHERE paper_id=? AND status='OPEN'",
+                              (trade["id"],)).fetchone()
+        if not funded:
+            # resolve_open() already correctly EXPIREs an unfunded signal (no real position
+            # to close) -- nothing to actively do here for that case.
+            continue
+        msg = ib_exec.manual_close_position(trade, "horizon expired")
+        if msg:
+            logs.append(msg)
+            log.info("paper: %s", msg)
+    return logs
+
+
+def reopen_trade(trade_id: int, horizon_days: int = HORIZON_CAL) -> str | None:
+    """Flip a resolved trade back to OPEN with a FRESH horizon_end (now + horizon_days, NOT
+    the stale original -- which would just immediately re-expire on the next resolve_open()
+    cycle) -- for a trade that resolved locally (WIN/LOSS/EXPIRED) while the broker still
+    genuinely holds the real position (see close_expired_trades()'s docstring for the root
+    cause). Keeps the real original entry/sl/tp/size_units/method untouched -- only the
+    resolution fields + horizon reset. Logs via notable_events (the audit-trail mechanism,
+    not a trade-data field) rather than overwriting any historical field. Returns a human
+    message, or None if the trade id doesn't exist."""
+    with _LOCK, _conn() as c:
+        row = c.execute("SELECT instrument, status FROM paper_trades WHERE id=?",
+                        (trade_id,)).fetchone()
+        if row is None:
+            return None
+        instrument, old_status = row
+        new_horizon = (dt.datetime.now(dt.timezone.utc) +
+                       dt.timedelta(days=horizon_days)).isoformat(timespec="seconds")
+        c.execute("UPDATE paper_trades SET status='OPEN', exit_ts='', exit_price=0, "
+                 "realized_r=0, exit_reason='', horizon_end=? WHERE id=?",
+                 (new_horizon, trade_id))
+    from dashboard.core import notable_events
+    msg = (f"#{trade_id} {instrument}: REOPENED (was {old_status}) -- broker held the real "
+          f"position the whole time; fresh horizon set to {new_horizon[:10]} "
+          f"(see HANDOFF.md 2026-08-17)")
+    notable_events.record(msg, level="warning")
+    log.info("paper: %s", msg)
+    return msg

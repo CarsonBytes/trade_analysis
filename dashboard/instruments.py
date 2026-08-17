@@ -146,10 +146,16 @@ ETF_CANDIDATES: list[Instrument] = [
     # raw per-market expR -- portfolio isolation showed -1.2pp DD cost for only +0.3pp CAGR
     # (clusters with existing GLD/SLV/CPER metal risk). See HANDOFF.
     Instrument("AMLP", "MLP Energy Infra",  "AMLP", "", "mlp"),
-    # batch-6 keeper (screened 2026-07-08, isolation-tested vs the 20-base): HYD +0.6pp OOS
-    # CAGR for ZERO extra DD (best ratio improvement of any candidate this session). BIZD/COPX
-    # rejected -- both showed the same "decent raw expR, DD cost outweighs it" pattern as PALL.
-    Instrument("HYD",  "Muni High-Yield",   "HYD",  "", "muni_hy"),
+    # HYD (batch-6 keeper, screened 2026-07-08) REMOVED 2026-08-11: re-tested against the
+    # current full dataset after the user noticed it (along with HYG/CWB) sitting pending/
+    # unfilled for an unusually long time. Re-justification test (dashboard/research/
+    # bond_exclusion_test.py) found isolation stats still looked fine (n=21, win 57.1%,
+    # expR +0.394) but at the PORTFOLIO level, removing it improved BOTH Full Calmar
+    # (0.598->0.605) AND OOS Calmar (1.345->1.409) -- a genuine diversification cost despite
+    # looking fine standalone, and the smallest sample of the three bond names tested. HYG
+    # and CWB were tested the same way and KEPT: HYG clearly helps both windows (removing it
+    # hurts Full 0.598->0.589 AND OOS 1.345->1.298), CWB is genuinely mixed (helps OOS, hurts
+    # Full) and doesn't clear the "must win on both" bar either way, so left alone.
     # batch-10 keeper (screened 2026-07-09, isolation-tested vs the 21-base): ASHR +0.43pp
     # OOS CAGR (+11.17%->+11.60%) for IDENTICAL maxDD to 4 decimals (-12.9065% both), ratio
     # 0.866->0.899 -- a genuinely distinct EM sub-market (China, policy/capital-control-
@@ -157,6 +163,18 @@ ETF_CANDIDATES: list[Instrument] = [
     Instrument("ASHR", "China A-Shares",     "ASHR", "", "china_eq"),
 ]
 ETF_CANDIDATE_BY_KEY = {i.key: i for i in ETF_CANDIDATES}
+
+# RETIRED 2026-08-11 (see HYD's removal comment above): kept resolvable via
+# ETF_CANDIDATE_BY_KEY / active_by_key() for old journal/board-scan rows that still
+# reference it, but deliberately NOT added to ETF_CANDIDATES itself, so it's excluded from
+# ETF_TRADED / active_universe() and generates no new signals. Fully deleting the Instrument
+# broke live within minutes: any historical HYD row rendered via active_by_key(key).name
+# crashed both dashboards with AttributeError ('NoneType' has no attribute 'name').
+_RETIRED_ETF_CANDIDATES: list[Instrument] = [
+    Instrument("HYD", "Muni High-Yield", "HYD", "", "muni_hy"),
+]
+for _inst in _RETIRED_ETF_CANDIDATES:
+    ETF_CANDIDATE_BY_KEY[_inst.key] = _inst
 
 # Batch 2 to SCREEN (--etf-screen2). NOT traded unless they clear OOS + add real
 # diversification (most are redundant subsets/correlates of the held set).

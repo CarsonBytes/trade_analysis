@@ -1284,6 +1284,202 @@ def test_guard_paper_port_allowlist():
             check("arbitrary port 9999 still rejected", ib_exec._guard(), None)
 
 
+def test_close_expired_trades_actively_closes_funded_core_position():
+    print("\npaper.close_expired_trades(): REGRESSION for the 2026-08-17 incident -- a "
+          "FUNDED, OPEN, non-sleeve trade past its horizon_end must get a real close order "
+          "submitted via ib_exec.manual_close_position(), and paper_trades must stay OPEN "
+          "afterward (resolution is deferred to sync_closures() picking up the real fill, "
+          "same contract manual_close_position() already documents). Without this, "
+          "resolve_open() silently marks the trade EXPIRED from price data alone while the "
+          "broker still holds the real position -- exactly what orphaned 5 real LIVE + 1 "
+          "real PAPER position for days:")
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(timespec="seconds")
+        with paper._LOCK, paper._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(1,'2026-07-01T00:00:00+00:00','AMLP','long','ATR rr3.0',"
+                     "50.0,48.0,56.0,3.0,20.0,?,0.6,'test','OPEN','',0,0)", (past,))
+            # funded: a real OPEN ib_mirror row for this trade
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'AMLP',20.0,100.0,'','2026-07-01T00:00:00','OPEN','etf')")
+            # sleeve trade, ALSO past horizon -- must be excluded (sleeve has its own
+            # dedicated close_expired_sleeves() path)
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(2,'2026-07-01T00:00:00+00:00','QQQ','long','dipbuy-sleeve',"
+                     "500.0,480.0,560.0,3.0,1.0,?,0.6,'test','OPEN','',0,0)", (past,))
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(2,0,222,'QQQ',1.0,100.0,'','2026-07-01T00:00:00','OPEN','etf')")
+            # unfunded: OPEN + past horizon, but NO ib_mirror row -- resolve_open() already
+            # correctly handles this case (signal-only EXPIRED), nothing to actively close
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(3,'2026-07-01T00:00:00+00:00','CPER','long','ATR rr3.0',"
+                     "30.0,28.0,36.0,3.0,10.0,?,0.6,'test','OPEN','',0,0)", (past,))
+
+        from dashboard.execution import ib_exec
+        calls = []
+        with mock.patch.object(ib_exec, "manual_close_position",
+                              side_effect=lambda t, r: calls.append((t["id"], t["instrument"], r))
+                              or f"{t['instrument']}: sent"):
+            logs = paper.close_expired_trades()
+
+        check("exactly one close submitted (the funded core trade only)", len(calls), 1)
+        check("closed the right trade id", calls[0][0] if calls else None, 1)
+        check("closed the right instrument", calls[0][1] if calls else None, "AMLP")
+        check("reason says horizon expired", calls[0][2] if calls else None, "horizon expired")
+        check("exactly one log line returned", len(logs), 1)
+
+        with paper._LOCK, paper._conn() as c:
+            s1 = c.execute("SELECT status FROM paper_trades WHERE id=1").fetchone()[0]
+            s2 = c.execute("SELECT status FROM paper_trades WHERE id=2").fetchone()[0]
+            s3 = c.execute("SELECT status FROM paper_trades WHERE id=3").fetchone()[0]
+        check("funded core trade stays OPEN (resolution deferred to sync_closures())", s1, "OPEN")
+        check("sleeve trade untouched, still OPEN (its own path handles it)", s2, "OPEN")
+        check("unfunded trade untouched, still OPEN (resolve_open() handles it)", s3, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_reprotect_naked_positions():
+    print("\nib_exec.reprotect_naked_positions(): REGRESSION for the 2026-08-18 incident -- a "
+          "funded OPEN position whose broker-side TP/SL bracket vanished (confirmed live: "
+          "QQQ #145's sleeve bracket disappeared, likely a paper-gateway session drop) must "
+          "either get closed for real (if price already crossed its own tp/sl) or re-armed "
+          "with a fresh bracket (if still in play) -- and a position that's still protected "
+          "must be left alone entirely:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _OpenTrade:
+        def __init__(self, con_id):
+            self.contract = _Contract(con_id)
+
+    class _PortfolioItem:
+        def __init__(self, con_id, market_price):
+            self.contract = _Contract(con_id)
+            self.marketPrice = market_price
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as c:
+            # id=10 QQQ sleeve: NAKED (no resting order), price 730.78 already past tp 688.20
+            # -> must be actively closed for real, exactly QQQ #145's real situation
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(10,'2026-07-31T00:00:00+00:00','QQQ','long','dipbuy-sleeve',"
+                     "668.16,634.752,688.2048,0.6,15.0,'2099-01-01T00:00:00',0.6,'test',"
+                     "'OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(10,0,145111,'QQQ',15.0,1000.0,'','2026-07-31T00:00:00','OPEN','sleeve')")
+            # id=11 AMLP core: NAKED, price 55.0 is still BETWEEN sl 52/tp 58 -- still in
+            # play, must get a fresh bracket re-armed, not closed
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(11,'2026-08-01T00:00:00+00:00','AMLP','long','ATR rr3.0',"
+                     "54.0,52.0,58.0,3.0,37.0,'2099-01-01T00:00:00',0.6,'test',"
+                     "'OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(11,0,222222,'AMLP',37.0,500.0,'','2026-08-01T00:00:00','OPEN','etf')")
+            # id=12 HYG core: still PROTECTED (a resting order exists at the broker) -- must
+            # be left completely alone
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(12,'2026-08-01T00:00:00+00:00','HYG','long','ATR rr3.0',"
+                     "79.4,78.0,80.7,3.0,10.0,'2099-01-01T00:00:00',0.6,'test',"
+                     "'OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(12,0,333333,'HYG',10.0,300.0,'','2026-08-01T00:00:00','OPEN','etf')")
+
+        placed = []
+        fake_contract = _Contract(0)
+
+        class _FakeIB:
+            def openTrades(self):
+                return [_OpenTrade(333333)]              # only HYG (id=12) still protected
+            def portfolio(self):
+                return [_PortfolioItem(145111, 730.7781), _PortfolioItem(222222, 55.0)]
+            def placeOrder(self, contract, order):
+                placed.append((contract.conId, order.action, order.orderType,
+                              getattr(order, "lmtPrice", None), getattr(order, "auxPrice", None)))
+                return object()
+
+        closed = []
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="DU123"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, acct: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch.object(ib_exec.ib_client, "stock_contract",
+                              side_effect=lambda sym, **kw: _Contract(0)), \
+             mock.patch.object(ib_exec, "manual_close_position",
+                              side_effect=lambda t, r: closed.append((t["id"], t["instrument"], r))
+                              or f"{t['instrument']}: closed"):
+            logs = ib_exec.reprotect_naked_positions()
+
+        check("exactly one active close (QQQ, already past tp)", len(closed), 1)
+        check("closed the right trade id", closed[0][0] if closed else None, 10)
+        check("reason cites take-profit, not stop-loss",
+              "take-profit" in (closed[0][2] if closed else ""), True)
+        check("protected HYG (id=12) untouched -- no close, no re-arm",
+              any(c[0] == 333333 for c in placed), False)
+        check("exactly 2 protective orders placed for AMLP (TP + SL)",
+              sum(1 for c in placed if c[0] == 0), 2)  # fake stock_contract always returns conId 0
+        check("one of them is the LMT take-profit leg",
+              any(o[2] == "LMT" for o in placed), True)
+        check("one of them is the STP stop-loss leg",
+              any(o[2] == "STP" for o in placed), True)
+        check("both AMLP legs SELL (long position)",
+              all(o[1] == "SELL" for o in placed), True)
+        check("2 log lines total (1 close + 1 re-arm)", len(logs), 2)
+
+        with paper._LOCK, paper._conn() as c:
+            s10 = c.execute("SELECT status FROM paper_trades WHERE id=10").fetchone()[0]
+            s11 = c.execute("SELECT status FROM paper_trades WHERE id=11").fetchone()[0]
+            s12 = c.execute("SELECT status FROM paper_trades WHERE id=12").fetchone()[0]
+        check("QQQ stays OPEN (resolution deferred to sync_closures())", s10, "OPEN")
+        check("AMLP stays OPEN (just re-armed, not resolved)", s11, "OPEN")
+        check("HYG stays OPEN (never touched)", s12, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

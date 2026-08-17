@@ -166,13 +166,22 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         # OPENAI_API_KEY_FALLBACK if the primary chatanywhere key is exhausted or dead --
         # reaching this except block means EITHER no fallback is configured, or both keys
         # failed, so backing off here is still the right call either way.
-        result = invoke_with_key_fallback(
-            lambda llm: llm.with_structured_output(BoardScan),
+        #
+        # include_raw=True ADDED 2026-08-14 (previously omitted deliberately, to avoid
+        # touching this delicate exception handling -- see the now-stale comment that used
+        # to sit on the log_usage() call below). Verified safe by reading analyst/nodes.py's
+        # _ask(), which already made this exact change: include_raw=True only changes the
+        # return SHAPE on a *successful* call (adds .raw/.parsed/.parsing_error) -- it does
+        # NOT change how invocation-level errors (429, auth failures) propagate, so the
+        # except block below (is_chatanywhere_unavailable(e) etc.) is unaffected either way.
+        raw_result = invoke_with_key_fallback(
+            lambda llm: llm.with_structured_output(BoardScan, include_raw=True),
             [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": human},
             ],
         )
+        result = raw_result["parsed"]
     except Exception as e:                      # noqa: BLE001
         # WIDENED 2026-07-25: this used to only special-case 429/RateLimitError -- the
         # 2026-07-25 incident (chatanywhere silently deprecated the old key format, a 403
@@ -191,10 +200,11 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         import os
         from analyst.llm import last_model_used, last_provider_used
         from analyst.usage_log import log_usage
+        usage = getattr(raw_result.get("raw"), "usage_metadata", None) or {}
         log_usage(
             kind="board_scan",
             model=last_model_used() or os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
-            input_tokens=0, output_tokens=0,       # not available without changing the invoke() shape above
+            input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0),
             latency_ms=int((time.perf_counter() - _start) * 1000),
             provider=last_provider_used(),
         )

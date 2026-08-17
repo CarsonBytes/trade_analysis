@@ -14,18 +14,20 @@ A research + trading platform for a diversified multi-asset ETF book, with three
 
 Exhaustive out-of-sample, deflated-Sharpe-penalised study, continuously re-verified as the
 system moved from paper to **real live trading** (IBKR account U12991898, first real fills
-2026-07-13). The platform pivoted MT5 spot → IBKR futures → **22 ETFs** (ETFs trade in
+2026-07-13). The platform pivoted MT5 spot → IBKR futures → **21 ETFs** (ETFs trade in
 *shares*, so risk is expressible on a small account, unlike futures). 80+ ideas tested across
 the full project; the honest conclusions:
 
 - **Exactly ONE edge: weekly time-series momentum (TSMOM) across many uncorrelated ETFs**,
   plus one validated satellite (below). Long-only, weekly hold, ATR-stop (1.5×ATR14) + 3:1
   RR, risk-based sizing. Breadth is the lever that matters — the book's avg pairwise
-  correlation stays low because the 22 tickers span genuinely different asset classes, not
+  correlation stays low because the tickers span genuinely different asset classes, not
   leveraged beta on one theme.
-- **Universe (22):** metals GLD/SLV/CPER · equity SPY/QQQ/DIA/IWM · rates IEF/TLT/SHY ·
+- **Universe (21):** metals GLD/SLV/CPER · equity SPY/QQQ/DIA/IWM · rates IEF/TLT/SHY ·
   credit HYG · inflation TIP · intl EFA/EEM/VNQI/ASHR · commodity DBC · REIT VNQ/AMLP ·
-  preferred PFF · convertibles CWB · muni-HY HYD.
+  preferred PFF · convertibles CWB. (Muni-HY HYD removed 2026-08-11 — re-tested against the
+  current full dataset, hurt both Full and OOS Calmar at the portfolio level despite fine
+  isolation stats; see HANDOFF.)
 - **Live config (four parameters, real money today):** `RISK_PER_TRADE=1%`,
   `ETF_POS_CAP=25%` (per-position notional cap), `PORTFOLIO_CAP=100%` (aggregate
   gross-exposure cap — added 2026-07-11 after confirming several concurrent near-cap

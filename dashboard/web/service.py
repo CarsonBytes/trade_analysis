@@ -542,6 +542,34 @@ def refresh_cheap() -> None:
              len(STATE["scores"]),
              "MT5" if n_mt5 else ("yfinance" if live else "none"),
              n_mt5, len(live))
+    # ADDED 2026-08-18: MUST run before close_expired_trades()/resolve_open() below -- a
+    # resting TP/SL bracket can vanish at the broker independent of anything this app does
+    # (confirmed live: a paper-gateway session drop lost a sleeve trade's bracket, leaving a
+    # real funded position naked for weeks). If that position's price has ALSO already
+    # crossed its horizon or its own stored tp/sl, we want the REAL broker-truth close to
+    # happen here first, not a price-only inference downstream. See HANDOFF.md 2026-08-18.
+    try:
+        naked_logs = broker.reprotect_naked_positions()
+        if naked_logs:
+            log.info("naked-position check: %d action(s) this refresh", len(naked_logs))
+    except Exception as e:
+        log.exception("reprotect_naked_positions error: %s", e)
+    # ADDED 2026-08-17: MUST run before paper.resolve_open() below -- resolve_open() is a
+    # pure, broker-independent price/horizon check that can mark a funded core-method trade
+    # EXPIRED from OHLC data alone, with no real closing order ever submitted (IBKR has no
+    # native time-based auto-close, unlike SL/TP which are real resting broker orders).
+    # close_expired_trades() actively closes it for real FIRST, on this same cycle, so
+    # resolve_open() never gets to "win the race" against an actual broker action -- mirrors
+    # exactly how sleeve.py pads its own horizon_end (TIME_CAP_DAYS*1.5) to guarantee its
+    # dynamic exit always fires before resolve_open()'s check would. Confirmed live: without
+    # this ordering, this exact race silently orphaned 5 real LIVE + 1 real PAPER position for
+    # days -- see HANDOFF.md 2026-08-17.
+    try:
+        exp_logs = paper.close_expired_trades()
+        if exp_logs:
+            log.info("closed %d expired core trade(s) this refresh", len(exp_logs))
+    except Exception as e:
+        log.exception("close_expired_trades error: %s", e)
     # resolve any open paper trades against the fresh price action. Use DAILY
     # bars (covers the multi-week weekly horizon; M1 only spans ~34 days).
     try:

@@ -94,6 +94,18 @@ services:
       # order-placement-capable connection attempt triggers IBKR's standard API-precautions
       # checkbox, which blocks the connection from ever completing until dismissed.
       - BYPASS_WARNING=yes
+      # ADDED 2026-08-18: found live -- IBC's config.ini.tmpl has `ReadOnlyApi=${READ_ONLY_API}`,
+      # which rendered as a BLANK value (this var was never set anywhere in this file) every
+      # time the gateway container was recreated. A blank ReadOnlyApi left the underlying TWS/
+      # Gateway setting at ITS OWN default, which is apparently read-only -- confirmed live: a
+      # real market order (the new reprotect_naked_positions() fix's first genuine order
+      # attempt on this deployment) was rejected outright with "Error 321: The API interface is
+      # currently in Read-Only mode," completely independent of BYPASS_WARNING (that only covers
+      # the one-time precaution-confirmation POPUP, not this persisted checkbox). This is a
+      # SEPARATE setting from BYPASS_WARNING and must be explicit -- distinct from the "session
+      # still exists" class of bug, this silently blocks EVERY order on a freshly-rebuilt
+      # container regardless of login/connection success.
+      - READ_ONLY_API=no
     ports:
       # Host 14002 purely for my own debugging (docker/wsl2-local only, not published
       # further) -- the dashboard service reaches it via the compose network's internal DNS

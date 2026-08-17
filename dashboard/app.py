@@ -1355,7 +1355,15 @@ def portfolio_panel() -> None:
                 continue
             seen_tickets.add(ticket)
         mv_usd = p["volume"] * p["open"] + p.get("profit", 0.0)
-        raw.append((id_to_sym.get(pid, str(pid)), mv_usd * usd_to_base, mv_usd))
+        # FIXED 2026-08-17: id_to_sym only covers paper_trades status='OPEN' rows -- a
+        # position whose paper_trades row resolved (e.g. horizon-expiry) without the
+        # broker-side close actually executing fell through to str(pid), a bare unlabeled
+        # paper_id number on the chart. Confirmed live: 5 real LIVE positions (AMLP/CPER/
+        # DBC/IWM/VNQ) had their correct dollar value included in the pie the whole time --
+        # only the LABEL was ever wrong. ib_mirror's own local_symbol (carried on `p` by
+        # live_positions() precisely for this) is correct regardless of paper_trades status.
+        label = id_to_sym.get(pid) or p.get("symbol") or str(pid)
+        raw.append((label, mv_usd * usd_to_base, mv_usd))
     if sgov_base > 0:
         raw.append((f"SGOV {sgov_yld}", sgov_base, sgov_base * base_to_usd))
     if cash is not None and cash > 0:
@@ -1877,6 +1885,35 @@ def active_panel() -> None:
         with ui.row().classes("w-full flex-wrap gap-3"):
             for t in confirmed:
                 _trade_card(t, positions.get(t["id"]), real_qty=real_qty_by_id.get(t["id"]))
+    # FLAGGED (2026-08-17): a real broker position (in `positions`, sourced from ib_mirror)
+    # with NO corresponding OPEN paper_trades row -- the strategy resolved/expired the trade
+    # (e.g. horizon-expiry) but the broker-side close never actually executed. Confirmed live
+    # on LIVE: 5 real positions (AMLP/CPER/DBC/IWM/VNQ) sat with zero visibility ANYWHERE in
+    # this panel for 3+ days -- correctly included in every portfolio total (`positions` came
+    # from ib_mirror, which was accurate) but with nothing rendering a card for them at all,
+    # since this whole panel only ever iterates `open_t` (paper_trades status='OPEN'). Shown
+    # READ-ONLY here (no SL/TP/pause/withdraw controls -- there's no live paper_trades record
+    # to act through) so a real, currently-held position is never silently invisible again.
+    # Does NOT touch paper_trades or submit any order -- purely a visibility fix.
+    flagged = {pid: p for pid, p in positions.items() if pid not in {t["id"] for t in open_t}}
+    if flagged:
+        ui.label(f"⚠️ Flagged positions ({len(flagged)}) — broker holds these for real, but "
+                 "the local strategy record shows them already resolved. Read-only; needs "
+                 "manual review (see HANDOFF.md 2026-08-17).").classes(
+            "text-sm font-bold text-orange-9 mt-2")
+        with ui.row().classes("w-full flex-wrap gap-3"):
+            for pid, p in sorted(flagged.items(), key=lambda kv: kv[1].get("symbol") or str(kv[0])):
+                sym = p.get("symbol") or f"id {pid}"
+                with ui.card().classes("p-3").style("border: 1px solid orange"):
+                    ui.label(sym).classes("font-bold")
+                    ui.label(f"{p.get('direction', 'long')} · {p.get('volume', 0):.0f} units "
+                             f"@ avg {p.get('open', 0):.4f}").classes("text-xs text-grey-7")
+                    cp = p.get("current_price")
+                    ui.label(f"current: {cp:.4f}" if cp else "current: —").classes(
+                        "text-xs text-grey-7")
+                    profit = p.get("profit", 0.0)
+                    ui.label(f"unrealized: USD {profit:+,.2f}").classes(
+                        "text-sm font-bold " + ("text-green" if profit >= 0 else "text-red"))
     if pending:
         # GROUPED BY REASON CATEGORY (2026-07-13, replacing one flat "Pending" list):
         # user feedback was that lumping "a real order is genuinely waiting to fill" together

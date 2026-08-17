@@ -744,12 +744,18 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
     return msg
 
 
-def manual_close_sleeve(trade: dict, reason: str) -> str | None:
-    """Flatten a sleeve position for a DYNAMIC exit (5MA-touch / time-cap) that a static
-    broker bracket can't express: cancel the outstanding STP+LMT children, then submit a
-    market SELL to flatten. Does NOT resolve the paper trade itself -- the next
-    sync_closures() cycle picks up the resulting broker-truth closing fill exactly like any
-    other exit (that code path is method-agnostic, already reused as-is)."""
+def manual_close_position(trade: dict, reason: str) -> str | None:
+    """Flatten a position for a DYNAMIC exit (a condition a static broker bracket can't
+    express -- 5MA-touch/time-cap for the sleeve, horizon-expiry for the core method) --
+    cancel the outstanding STP+LMT children, then submit a market SELL to flatten. Does NOT
+    resolve the paper trade itself -- the next sync_closures() cycle picks up the resulting
+    broker-truth closing fill exactly like any other exit (that code path is method-agnostic).
+
+    GENERALIZED 2026-08-17 from the sleeve-only manual_close_sleeve() (nothing in the actual
+    implementation was ever sleeve-specific, only the docstring/orderRef label) -- the core
+    ATR method needed the exact same real-order-submission primitive for its own horizon-
+    expiry closing (see paper.py::close_expired_trades()), so this is now shared rather than
+    duplicated. manual_close_sleeve() below is a thin compatibility wrapper."""
     ib = _guard()
     if ib is None:
         return None
@@ -780,17 +786,32 @@ def manual_close_sleeve(trade: dict, reason: str) -> str | None:
                 ib.cancelOrder(o.order)
         import ib_async
         market = ib_async.MarketOrder("SELL", abs(qty))
-        market.orderRef = f"sleeve-exit#{trade['id']}"
+        # FIXED 2026-08-18: found live -- an ib_async MarketOrder with tif left unset gets
+        # outright CANCELLED by this account's order presets ("Error 10349: Order TIF was set
+        # to DAY based on order preset", terminal status Cancelled, filled=0) rather than
+        # silently accepted with an adjusted TIF -- confirmed via reprotect_naked_positions()'s
+        # first real order on this deployment (QQQ #145's naked-position close). This is every
+        # caller of manual_close_position() (dynamic sleeve exits, horizon-expiry closes, and
+        # this naked-position close) -- setting tif explicitly avoids relying on IBKR's preset
+        # guessing right.
+        market.tif = "DAY"
+        market.orderRef = f"exit#{trade['id']}"
         if acct:
             market.account = acct
         return ib.placeOrder(contract, market)
     try:
         sent = ib_client.call(_do, timeout=15)
     except Exception as e:                     # noqa: BLE001
-        return f"{trade['instrument']}: sleeve exit send failed ({e}), retry"
+        return f"{trade['instrument']}: dynamic exit send failed ({e}), retry"
     if sent is None:
         return None
-    return f"{trade['instrument']}: sleeve DYNAMIC EXIT ({reason}) -- flatten order sent"
+    return f"{trade['instrument']}: DYNAMIC EXIT ({reason}) -- flatten order sent"
+
+
+def manual_close_sleeve(trade: dict, reason: str) -> str | None:
+    """Thin compatibility wrapper -- see manual_close_position(), which this now delegates
+    to entirely. Kept so sleeve.py's existing call site needs no change."""
+    return manual_close_position(trade, reason)
 
 
 # ADDED 2026-07-30: called from the dashboard's per-trade "Withdraw" button (app.py's
@@ -1098,7 +1119,7 @@ def live_positions() -> dict | None:
     if ib is None:
         return None
     with paper._LOCK, _conn() as c:
-        rows = c.execute("SELECT paper_id, con_id, qty FROM ib_mirror "
+        rows = c.execute("SELECT paper_id, con_id, qty, local_symbol FROM ib_mirror "
                          "WHERE status='OPEN'").fetchall()
     acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     try:
@@ -1108,7 +1129,7 @@ def live_positions() -> dict | None:
     except Exception:                                  # noqa: BLE001 -- read failed, keep last-good
         return None
     out: dict[int, dict] = {}
-    for paper_id, con_id, qty in rows:
+    for paper_id, con_id, qty, local_symbol in rows:
         p = positions.get(con_id)
         if p is None or p.position == 0:
             continue
@@ -1127,8 +1148,122 @@ def live_positions() -> dict | None:
             "profit": float(pf.unrealizedPNL) if pf else 0.0,
             "current_price": float(pf.marketPrice) if pf and pf.marketPrice else None,
             "volume": float(abs(p.position)),
-            "direction": "long" if p.position > 0 else "short"}
+            "direction": "long" if p.position > 0 else "short",
+            # ADDED 2026-08-17: found live -- app.py's allocation pie looks up each slice's
+            # LABEL via paper.open_trades() (paper_trades status='OPEN'), completely separate
+            # from this dict's own con_id-matched VALUE. A real position whose paper_trades
+            # row resolved (e.g. horizon-expiry marked it EXPIRED) without the broker-side
+            # close actually executing -- confirmed live: 5 real LIVE positions (AMLP/CPER/
+            # DBC/IWM/VNQ) sat with a real dollar value correctly included in every portfolio
+            # total, but rendered as a bare unlabeled paper_id number on the pie chart, because
+            # the label lookup had nothing to find. ib_mirror's own local_symbol is always
+            # correct regardless of paper_trades' status, so give callers a reliable fallback
+            # instead of them falling back to str(paper_id).
+            "symbol": local_symbol}
     return out
+
+
+def reprotect_naked_positions() -> list[str]:
+    """Structural fix (2026-08-18): a resting TP/SL bracket at the broker can vanish
+    independent of anything this app does -- confirmed live: QQQ #145's dipbuy-sleeve
+    bracket disappeared at some point (likely a paper-gateway session drop cancelling
+    resting orders), leaving a real, fully-funded position with ZERO broker-side
+    protection while paper_trades still showed it OPEN with its original sl/tp.
+    resolve_open()'s price-only check then independently decided (days later) the trade
+    had hit its target, marking it WIN from pure price data even though the broker never
+    got an order to actually realize that outcome -- same root shape as the horizon-
+    expiry gap fixed earlier this session (paper_trades resolving independently of real
+    broker state), just triggered by a lost order instead of a missing active-close
+    mechanism. Must run BEFORE resolve_open() in service.py's cycle, same load-bearing
+    ordering as close_expired_trades(). Applies to EVERY method (sleeve included -- this
+    bug was found on a sleeve trade, unlike close_expired_trades() which excludes it).
+
+    For every OPEN, funded position with no resting broker order: if price has already
+    crossed its own stored tp/sl, the exit SHOULD have already happened -- close it for
+    real now (manual_close_position(), same primitive as horizon-expiry/dynamic exits;
+    sync_closures() picks up the resulting genuine fill next cycle). Otherwise it's still
+    a live, in-play position that simply lost protection -- re-arm a fresh bracket at the
+    same stored levels."""
+    ib = _guard()
+    if ib is None:
+        return []
+    acct = ib_client.account_id()
+    with paper._LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT m.paper_id, m.con_id, m.qty, t.instrument, t.direction, t.sl, t.tp "
+            "FROM ib_mirror m JOIN paper_trades t ON t.id = m.paper_id "
+            "WHERE m.status='OPEN' AND t.status='OPEN'").fetchall()
+    if not rows:
+        return []
+    try:
+        open_con_ids, portfolio = ib_client.call(lambda: (
+            {o.contract.conId for o in (ib.openTrades() or [])},
+            {i.contract.conId: i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)}))
+    except Exception:                                  # noqa: BLE001 -- read failed, retry next cycle
+        return []
+    logs: list[str] = []
+    from dashboard.core import notable_events
+    for paper_id, con_id, qty, instrument, direction, sl, tp in rows:
+        if con_id in open_con_ids:
+            continue                                   # already protected, nothing to do
+        pf = portfolio.get(con_id)
+        price = float(pf.marketPrice) if pf and pf.marketPrice else None
+        if price is None:
+            continue                                   # no live mark yet, retry next cycle
+        long = (direction == "long")
+        past_tp = (price >= float(tp)) if long else (price <= float(tp))
+        past_sl = (price <= float(sl)) if long else (price >= float(sl))
+        trade = {"id": paper_id, "instrument": instrument}
+        if past_tp or past_sl:
+            reason = ("naked position already past its own take-profit (missing bracket), "
+                     "closing now") if past_tp else \
+                     ("naked position already past its own stop-loss (missing bracket), "
+                     "closing now")
+            msg = manual_close_position(trade, reason)
+            if msg:
+                logs.append(msg)
+                log.warning("ib_exec: %s", msg)
+                notable_events.record(f"Naked position closed: {msg}", level="warning")
+        else:
+            msg = _reprotect_bracket(ib, trade, con_id, qty, direction, sl, tp, acct)
+            if msg:
+                logs.append(msg)
+                log.warning("ib_exec: %s", msg)
+    return logs
+
+
+def _reprotect_bracket(ib, trade: dict, con_id: int, qty: float, direction: str,
+                       sl: float, tp: float, acct: str | None) -> str | None:
+    """Re-arm a resting TP/SL OCA pair for a position the broker already holds but which
+    lost its protective orders -- no market parent (we already own the shares/units)."""
+    contract = ib_client.stock_contract(trade["instrument"])
+    if contract is None:
+        return f"{trade['instrument']}: no stock contract (market data?), retry"
+    action = "SELL" if direction == "long" else "BUY"
+    qty = abs(qty)
+    tp_px, sl_px = round(float(tp), 2), round(float(sl), 2)
+
+    def send():
+        import ib_async
+        oca = f"reprotect{trade['id']}"
+        tp_order = ib_async.LimitOrder(action, qty, tp_px)
+        sl_order = ib_async.StopOrder(action, qty, sl_px)
+        for o in (tp_order, sl_order):
+            o.ocaGroup = oca
+            o.ocaType = 1
+            o.tif = "GTC"
+            o.orderRef = f"reprotect#{trade['id']}"
+            if acct:
+                o.account = acct
+        return [ib.placeOrder(contract, o) for o in (tp_order, sl_order)]
+    try:
+        ib_client.call(send, timeout=15)
+    except Exception as e:                     # noqa: BLE001
+        return f"{trade['instrument']}: reprotect order send failed ({e}), retry"
+    msg = f"{trade['instrument']}: re-armed bracket for {qty} SL {sl_px} TP {tp_px}"
+    from dashboard.core import notable_events
+    notable_events.record(f"Naked position re-protected: {msg}", level="warning")
+    return msg
 
 
 # --- keep cash in USD (clear the USD margin debit; earn USD interest) -------------

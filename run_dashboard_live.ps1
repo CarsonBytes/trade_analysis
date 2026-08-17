@@ -37,6 +37,23 @@ $env:DASH_PORT       = "8081"          # LIVE UI on its own local port
 $env:PAPER_URL       = "https://quant.carsonng.com"
 $env:LIVE_URL        = "https://quant-live.carsonng.com"
 
+# FIXED 2026-08-17: Stop-Process -Force can silently fail with "Access is denied" against a
+# python.exe launched by a DIFFERENT Scheduled Task invocation (a different logon/token
+# context than whatever session is issuing the kill) -- confirmed live: an Aug-15 stale
+# process survived a same-day Stop/Start-ScheduledTask cycle undetected, because this guard's
+# own kill attempt failed silently (-ErrorAction SilentlyContinue swallowed it) and the
+# "new" instance then failed to bind the still-held port and exited, leaving the truly-stale
+# process running for 2 more days. WMI's Win32_Process.Terminate() uses a different privilege
+# path that empirically works where Stop-Process doesn't -- this is the EXACT same fix this
+# script's own $mon job below already uses for the java.exe gateway process (Kill-ProcessHard);
+# this port-guard used the weaker Stop-Process the whole time and was never updated to match.
+function Kill-ProcessHardTopLevel($procId) {
+    try {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop
+        if ($p) { Invoke-CimMethod -InputObject $p -MethodName Terminate -ErrorAction Stop | Out-Null }
+    } catch { }
+}
+
 # SELF-HEALING PORT GUARD (2026-07-21): Stop-ScheduledTask only kills THIS script's own
 # top-level process -- a NiceGUI/uvicorn child spawned by `python -m dashboard.app` below can
 # become ORPHANED (its parent already gone) and keep running independently, silently
@@ -60,7 +77,7 @@ if ($staleConns) {
                 "$(Get-Date -Format o) [live] killing stale process already on port $portNum -- " +
                 "PID $stalePid, started $($p.CreationDate), cmd: $($p.CommandLine)")
         } catch { }
-        Stop-Process -Id $stalePid -Force -ErrorAction SilentlyContinue
+        Kill-ProcessHardTopLevel $stalePid
     }
     Start-Sleep -Seconds 2
 }
@@ -93,7 +110,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyC
                 "$(Get-Date -Format o) [live] killing hung dashboard.app process confirmed " +
                 "connected to the LIVE gateway (port 4001) but NOT holding DASH_PORT -- " +
                 "PID $($_.ProcessId), started $($_.CreationDate)")
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Kill-ProcessHardTopLevel $_.ProcessId
         }
 }
 # Cash automation on the live book (optional; comment out to manage cash manually at first):
@@ -199,11 +216,69 @@ $mon = Start-Job -ScriptBlock {
         Get-CimInstance Win32_Process -Filter "Name='java.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -match 'IBC-Live' }
     }
+    # MARKET-OPEN LEAD WINDOW (2026-08-08, REVISED same day after a Sat/Sun day-of-week
+    # heuristic proved too coarse): every force-kill-and-relaunch below is a FULL COLD LOGIN,
+    # which pushes a fresh 2FA approval to the phone (see Kill-ProcessHard's call site
+    # comment) -- so this loop should only try to force a reconnect when it's actually close
+    # to being needed, not any time port 4001 happens to be down. The FIRST version of this
+    # gate used a blunt "dormant all Saturday, active from Sunday 19:00 HKT" rule -- confirmed
+    # in C:\IBC-Live\watchdog.log this was still wrong: on 2026-08-09 (Sun) it went "active" at
+    # 19:00 as designed, but the gateway was still down more than 3 hours later (IBKR's own
+    # weekend server-side maintenance window, not a real 2FA-timeout stuck-state), and the loop
+    # burned all 10 auto-kill/2FA attempts between 22:29-23:18 HKT -- ~23 HOURS before Monday's
+    # real 21:30 HKT open, exactly the "far before market open" complaint. Replaced the
+    # day-of-week heuristic with a real market-hours calculation (DST-aware via Windows' own
+    # "Eastern Standard Time" zone data, not a fixed HKT offset): active only during the actual
+    # NYSE session, or within $LeadMinutes of the next weekday 9:30am ET open. This does NOT
+    # use the dashboard's own pandas_market_calendars-based holiday calendar (that lives in
+    # dashboard.core.market_calendar and needs the full app's env/imports) -- deliberately kept
+    # dependency-free here since this loop is itself part of the recovery path for a live,
+    # real-money connection; a holiday miscalculation just means occasionally staying active an
+    # extra day, which is harmless, versus adding an import that could itself fail.
+    function Test-NearMarketOpen {
+        param([int]$LeadMinutes = 90)
+        $etZone = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+        $nowEt = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $etZone)
+        $isWeekday = { param($d) $d.DayOfWeek -notin @('Saturday', 'Sunday') }
+        $openEt = $nowEt.Date.AddHours(9).AddMinutes(30)
+        $closeEt = $nowEt.Date.AddHours(16)
+        if ((& $isWeekday $nowEt) -and $nowEt -ge $openEt -and $nowEt -lt $closeEt) { return $true }
+        if ((& $isWeekday $nowEt) -and $nowEt -lt $openEt) {
+            $nextOpen = $openEt
+        } else {
+            $probe = $nowEt.Date.AddDays(1)
+            while (-not (& $isWeekday $probe)) { $probe = $probe.AddDays(1) }
+            $nextOpen = $probe.AddHours(9).AddMinutes(30)
+        }
+        return (($nextOpen - $nowEt).TotalMinutes -le $LeadMinutes)
+    }
     $stuckSince = $null
     $autoKillCount = 0
-    $stuckThresholdMin = 2
+    $stuckThresholdMin = 5
     $maxAutoKills = 10
+    $wasNearOpen = $false
     while ($true) {
+        $nearOpen = Test-NearMarketOpen -LeadMinutes 90
+        # BUG FIXED 2026-08-10: $autoKillCount only ever reset on a successful Test-Port --
+        # if an episode exhausted all 10 attempts without ever reconnecting (exactly what
+        # happened Sunday night above), the budget stayed at 10 for the rest of the script's
+        # life, silently disabling the aggressive kill-and-relaunch path for every SUBSEQUENT
+        # episode too -- including the next real pre-market window, where it fell back to
+        # passive-relaunch-only (which can't clear an already-stuck process) and just sat
+        # there until the user manually restarted the task. Reset the budget fresh every time
+        # we newly enter an active window, so a failed weekend episode can't cripple the next
+        # day's real recovery.
+        if ($nearOpen -and -not $wasNearOpen) {
+            $stuckSince = $null
+            $autoKillCount = 0
+        }
+        $wasNearOpen = $nearOpen
+        if (-not $nearOpen) {
+            $stuckSince = $null
+            $autoKillCount = 0
+            Start-Sleep -Seconds 300
+            continue
+        }
         if (Test-Port 4001) {
             $stuckSince = $null
             $autoKillCount = 0
