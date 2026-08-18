@@ -1183,6 +1183,16 @@ def portfolio_panel() -> None:
                   "capped near available cash with no multiple. If this stays equal to Total "
                   "value on an account you expect to be margin-enabled, margin capacity likely "
                   "isn't actually active — confirm in IBKR's Account Management portal.")
+        # ADDED 2026-08-18 (user-requested): net_flows (computed above for the Total P&L
+        # stat's own math) was never itself surfaced anywhere -- a real deposit-heavy account
+        # gave the user no on-dashboard way to see "how much have I actually put in" without
+        # opening the Cash flows dialog and summing the list by hand. Shown even when zero
+        # (unlike Unrealized/Invested's gating above) -- "nothing recorded" is itself
+        # informative here, matching the Cash flows dialog's own "Nothing recorded yet" state.
+        _stat("Net deposits", _money(net_flows), "text-grey-9",
+              "Total money moved into the account minus money moved out, since tracking "
+              "began — not trading P&L (see Total P&L above). Open Cash flows to see or "
+              "edit the individual entries.")
 
     # Period control: governs BOTH charts below. The drawdown "now" badge + the peak-tracking
     # always use the FULL history (correctness -- a window can't hide the true current DD from
@@ -2411,11 +2421,35 @@ def _open_cash_flows() -> None:
 
         flows, _ = store.cache_get("cash_flows")
         flows = list(flows or [])
+        # ADDED 2026-08-18 (user-requested): the list below only ever showed individual
+        # entries -- no running total, so "how much have I put in, net" required manually
+        # summing every row by hand. Grouped by currency (defensive -- in practice every
+        # entry uses the account's own base ccy, since the Amount field above isn't
+        # currency-selectable, but a stray hand-typed value shouldn't silently misreport).
+        net_lbl = ui.label("").classes("text-base font-bold")
+
+        def _render_totals(cur: list) -> None:
+            if not cur:
+                net_lbl.set_text("Net deposits: nothing recorded yet")
+                net_lbl.classes(replace="text-base font-bold text-grey-6")
+                return
+            by_ccy: dict[str, float] = {}
+            for f in cur:
+                by_ccy[f[2]] = by_ccy.get(f[2], 0.0) + f[1]
+            text = "Net deposits: " + "  ·  ".join(
+                f"{amt:+,.2f} {c}" for c, amt in by_ccy.items())
+            net_lbl.set_text(text)
+            total = sum(by_ccy.values())
+            net_lbl.classes(replace="text-base font-bold " +
+                            ("text-green" if total > 0 else
+                             "text-red" if total < 0 else "text-grey-6"))
+
         body = ui.column().classes("w-full gap-1")
 
         def _render_list() -> None:
             body.clear()
             cur, _ = store.cache_get("cash_flows")
+            _render_totals(cur or [])
             with body:
                 if not cur:
                     ui.label("Nothing recorded yet.").classes("text-sm text-grey-6")
