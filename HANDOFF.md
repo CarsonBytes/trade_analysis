@@ -1,7 +1,382 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-17.
+Last updated 2026-08-18.
+
+---
+
+### 🚀 CUTOVER 2026-08-18: LIVE account fully moved from native Windows to WSL2/Docker, real login verified, native decommissioned
+
+User's own call: native live's Task Scheduler deployment had become structurally unreliable
+(see the orphan-supervisor entry below) -- rather than keep chasing that, move live to Docker,
+mirroring paper's already-proven 2026-08-12/13 migration. Real money throughout. Staged
+deliberately per that migration's own retrospective (HANDOFF 2026-08-13, "requires a separate
+explicit go-ahead given real money is involved"): a parallel/stub build+verify phase with zero
+live-account risk, an explicit go/no-go checkpoint, THEN real credentials -- not one continuous
+cutover.
+
+**Two landmines found and fixed BEFORE they could bite in production** (read the source before
+building, not live in prod):
+1. `dashboard/core/mode.py::resolve_mode()` (lines 24-26), when `DASH_FIXED_MODE=live`, runs
+   `os.environ["IB_PORT"] = os.environ.get("LIVE_IB_PORT", "4001")` UNCONDITIONALLY on every
+   boot. Setting `IB_PORT` directly in the live compose file (the naive port of paper's own
+   file, which has no such override) would have been silently clobbered back to native's
+   unreachable port 4001 every boot -- the exact same bug class as the `DASH_DB_NAME` overwrite
+   that broke paper for a while (HANDOFF item A.1, 2026-08-13). Fixed by using `LIVE_IB_PORT`
+   in `docker-compose.live.yml`, never `IB_PORT` directly.
+2. `ib_exec.py::_guard()`'s live-port allowlist was native-only (`7496, 4001`) -- the same gap
+   that silently blocked every paper trade until the 4002->4004 fix. Discovered the real
+   Docker-live relay port (**4003**) via `docker exec quant-ibgateway-live-docker ps aux`
+   during the stub build (`socat TCP-LISTEN:4003,fork TCP:127.0.0.1:4001`, same pattern as
+   paper's 4002->4004), added it to the allowlist with a regression test
+   (`test_guard_live_port_allowlist`) BEFORE any real order could be placed from Docker-live.
+
+**Naming/ports** (no collisions with native or Docker-paper): `docker-compose.live.yml`
+(separate file from `docker-compose.yml` -- that one is auto-deployed by paper's pre-push git
+hook; merging live in would risk an ordinary paper push recreating live containers).
+`quant-dashboard-live-docker` (18081->8091), `quant-ibgateway-live-docker` (14001->4003 debug
+publish), `IB_CLIENT_ID=41`, `DASH_DB_NAME=/data/dashboard_live_docker.db`, network subnet
+`172.32.0.0/16` (the plan originally assumed `172.30.0.0/16` was free -- checked every Docker
+network on the machine directly and found event-radar already owns that one; paper=172.29,
+study-platform=172.28, event-radar-demo=172.19, llm-usage-dashboard=172.31).
+
+**Stage 2 (stub, blank credentials, zero live-account risk)**: both containers built and ran
+clean -- zero crashes, correct "gateway down" graceful degradation, full isolation confirmed
+against native paper/live and Docker paper throughout. Took an actual screenshot (`xdotool` +
+`imagemagick`, baked into `Dockerfile.gateway` already) to confirm "Live Trading" mode's real
+pixel coordinate (433,262 -- mirrors paper's "Paper Trading" at 631,255, same layout, mirrored
+selection) rather than guessing.
+
+**Stage 3 (real login) -- three real incidents, in the order hit:**
+
+1. **Session tug-of-war**: `EXISTING_SESSION_DETECTED_ACTION=primary` alone wasn't enough --
+   native live's own gateway kept auto-reconnecting within seconds of being kicked, an
+   infinite "Existing session detected" -> "Reconnect This Session" -> "Connecting to
+   server..." -> "Existing session detected" loop, never resolving. Same tug-of-war class
+   paper's own 2026-08-12/13 cutover hit. Fixed by pausing native live's gateway process
+   (`java.exe`, matched by `CommandLine -match 'IBC-Live'`, the same specific non-substring
+   signal this codebase already uses elsewhere -- never a bare name match near anything
+   live-money-adjacent) so Docker's login could win the session outright instead of fighting
+   over it. IBKR's server-side session state took roughly a minute to catch up to the local
+   kill before the loop actually stopped.
+
+2. **API Type selector drift -- a real credential-exposure near-miss.** The gateway login
+   form has TWO independent selectors: "Trading Mode" (Live/Paper, already defended with an
+   explicit click) and "API Type" (FIX CTCI/IB API, which `gateway-login-live.sh` never
+   accounted for at all). On a login retry, "API Type" had silently drifted from IB API to
+   FIX CTCI -- a completely different form layout. The script's fixed-coordinate field fills
+   landed on FIX CTCI's fields instead, and **the real password ended up visibly displayed in
+   a plaintext (non-masked) field on screen**, which then got captured in a diagnostic
+   screenshot taken to investigate a stuck 2FA wait. Confirmed no actual harm: FIX CTCI's own
+   "Log In" button sits at a different position than IB API's, so the script's blind click
+   missed it entirely -- nothing was actually submitted to IBKR, no malformed-login attempt,
+   no lockout risk. Still recommended rotating the live account password out of caution.
+   **Fixed**: `gateway-login-live.sh` now explicitly clicks "IB API" (coordinate 631,221,
+   confirmed from the original clean screenshot) before touching any field, same defensive
+   principle as the Trading Mode click, closing the exact class of gap that let this happen.
+
+3. **Real 2FA, no bypass exists.** Unlike `BYPASS_WARNING` (a one-time software precaution
+   dialog), 2FA is a genuine IBKR Mobile push notification requiring a human tap -- confirmed
+   live: the first login attempt after the container was freshly recreated auto-triggered a
+   real "Second Factor Authentication" dialog with a live "Notification sent" state. The
+   script's own bounded ~240s poll (added this session specifically because this can't be
+   automated) timed out once before the user caught and approved it via the dialog's own
+   "Resend Notification" link. Two-signal verification confirmed success exactly like paper's
+   own precedent: IBC's "Login has completed" AND the dashboard's own "ib_client: connected
+   ib-gateway-live:4003 clientId=41" -- plus a live-specific third check, the dashboard header
+   reading "IBKR LIVE: acct U12991898", confirming `_guard()`'s account-match didn't silently
+   refuse a wrong-account connection.
+
+**A fourth, more serious incident found immediately after, during verification -- see the
+dedicated entry below** (`ib.openTrades()` misdiagnosing ALL 11 real live positions as naked
+and placing 22 duplicate orders): this happened while confirming the naked-position structural
+fix (shipped hours earlier the same session) was working correctly against the newly-live
+Docker deployment. Caught and fully reverted within the same session before any duplicate
+order could fire.
+
+**Stage 6 (historical backfill)**: copied 43 `paper_trades` rows, 39 `ib_mirror` rows, and the
+`equity_history`/`sgov_history`/`spy_benchmark`/`equity_inception`/`cash_flows` cache series
+from native's `dashboard_live.db` into the fresh Docker DB (merged the two equity/sgov series
+by timestamp -- native's 3000 points + Docker's own handful of fresh points since login,
+deduped; the rest copied straight across) -- mirrors paper's own HANDOFF 2026-08-13 backfill
+precedent exactly, including the same non-destructive discipline (never duplicate an
+`ib_mirror` row for an already-tracked con_id; Docker's table was empty, so a full copy was
+safe here). Verified: `reconcile: matched`, all 11 real positions showing "verified" with
+correct entry/SL/TP/tickets, `P&L check: agrees`, Total P&L HKD 3,632 matching the corrected
+baseline (see the P&L entry below).
+
+**Stage 5 (native cleanup)**: re-enumerated the native live process fresh (never trusted the
+earlier session's PID from memory) -- port 8081's owner (PID 21792) and its full parent chain
+up to the top-level `run_dashboard_live.ps1` wrapper (PID 18976), confirmed via the specific
+port-ownership signal, not a name/path substring. Killed via the already-proven
+`Invoke-CimMethod ... -MethodName Terminate` (plain `Stop-Process` already known to fail
+silently in this exact cross-context scenario). Verified clean: no `java.exe`, port
+8081/4001 both down. `DashboardAppLive` scheduled task disabled via `schtasks /change
+/tn "DashboardAppLive" /disable` (this session's own permissions couldn't run
+`Disable-ScheduledTask`/`schtasks` directly -- access denied both ways -- user ran it).
+
+**Cloudflare Tunnel**: `quant-live.carsonng.com` still pointed at native's now-dead port 8081.
+Wrote `fix-tunnel-route-live.ps1`, mirroring `fix-tunnel-route.ps1`'s exact proven pattern from
+paper's own 2026-08-13 cutover (same tunnel/account, same Cloudflare-API-token approach) --
+repoints to `localhost:18081`. Claude Code's own permission classifier hard-blocks combining a
+`CLOUDFLARE_API_TOKEN` with an `api.cloudflare.com` call (same hard boundary documented in the
+paper cutover entry) -- user ran it themselves. Verified after: `https://quant-live.carsonng.com/`
+correctly reaches the Cloudflare Access login gate again, not a 502.
+
+**Files added**: `docker-compose.live.yml`, `.env.live` (gitignored)/`.env.live.example`,
+`scripts/gateway-login-live.sh`, `scripts/wsl2-docker-deploy-live.sh` (deliberately never
+wired into any git hook -- stays manually invoked indefinitely, unlike paper's auto-deploy),
+`fix-tunnel-route-live.ps1`. **Files changed**: `dashboard/execution/ib_exec.py` (`_guard()`'s
+live port tuple), `dashboard/tests/test_ib_exec.py` (new allowlist test), `.gitignore`.
+
+---
+
+### 🐞 FIXED 2026-08-18: `reprotect_naked_positions()` (shipped hours earlier the same
+session) misdiagnosed ALL 11 real LIVE positions as naked and placed a duplicate bracket on
+top of every one -- caught and fully reverted before any order could fire
+
+Found immediately after Stage 3's real login above, while confirming the naked-position fix
+(built and tested against paper earlier the same session -- see the entry below) was working
+correctly on the freshly-live Docker deployment. It ran, and logged 11 "re-armed bracket"
+messages -- for AMLP, CPER (both lots), DBC, EEM, EFA, IWM, QQQ, SPY, VNQ. **Every single one
+of the account's real, already-protected positions.**
+
+**Root cause**: `ib.openTrades()` is a PASSIVE, CLIENT-LOCAL cache -- it only reflects orders
+this specific client CONNECTION has itself placed or already been told about. A fresh
+connection's cache starts genuinely empty even though the broker is showing real, resting
+orders placed by a different client/session (the original entry-time brackets, all still
+genuinely resting the whole time -- nothing had actually vanished, unlike the QQQ #145 case
+below where the bracket really was gone). `reprotect_naked_positions()`'s original detection
+used exactly this call, so every real bracket was invisible to it, and it dutifully "fixed"
+what wasn't broken -- placing a full second STP+LMT pair (unlinked OCA group from the
+original) on top of every position. Confirmed via an independent `reqAllOpenOrders()` check
+(the broker-wide view, not client-scoped): 44 total orders resting, 22 legitimate (`quant#*`
+orderRef) + 22 duplicate (`reprotect#*`). **The real risk**: two unlinked STP orders for the
+same shares at the same stop level -- if price had hit a stop, both could have tried to fire,
+attempting to sell 2x the actual holding.
+
+**Fix, verified immediately**: cancelled all 22 `reprotect#*` orders (had to reconnect with
+the SAME client ID that placed them -- a different client's `cancelOrder()` call fails with
+"Error 10147: OrderId not found", even though `reqAllOpenOrders()` can SEE the order; only the
+originating client can cancel it directly). Confirmed clean: exactly the original 22
+legitimate orders remain, every position quantity still matches. Root cause fixed in
+`ib_exec.py`: replaced the `ib.openTrades()` read with `ib.reqAllOpenOrdersAsync()` via
+`ib_client._run()` (the async path, matching the already-proven-safe pattern in
+`ib_client.broker_open_order_symbols()` -- NOT the sync `ib_client.call()` wrapper this
+function used before, since `reqAllOpenOrdersAsync()` is a coroutine, not a plain sync
+accessor like `openTrades()`/`portfolio()`). New regression test
+(`test_reprotect_naked_positions_uses_account_wide_order_view`) asserts a position whose order
+is invisible to `openTrades()` but present in the account-wide view is correctly left alone --
+if this regresses back to reading `openTrades()`, the test fails immediately instead of
+silently risking a live duplicate order. Verified clean on both paper (redeployed, no false
+positives on the next cycle) and live (re-ran the fixed function directly against the real
+account: 0 actions, all 11 positions correctly recognized as already protected).
+
+**File changed**: `dashboard/execution/ib_exec.py`, `dashboard/tests/test_ib_exec.py`.
+
+---
+
+### 🐞 FIXED 2026-08-18: Total P&L silently understated on the LIVE account (HKD 1,251 shown,
+true figure HKD 3,638) -- the tracking baseline was a rolling-window artifact, not the
+account's real inception
+
+User-reported, verified by reproducing the exact displayed figure from stored data before
+touching anything. `equity_history`'s FIRST recorded snapshot was 2026-07-24 (`base0` for
+every "since tracking began" calculation) -- but the account's two EARLIEST real deposits
+(HKD 10,000 on 07-08, HKD 89,984.61 on 07-10, ~100k combined) landed before that, invisible to
+every downstream calculation (Total P&L stat, the equity chart's zero-reference,
+`current_drawdown_pct()`'s peak, the SPY-benchmark cache key, `pnl_crosscheck()`'s equity
+route). Worse: `equity_history` is capped to the last 3000 readings (`hist[-3000:]` in
+service.py) -- `base0` is a MOVING TARGET that keeps drifting forward as the cap trims, so
+this silently erodes even an account whose full history currently fits in the window.
+Reconciled to the cent: (193,610.19 NetLiq) - (102,371.65 base0 on 07-24) - (89,987.14 net
+flows after 07-24) = 1,251.40, matching the wrong displayed figure exactly; (193,610.19) -
+(0, a true pre-funding baseline) - (189,971.75, ALL four real deposits) = 3,638.44, matching
+the user's own manual calculation and the true lifetime figure.
+
+**Fix**: `paper.with_inception(hist)` -- prepends a permanent, un-trimmable `[ts, 0.0, ccy]`
+baseline (new store key `equity_inception`, set once via a manual backfill at the account's
+true first-deposit timestamp minus 60s) to `hist` at READ time only, never written into
+`equity_history` itself (a stored synthetic point would just get silently evicted by the same
+3000-cap that caused the bug, and would confuse `_find_unrecorded_jump()`'s missed-deposit
+detector and `_self_heal_equity_history()`'s anomaly removal -- both need the RAW series).
+Applied at every display/calculation call site (`portfolio_panel()`'s Total P&L stat, the P&L
+chart, `current_drawdown_pct()`/the DD_HALT_PCT safety gate, the drawdown-duration banner,
+`pnl_crosscheck()`, SPY-benchmark caching) -- deliberately NOT applied to the writer/trim/
+self-heal paths. Verified end-to-end against the real live DB using the actual function (not a
+hand-copy of the formula): 3,638.44 HKD. Confirmed live on the dashboard after the eventual
+Docker cutover: "You are up HKD 3,632" (small drift = real intervening price movement, not
+error), `NET DEPOSITS: HKD 189,972`.
+
+**Also added, same session, user-requested**: a "Net deposits" stat on the main dashboard
+(Cash & financing section, shown even at HKD 0 -- "nothing recorded" is itself informative,
+matching the Cash Flows dialog's own convention) and a running total inside the Cash Flows
+dialog itself, grouped by currency, updating live on add/delete.
+
+**Files changed**: `dashboard/core/paper.py` (`with_inception()`), `dashboard/app.py` (every
+call site above + the Net Deposits UI), `dashboard/web/service.py` (`pnl_crosscheck`, SPY
+benchmark), `dashboard/execution/ib_exec.py` (DD-halt gate), `dashboard/tests/test_paper.py`,
+`dashboard/tests/test_ib_exec.py`.
+
+---
+
+### 🐞 FIXED 2026-08-18: QQQ #145's (paper, dipbuy-sleeve) resting bracket had genuinely
+vanished, leaving 15 real shares naked for ~2.5 weeks -- root cause of, and structural fix
+for, the horizon-expiry orphan class found 2026-08-17
+
+Direct continuation of the 2026-08-17 orphaned-positions investigation (see that day's
+now-superseded plan file) -- the user asked "why does the flagged QQQ position still show as
+flagged?" Investigated with the same ground-truth-first discipline: queried the broker
+directly rather than trusting any cached state.
+
+**Root cause, fully traced**: trade #145's original sleeve entry (07-31) placed a real
+IBKR bracket (`_place_sleeve_bracket()`) at entry, same as every other trade -- but at some
+point since, that resting TP/SL pair genuinely disappeared from the broker (most likely a
+paper-gateway session drop cancelling resting orders, matching the several stuck-gateway
+incidents this project has already documented). Weeks later, `resolve_open()`'s pure
+price-based check saw QQQ's price had crossed the stored TP level and marked the LOCAL
+`paper_trades` row WIN/"take-profit hit" -- correct about the price, wrong about reality,
+since no live order remained to actually realize it. Confirmed directly: `ib.positions()`
+showed the broker still genuinely held 15 real shares; `ib.openTrades()` (client-scoped, see
+the caveat above -- but confirmed independently at the time, this one really was empty) showed
+zero resting orders for it.
+
+**Structural fix**: `ib_exec.reprotect_naked_positions()` (new) -- for every OPEN, funded
+position with no resting broker order: if price has already crossed its own stored TP/SL, the
+exit SHOULD have already happened -- close it for real via the (generalized, see below)
+`manual_close_position()`; otherwise it's still a live in-play position that simply lost
+protection -- re-arm a fresh bracket at the stored levels via new helper
+`_reprotect_bracket()`. Wired into `service.py`'s refresh cycle BEFORE `close_expired_trades()`
+(itself already wired before `resolve_open()`, per 2026-08-17's fix) -- same load-bearing
+"active-close-before-passive-resolve" ordering principle. Applies to EVERY method (sleeve
+included), unlike `close_expired_trades()` which explicitly excludes sleeve.
+
+**Two more real, previously-silent bugs found wiring this up, both fixed the same session**:
+1. Paper Docker's gateway was silently in **read-only API mode** -- IBC's `config.ini.tmpl` has
+   `ReadOnlyApi=${READ_ONLY_API}`, which rendered BLANK because this var was never set anywhere
+   in `docker-compose.yml`. A blank value left the underlying TWS setting at its own default,
+   apparently read-only -- confirmed live: `reprotect_naked_positions()`'s first genuine order
+   attempt on this deployment was rejected outright with "Error 321: The API interface is
+   currently in Read-Only mode," completely independent of `BYPASS_WARNING` (that only covers
+   the one-time precaution-confirmation popup, not this persisted checkbox). Fixed:
+   `READ_ONLY_API=no` added explicitly.
+2. `manual_close_position()`'s `ib_async.MarketOrder` had no `tif` set -- this account's order
+   presets outright CANCELLED it ("Error 10349: Order TIF was set to DAY based on order
+   preset") instead of silently accepting an adjusted TIF, terminal state `Cancelled`,
+   `filled=0`. This affected every caller (dynamic sleeve exits, horizon-expiry closes, and
+   this naked-position close) -- confirmed live this was the FIRST real market order this
+   function had ever actually had to execute past the read-only-API block above, so the bug
+   had been latent and untested until now. Fixed: `market.tif = "DAY"` set explicitly.
+
+**Remediation**: reopened #145 (fresh horizon via the already-existing `reopen_trade()`),
+redeployed twice to work through the two bugs above, confirmed the real close finally filled:
+broker genuinely flat (`ib.positions()` shows no QQQ line), `ib_mirror` CLOSED, `reconcile:
+matched`, UI shows 9 active trades / 0 flagged.
+
+**`manual_close_sleeve()` generalized to `manual_close_position()`** (nothing in the actual
+implementation was ever sleeve-specific, only the orderRef label) -- `sleeve.py`'s one call
+site needs no change, `manual_close_sleeve()` kept as a one-line compat wrapper.
+
+**Files changed**: `dashboard/execution/ib_exec.py`, `dashboard/tests/test_ib_exec.py`,
+`docker-compose.yml` (`READ_ONLY_API=no`).
+
+---
+
+### 🐞 FIXED 2026-08-17/18: the 2026-08-17 horizon-expiry structural gap -- 5 real LIVE + 1
+real PAPER position silently orphaned by the core method's missing active-close mechanism;
+6 positions remediated with fresh horizons
+
+(Written up now, together with the above -- this is the investigation that led directly into
+everything else in this entry and the ones above it.)
+
+**What happened**: user reported open positions "being closed" with no matching closed-trade
+log entry, and a stale allocation pie chart. Verified directly against IBKR: broker held 9
+real LIVE positions, the dashboard only showed 4 open + 1 pending.
+
+**Root cause**: `paper.resolve_open()` is deliberately broker-independent -- it resolves a
+trade to WIN/LOSS/EXPIRED purely from stored SL/TP/`horizon_end` vs real market OHLC,
+regardless of whether a broker order/fill exists (documented in its own docstring). For
+WIN/LOSS this stays accurate in practice because the broker's own resting bracket order
+independently fills when price crosses it. **Horizon expiry has no corresponding resting
+broker order** -- IBKR has no native time-based auto-close; something must actively submit a
+new closing order when the horizon passes. That mechanism
+(`sleeve.close_expired_sleeves()`->`manual_close_sleeve()`) existed ONLY for the
+`dipbuy-sleeve` method. The core `ATR rr3.0` method never had an equivalent.
+`sync_closures()` doesn't catch this either -- it only reconciles `ib_mirror` against the
+broker's reported position; since nothing ever tried to close these, the broker genuinely
+still holds them, so `ib_mirror` stays (correctly) OPEN, no discrepancy for that function to
+see. Confirmed via `service.py`'s call order: sleeve avoids this exact race by padding its own
+`horizon_end` (`TIME_CAP_DAYS*1.5`) so its dynamic time-cap check always fires and closes the
+position for real BEFORE `resolve_open()`'s padded horizon would ever mark it EXPIRED from
+price alone. Core trades use `HORIZON_CAL` (35 days) directly for both purposes -- nothing
+ever ran first to close the position, so `resolve_open()` always "won."
+
+Two secondary display bugs from the same root cause, both fixed live: the allocation pie
+chart looked up each slice's label via `paper.open_trades()` (OPEN-only) and fell back to a
+bare numeric `paper_id` -- fixed by having `ib_exec.live_positions()` carry `local_symbol`
+directly (`ib_mirror`'s own truth, unaffected by `paper_trades` status). "Active Trades"
+showed nothing at all for these -- fixed with a read-only "Flagged positions" section sourced
+directly from the `ib_mirror`-backed `positions` dict.
+
+**Structural fix**: `paper.close_expired_trades()` (new) -- for every OPEN, funded,
+non-sleeve trade past its `horizon_end`, actively submit a real closing order via (the
+now-generalized) `manual_close_position()` BEFORE `resolve_open()` runs each cycle -- wired
+into `service.py` in that exact order, the load-bearing fix (mirrors sleeve's own padding
+trick, generalized into an explicit ordering guarantee instead of a timing coincidence).
+
+**Remediation** (user's explicit choice: reopen with a fresh horizon, not leave flagged):
+`paper.reopen_trade(id, horizon_days)` (new) -- flips a resolved trade back to OPEN with a
+FRESH `horizon_end` computed from now (not the stale original, which would just immediately
+re-expire), keeps the real original entry/SL/TP untouched, logs via `notable_events`. Applied
+to LIVE: AMLP #16, CPER #12, DBC #14, IWM #21, VNQ #15. Applied to PAPER: VNQ #128.
+Explicitly OUT of scope: PAPER's QQQ #145 -- a different root cause (TP-hit, not
+horizon-expiry) -- see the dedicated entry above for its own later fix.
+
+**Also found the same session, real but separate**: `run_dashboard_live.ps1`'s port-guard
+used plain `Stop-Process -Force -ErrorAction SilentlyContinue` to kill a stale process
+holding `DASH_PORT` -- this fails SILENTLY ("Access is denied") against a process from a
+different Task Scheduler logon context, confirmed live via a real kill+restart test that left
+the genuinely-stale process still serving. Fixed: both port-guard kill sites now use
+`Kill-ProcessHardTopLevel` (`Invoke-CimMethod ... -MethodName Terminate`), the same WMI
+approach already proven for the java.exe gateway process elsewhere in this same script.
+
+**Files changed**: `dashboard/execution/ib_exec.py` (`live_positions()`, generalized
+`manual_close_position()`), `dashboard/core/paper.py` (`close_expired_trades()`,
+`reopen_trade()`), `dashboard/web/service.py` (call-order fix), `dashboard/app.py` (Flagged
+positions section), `dashboard/tests/test_ib_exec.py`, `run_dashboard_live.ps1`.
+
+---
+
+### 🐞 FOUND + WORKED AROUND 2026-08-18: native live's Task Scheduler deployment had become
+structurally unable to restart -- TWO successive orphaned supervisor processes, invisible to
+`Stop-ScheduledTask`, silently served stale code for days; root cause behind the decision to
+migrate to Docker (see the CUTOVER entry at the top of this file)
+
+While trying to restart `DashboardAppLive` to ship the horizon-expiry fix above, discovered
+live had been serving **2026-08-15** code the entire time despite every `Stop-ScheduledTask`/
+`Start-ScheduledTask` cycle that day reporting `LastTaskResult: 0` (success). Root cause: a
+`powershell.exe` (`run_dashboard_live.ps1`'s own top-level process) had been running
+continuously since 2026-08-15 22:20:43, holding `Global\DashboardAppLiveMutex` and
+periodically respawning the python dashboard child itself, entirely outside Task Scheduler's
+own tracking -- every `Start-ScheduledTask` since then launched a fresh wrapper that found the
+mutex already held and silently `exit 0`'d via the script's own `if (-not
+$mutex.WaitOne(0,$false)) { exit 0 }` guard, explaining both the "successful" restarts AND
+the total absence of any `restart-guard.log` entries for that whole window.
+
+Killed the confirmed orphan (`Kill-ProcessHardTopLevel`, matched by exact PID, never a
+substring), triggered a fresh restart, confirmed a genuinely new process serving the port --
+but **a SECOND orphan of the identical shape formed from that very restart** (a fresh
+`powershell.exe` from that morning's own earlier restart, same mutex-holding/self-respawning
+behavior) -- confirming this isn't a one-off historical artifact but a structural property of
+how this launcher pattern interacts with Task Scheduler: the resulting long-running process
+becomes untrackable/unstoppable by `Stop-ScheduledTask` after some point. Killed the second
+orphan the same way, confirmed a genuinely fresh process, verified P&L now displaying
+correctly (see the P&L entry above) and gateway/dashboard both healthy.
+
+**Decision**: per the user's own explicit call, did NOT invest further in root-causing or
+fixing the Task Scheduler interaction itself -- native live was going to be decommissioned via
+the Docker migration regardless (see the CUTOVER entry at the top of this file), which makes
+this whole failure class moot rather than something worth hardening in place.
 
 ---
 
