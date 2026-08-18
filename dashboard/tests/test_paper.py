@@ -70,6 +70,56 @@ def test_deposit_adjusted_series():
           deposit_adjusted_series(hist, flows_mixed), [10000.0, 10100.0, 15100.0])
 
 
+def test_with_inception():
+    print("with_inception(): REGRESSION for the 2026-08-18 incident -- the real live "
+          "account's Total P&L stat showed HKD 1,251 instead of the true ~3,638 because "
+          "equity_history's rolling 3000-cap had silently trimmed away the account's two "
+          "earliest deposits (they predated when equity tracking started logging). "
+          "with_inception() prepends a permanent, un-trimmable [ts, 0.0, ccy] baseline "
+          "(store key 'equity_inception') so base0 always reflects the TRUE start:")
+    from dashboard.core import paper
+    from dashboard.core.paper import with_inception
+
+    hist = [[500, 10000.0, "HKD"], [600, 10100.0, "HKD"]]
+
+    with mock.patch.object(paper.store, "cache_get", return_value=(None, None)):
+        check("no inception set -> hist unchanged (no-op, safe default)",
+              with_inception(hist), hist)
+
+    inception = [100, 0.0, "HKD"]     # predates hist[0]'s ts=500
+    with mock.patch.object(paper.store, "cache_get", return_value=(inception, "ts")):
+        got = with_inception(hist)
+        check("inception predating hist[0] gets prepended", got[0], inception)
+        check("original hist entries follow, unchanged", got[1:], hist)
+
+    inception_late = [550, 0.0, "HKD"]   # does NOT predate hist[0]'s ts=500
+    with mock.patch.object(paper.store, "cache_get", return_value=(inception_late, "ts")):
+        check("inception NOT earlier than hist[0] -> hist unchanged (never inserted out of "
+              "chronological order)", with_inception(hist), hist)
+
+    with mock.patch.object(paper.store, "cache_get", return_value=(inception, "ts")):
+        check("empty hist + inception set -> just the inception point",
+              with_inception([]), [inception])
+
+    # end-to-end reproduction of the real incident's numbers, via the SAME formula
+    # portfolio_panel() uses (nl - base0 - net_flows)
+    real_hist = [[1784907861, 102257.13, "HKD"]]           # rolling-window survivor (07-24)
+    _inception_ts = 1783468844
+    real_inception = [_inception_ts, 0.0, "HKD"]             # true start (07-08, pre-window)
+    real_flows = [[_inception_ts + 60, 10000.0, "HKD"],           # 07-08 (predates the OLD base0)
+                  [_inception_ts + 2 * 86400, 89984.61, "HKD"],    # 07-10 (predates the OLD base0)
+                  [_inception_ts + 19 * 86400, 30000.0, "HKD"],    # 07-27 (after)
+                  [_inception_ts + 34 * 86400, 59987.14, "HKD"]]   # 08-11 (after)
+    nl = 193610.19
+    with mock.patch.object(paper.store, "cache_get", return_value=(real_inception, "ts")):
+        corrected = with_inception(real_hist)
+    base0, base0_ts = corrected[0][1], corrected[0][0]
+    net_flows = sum(f[1] for f in real_flows if f[0] >= base0_ts)
+    total_pl = nl - base0 - net_flows
+    approx("reproduces the real incident's true total P&L (HKD 3,638.44, not the "
+          "window-truncated HKD 1,251)", total_pl, 3638.44, tol=0.01)
+
+
 def test_current_drawdown_pct():
     print("current_drawdown_pct:")
     check("empty history -> 0.0", current_drawdown_pct([], None), 0.0)

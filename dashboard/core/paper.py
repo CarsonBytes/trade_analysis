@@ -326,6 +326,39 @@ def stats(rs: list[float]) -> dict:
     }
 
 
+def with_inception(hist: list) -> list:
+    """Prepend the account's permanent zero-P&L inception point (store key
+    "equity_inception", a one-time [ts, 0.0, ccy] record set once via a manual backfill --
+    see HANDOFF.md 2026-08-18) to `hist`, if set and it predates hist[0].
+
+    FOUND LIVE 2026-08-18: the real live account's "Total P&L" stat showed HKD 1,251
+    instead of the true ~3,638 -- `equity_history` is capped to the last 3000 readings
+    (service.py's `hist[-3000:]`), and the account's earliest two deposits (2026-07-08/07-10,
+    ~100k HKD combined) landed BEFORE equity tracking even started logging (2026-07-24), so
+    they were never inside the window at all. Every base0/base0_ts calculation downstream
+    (Total P&L, the equity chart's zero-reference, current_drawdown_pct's peak, the SPY-
+    benchmark cache key, pnl_crosscheck's equity route) silently used hist[0] -- 2026-07-24's
+    reading -- as if THAT were the account's true starting point, when real capital and real
+    trading P&L both predate it. Worse: hist[0] is itself a MOVING TARGET as the rolling
+    3000-cap keeps trimming forward, so this reference silently drifts over time even for an
+    account whose full history fits in the window today.
+
+    Storing the inception point OUTSIDE `equity_history` (rather than seeding it INTO the
+    stored list) is deliberate: anything inside `equity_history` is subject to the same
+    3000-cap trim and to `_self_heal_equity_history()`'s anomaly removal (a lone 0-valued
+    point followed by a multi-week gap to the next real reading would likely get flagged and
+    stripped). This function is a READ-time-only correction -- callers that WRITE
+    equity_history (the append/trim logic, the self-heal pass) or that scan for UNRECORDED
+    jumps (app.py's _find_unrecorded_jump, which would misread the inception-to-first-real-
+    reading gap as a brand new missed deposit) must keep using the raw
+    store.cache_get("equity_history") list, never this wrapper."""
+    from dashboard.core import store
+    inception, _ = store.cache_get("equity_inception")
+    if inception and (not hist or inception[0] < hist[0][0]):
+        return [inception] + hist
+    return hist
+
+
 def deposit_adjusted_series(hist: list, flows: list | None) -> list[float]:
     """hist: [[ts, value, ccy], ...] or [[ts, value, ccy, cash, gpv], ...] (2026-07-27 added
     the trailing cash/gpv fields for service.detect_external_cash_flow() -- `*_` below

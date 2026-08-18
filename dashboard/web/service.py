@@ -264,6 +264,7 @@ def pnl_crosscheck() -> dict:
         acct = STATE.get("account") or {}
         nl, ccy = acct.get("NetLiquidation"), acct.get("_ccy", "")
         hist, _ = store.cache_get("equity_history")
+        hist = paper.with_inception(hist or [])
         flows, _ = store.cache_get("cash_flows")
         if not hist or len(hist) < 2 or nl is None:
             return out
@@ -640,6 +641,7 @@ def refresh_cheap() -> None:
     # strategy doesn't need an intraday-fresh benchmark).
     try:
         hist, _ = store.cache_get("equity_history")
+        hist = paper.with_inception(hist or [])
         if hist:
             import time as _t4
             base0_ts = hist[0][0]

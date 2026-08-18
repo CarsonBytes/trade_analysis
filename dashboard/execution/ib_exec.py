@@ -281,6 +281,7 @@ def mirror_new() -> list[str]:
     dd_halt = float(os.environ.get("DD_HALT_PCT", str(DD_HALT_PCT)))
     if dd_halt < 0:
         hist, _ts = store.cache_get("equity_history")
+        hist = paper.with_inception(hist or [])
         flows, _fts = store.cache_get("cash_flows")
         cur_dd = paper.current_drawdown_pct(hist or [], flows)
         if cur_dd <= dd_halt:

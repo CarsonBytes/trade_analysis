@@ -406,7 +406,7 @@ def health_banner() -> None:
     # otherwise share state with that later panel.
     from dashboard.core import paper as _dd_paper, store as _dd_store
     _hist, _ = _dd_store.cache_get("equity_history")
-    _hist = _hist or []
+    _hist = _dd_paper.with_inception(_hist or [])
     _flows, _ = _dd_store.cache_get("cash_flows")
     dd_dur_txt, dd_dur_colour, dd_dur_tooltip = None, "text-grey-5", ""
     if len(_hist) >= 2:
@@ -934,7 +934,7 @@ def _monthly_attribution() -> list[dict]:
 
     hist, _ts = store.cache_get("equity_history")
     flows, _fts = store.cache_get("cash_flows")
-    hist = hist or []
+    hist = paper.with_inception(hist or [])
     if not hist:
         return []
     ccy = hist[0][2] if len(hist[0]) > 2 else "USD"
@@ -988,7 +988,7 @@ def portfolio_panel() -> None:
     usd_to_base = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)   # USD position vals -> base ccy
     upnl = sum(p.get("profit", 0.0) for p in positions.values()) * usd_to_base
     hist, _ts = store.cache_get("equity_history")
-    hist = hist or []
+    hist = paper.with_inception(hist or [])
     base0 = hist[0][1] if hist else nl                        # value when tracking started
     base0_ts = hist[0][0] if hist else 0
     flows, _fts = store.cache_get("cash_flows")

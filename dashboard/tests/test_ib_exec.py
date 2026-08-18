@@ -70,6 +70,11 @@ def test_mirror_new_dd_halt_end_to_end():
                 return hist, "2026-07-11T00:00:00"
             if key == "cash_flows":
                 return None, None
+            # ADDED 2026-08-18: paper.with_inception() (see its docstring) now reads this key
+            # to correct base0 for the account's true inception -- None here means "unset",
+            # so with_inception() is a no-op and this test's synthetic hist is used as-is.
+            if key == "equity_inception":
+                return None, None
             raise AssertionError(f"unexpected cache_get({key!r}) -- test should not reach here")
         return fn
 
