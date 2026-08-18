@@ -43,6 +43,19 @@ if [ -z "$TWS_USERID" ] || [ -z "$TWS_PASSWORD" ]; then
     exit 1
 fi
 
+# FOUND LIVE 2026-08-18: a SEPARATE selector, "API Type" (FIX CTCI vs IB API), drifted
+# from IB API to FIX CTCI between login attempts on this same container -- a completely
+# different form layout the script never accounted for. Result: the fixed-coordinate
+# field fills landed on FIX CTCI's fields instead, and the real password ended up
+# visibly displayed in the wrong (plaintext, non-masked) field on screen. The "Log In"
+# button also sits at a different position in that layout, so the click missed and
+# nothing was actually submitted -- lucky, not by design. Explicit click added here,
+# same defensive principle as the Trading Mode click below. Coordinate confirmed from
+# the original clean IB API screenshot (API Type row, right-hand button).
+docker exec "$CONTAINER" sh -c "DISPLAY=:1 xdotool mousemove 631 221 click 1" >/dev/null 2>&1
+sleep 1
+log "IB API selected (defense against API Type drift)"
+
 # CONFIRMED 2026-08-18 via a Stage 2 screenshot (blank credentials, zero live-account
 # risk): "Live Trading" sits on the LEFT (paper's "Paper Trading" is on the right at
 # 631,255 -- same layout, mirrored selection). "Live Trading" was ALREADY the default-
