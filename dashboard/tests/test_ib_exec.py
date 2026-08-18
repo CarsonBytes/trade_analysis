@@ -1444,6 +1444,8 @@ def test_reprotect_naked_positions():
              mock.patch.object(ib_exec.ib_client, "filter_by_account",
                               side_effect=lambda items, acct: items), \
              mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch.object(ib_exec.ib_client, "_run",
+                              return_value=[_OpenTrade(333333)]), \
              mock.patch.object(ib_exec.ib_client, "stock_contract",
                               side_effect=lambda sym, **kw: _Contract(0)), \
              mock.patch.object(ib_exec, "manual_close_position",
@@ -1474,6 +1476,85 @@ def test_reprotect_naked_positions():
         check("QQQ stays OPEN (resolution deferred to sync_closures())", s10, "OPEN")
         check("AMLP stays OPEN (just re-armed, not resolved)", s11, "OPEN")
         check("HYG stays OPEN (never touched)", s12, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_reprotect_naked_positions_uses_account_wide_order_view():
+    print("\nib_exec.reprotect_naked_positions(): REGRESSION for the 2026-08-18 LIVE incident "
+          "-- ib.openTrades() is a client-LOCAL passive cache and returns EMPTY for orders "
+          "placed by a different client/connection, even though they're genuinely resting at "
+          "the broker. Confirmed live: ALL 11 of U12991898's real open positions were "
+          "misdiagnosed as naked this way, and this function placed a full second bracket on "
+          "top of every already-protected one (unlinked OCA groups -- a real double-sell risk "
+          "at the stop level, caught and manually cancelled same-session). This test proves "
+          "the fix: a position whose order is invisible to openTrades() but IS returned by "
+          "reqAllOpenOrders() (the account-wide, broker-truth view) must be recognized as "
+          "protected and left alone -- if this regresses back to reading ib.openTrades(), "
+          "this test fails immediately instead of silently risking a live duplicate order:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _OpenTrade:
+        def __init__(self, con_id):
+            self.contract = _Contract(con_id)
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(20,'2026-08-01T00:00:00+00:00','CPER','long','ATR rr3.0',"
+                     "38.0,36.68,41.91,3.0,84.0,'2099-01-01T00:00:00',0.6,'test',"
+                     "'OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(20,0,97462781,'CPER',84.0,300.0,'','2026-08-01T00:00:00','OPEN','etf')")
+
+        class _FakeIB:
+            # THE key assertion: openTrades() (client-local cache) is EMPTY, exactly the
+            # live incident's symptom -- if reprotect_naked_positions() still read this
+            # instead of the account-wide view, it would misdiagnose CPER as naked.
+            def openTrades(self):
+                return []
+            def portfolio(self):
+                return []  # not reached if the position is correctly recognized as protected
+            def placeOrder(self, contract, order):
+                raise AssertionError("must NOT place any order -- CPER is already protected "
+                                     "per the account-wide order view")
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U12991898"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, acct: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch.object(ib_exec.ib_client, "_run",
+                              return_value=[_OpenTrade(97462781)]), \
+             mock.patch.object(ib_exec, "manual_close_position",
+                              side_effect=AssertionError("must NOT be called -- protected")):
+            logs = ib_exec.reprotect_naked_positions()
+
+        check("recognized as protected via the account-wide order view -- no action taken",
+              logs, [])
+
+        with paper._LOCK, paper._conn() as c:
+            s20 = c.execute("SELECT status FROM paper_trades WHERE id=20").fetchone()[0]
+        check("CPER untouched, still OPEN", s20, "OPEN")
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)

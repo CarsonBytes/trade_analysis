@@ -1197,8 +1197,25 @@ def reprotect_naked_positions() -> list[str]:
     if not rows:
         return []
     try:
+        # FIXED 2026-08-18: found live, the hard way -- ib.openTrades() is a PASSIVE,
+        # CLIENT-LOCAL cache. It only reflects orders THIS client instance has itself placed
+        # or already been told about; a fresh connection's cache starts genuinely empty, even
+        # though the broker is showing "connected" and other orders are real and resting.
+        # Confirmed live on U12991898: openTrades() returned 0 while ALL 11 open live
+        # positions actually had valid resting brackets the whole time -- every one got
+        # misdiagnosed as naked, and this function placed a full SECOND bracket pair on top
+        # of each already-live one (unlinked OCA groups -- a real double-sell risk at the
+        # stop level, caught and manually cancelled the same session). ib.reqAllOpenOrders()
+        # asks the BROKER directly for every order on the account regardless of which client
+        # placed it -- the correct, complete signal. Uses ib_client._run() (matches the
+        # already-proven-safe pattern in ib_client.broker_open_order_symbols()) rather than
+        # the ib.call()-wrapped SYNC ib.openTrades() this function used before -- reqAllOpen
+        # OrdersAsync() is a coroutine and must go through the async path, not the sync one.
+        async def _req_orders():
+            return await ib.reqAllOpenOrdersAsync()
+        all_orders = ib_client._run(_req_orders(), timeout=15)
         open_con_ids, portfolio = ib_client.call(lambda: (
-            {o.contract.conId for o in (ib.openTrades() or [])},
+            {o.contract.conId for o in (all_orders or [])},
             {i.contract.conId: i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)}))
     except Exception:                                  # noqa: BLE001 -- read failed, retry next cycle
         return []
