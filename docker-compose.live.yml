@@ -1,0 +1,113 @@
+services:
+  dashboard:
+    build: .
+    container_name: quant-dashboard-live-docker
+    restart: unless-stopped
+    # Same miss paper's compose made once (HANDOFF 2026-08-13) -- deliberately not repeating
+    # it here: without this, LLM board scan permanently blocks at the shared-quota budget
+    # guard and zero Telegram alerts ever reach the phone from this deployment.
+    env_file:
+      - analyst/.env
+    environment:
+      - BROKER=ib
+      - UNIVERSE=etf
+      - DASH_FIXED_MODE=live
+      - DASH_PORT=8091
+      # LANDMINE (verified directly 2026-08-18, dashboard/core/mode.py::resolve_mode() lines
+      # 24-26): when DASH_FIXED_MODE=live, that function runs
+      #   os.environ["IB_PORT"] = os.environ.get("LIVE_IB_PORT", "4001")
+      # UNCONDITIONALLY on every boot -- setting IB_PORT directly here (the naive port-of
+      # paper's own compose file, which has no such override) would be silently clobbered
+      # back to native's port 4001 (unreachable from inside this container) every single
+      # time. Must set LIVE_IB_PORT, never IB_PORT directly. Same bug CLASS as the
+      # DASH_DB_NAME overwrite that broke paper for a while (HANDOFF item A.1) -- found
+      # proactively this time by reading the source before building, not live in prod.
+      # VALUE TBD -- discover the real gateway relay port during Stage 2 (blank-credential
+      # stub build) via `docker exec quant-ibgateway-live-docker ps aux`; do not guess.
+      # DISCOVERED 2026-08-18 via `docker exec quant-ibgateway-live-docker ps aux` during
+      # the Stage 2 stub build: this image runs `socat TCP-LISTEN:4003,fork TCP:127.0.0.1:
+      # 4001` for TRADING_MODE=live (paper's own equivalent is 4002->4004) -- 4003 is the
+      # only port another container on this compose network can actually reach.
+      - LIVE_IB_PORT=4003
+      - LIVE_IB_ACCOUNT=U12991898
+      # resolve_mode() also forces IB_ALLOW_LIVE=1 and setdefaults DASH_DB_NAME itself when
+      # DASH_FIXED_MODE=live -- set both explicitly anyway, for self-documentation, matching
+      # the emphasis _guard()'s own docstring places on this exact account/port match.
+      - IB_ALLOW_LIVE=1
+      - DASH_DB_NAME=/data/dashboard_live_docker.db
+      - IB_HOST=ib-gateway-live
+      # Distinct from native paper's 7, native live's 21, and Docker paper's 31.
+      - IB_CLIENT_ID=41
+    ports:
+      # Host 18081 -> container 8091, distinct from native's 8080/8081 and Docker paper's
+      # 18080.
+      - "18081:8091"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - quant_docker_live_data:/data
+      - quant_docker_live_logs:/app/logs
+    depends_on:
+      - ib-gateway-live
+
+  # Mirrors paper's ib-gateway service (docker-compose.yml) almost exactly -- see that
+  # file's own comments for the full backstory on EXISTING_SESSION_DETECTED_ACTION,
+  # BYPASS_WARNING, and READ_ONLY_API (that last one was a real live-order-blocking
+  # incident on paper, found 2026-08-18 -- set here from day one, not rediscovered).
+  ib-gateway-live:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: quant-ibgateway-live-docker
+    restart: unless-stopped
+    # Real U12991898 credentials -- NEVER paper's. Gitignored, never committed. Blank
+    # during Stage 2 (stub build/verify); populated only for Stage 3, after the explicit
+    # go/no-go checkpoint (real money, real 2FA push to the phone).
+    env_file:
+      - .env.live
+    environment:
+      - TRADING_MODE=live
+      - VNC_SERVER_PASSWORD=
+      - EXISTING_SESSION_DETECTED_ACTION=primary
+      - BYPASS_WARNING=yes
+      - READ_ONLY_API=no
+      # 2FA-adjacent config.ini.tmpl vars -- DECIDED 2026-08-18, not left unset by accident:
+      # checked native live's own C:\IBC-Live\config.ini directly. It sets
+      # ReloginAfterSecondFactorAuthenticationTimeout=no and
+      # SecondFactorAuthenticationExitInterval= (blank) -- both EXACTLY match this
+      # deployment's own defaults when left unset (IBC's documented default for the first
+      # is 'no'; the second only matters if the first is 'yes'). Leaving both unset here
+      # matches native's proven behavior exactly, and gateway-login-live.sh implements its
+      # own bounded 240s wait-and-abort-cleanly at the SCRIPT level regardless, so IBC-level
+      # auto-relogin isn't needed for that path either. AUTO_RESTART_TIME: native sets
+      # "08:30 PM" (a daily scheduled restart), but that's an operational scheduling choice
+      # tied to native's own rhythm -- deliberately deferred rather than copied blind; the
+      # dashboard container already has restart:unless-stopped for crash recovery, and daily
+      # gateway-refresh timing can be revisited once this deployment is actually running.
+    ports:
+      # Host 14001 for my own debugging only (localhost-only, matches paper's 14002
+      # convention) -- the dashboard service reaches this over the compose network's
+      # internal DNS (ib-gateway-live:4003), this host mapping is optional convenience.
+      - "127.0.0.1:14001:4003"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+volumes:
+  quant_docker_live_data:
+  quant_docker_live_logs:
+
+networks:
+  default:
+    # Confirmed via `docker network ls` + inspect (2026-08-18) -- actually in use on this
+    # machine: bridge=172.17, event-radar-demo=172.19, event-radar=172.30 (NOT free, despite
+    # the original plan assuming otherwise), llm-usage-dashboard=172.31, Docker
+    # paper=172.29, study-platform=172.28. 172.32 confirmed free at the time of writing.
+    ipam:
+      config:
+        - subnet: 172.32.0.0/16
+    driver_opts:
+      com.docker.network.driver.mtu: "1380"
+
+name: quant-live

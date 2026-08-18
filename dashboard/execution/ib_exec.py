@@ -207,7 +207,15 @@ def _guard():
             log.warning("ib_exec: IB_ALLOW_LIVE set but account %s != IB_ACCOUNT %s -- refusing",
                         acct, want)
             return None
-        if port not in (7496, 4001):
+        # 4003 ADDED 2026-08-18: the WSL2/Docker LIVE deployment's real, externally-reachable
+        # API relay port -- discovered via `docker exec quant-ibgateway-live-docker ps aux`
+        # during the Stage 2 stub build (TRADING_MODE=live runs `socat TCP-LISTEN:4003,fork
+        # TCP:127.0.0.1:4001`, the exact same pattern as paper's 4002->4004 fix). Not an
+        # arbitrary/external port -- a direct relay to the same live Gateway within this
+        # trusted docker-compose network. Adding this BEFORE any real order attempt from
+        # Docker-live, unlike paper's own version of this gap (HANDOFF 2026-08-13), which
+        # silently blocked every paper trade for a while before being found and fixed.
+        if port not in (7496, 4001, 4003):
             log.warning("ib_exec: IB_ALLOW_LIVE set but IB_PORT %s is not a live port -- refusing",
                         port)
             return None

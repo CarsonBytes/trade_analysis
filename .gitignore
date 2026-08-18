@@ -1,6 +1,7 @@
 # secrets
 analyst/.env
 .env
+.env.live
 
 # data / outputs
 *.csv

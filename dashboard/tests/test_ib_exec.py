@@ -1289,6 +1289,35 @@ def test_guard_paper_port_allowlist():
             check("arbitrary port 9999 still rejected", ib_exec._guard(), None)
 
 
+def test_guard_live_port_allowlist():
+    print("\n_guard(): live-mode port allowlist -- REGRESSION test mirroring "
+          "test_guard_paper_port_allowlist() for the live_ok=True branch. Added 2026-08-18 "
+          "for the WSL2/Docker LIVE deployment's real relay port (4003, discovered via "
+          "`docker exec quant-ibgateway-live-docker ps aux` during the Stage 2 stub build --"
+          " same socat-relay pattern as paper's own 4002->4004 fix). Confirms 7496/4001/4003 "
+          "are all accepted (with a matching IB_ACCOUNT) and an arbitrary port is still "
+          "rejected, so this doesn't silently block every live trade the way paper's "
+          "equivalent gap once did (HANDOFF 2026-08-13) before this exact test class of "
+          "protection existed:")
+    from dashboard.execution import ib_exec
+
+    sentinel = object()
+    with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+         mock.patch.object(ib_exec.ib_client, "account_id", return_value="U12991898"), \
+         mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=sentinel):
+        for port in (7496, 4001, 4003):
+            with mock.patch.dict(os.environ, {"IB_PORT": str(port), "IB_ALLOW_LIVE": "1",
+                                              "IB_ACCOUNT": "U12991898"}, clear=False):
+                check(f"live port {port} accepted (matching account)", ib_exec._guard(), sentinel)
+        with mock.patch.dict(os.environ, {"IB_PORT": "9999", "IB_ALLOW_LIVE": "1",
+                                          "IB_ACCOUNT": "U12991898"}, clear=False):
+            check("arbitrary port 9999 still rejected even with a matching account",
+                  ib_exec._guard(), None)
+    os.environ.pop("IB_ALLOW_LIVE", None)
+    os.environ.pop("IB_ACCOUNT", None)
+    os.environ.pop("IB_PORT", None)
+
+
 def test_close_expired_trades_actively_closes_funded_core_position():
     print("\npaper.close_expired_trades(): REGRESSION for the 2026-08-17 incident -- a "
           "FUNDED, OPEN, non-sleeve trade past its horizon_end must get a real close order "
