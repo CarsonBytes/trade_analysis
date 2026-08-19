@@ -989,9 +989,18 @@ def paper_panel() -> None:
         # requiring a column scan to tell them apart. Standard Quasar body-slot override
         # (generic over props.cols, not hand-listing every column) since QTable has no
         # built-in per-row conditional class.
+        # FIXED 2026-08-19: this override replaced the WHOLE row template but omitted the
+        # selection checkbox cell Quasar's own default body slot adds for selection="multiple"
+        # -- confirmed live: 17 <th> (16 data + checkbox) vs only 16 <td> per row, so every
+        # column rendered one position early (TP showed the method value, SL showed TP's,
+        # etc. -- user caught it as "TP shows ATR rr3.0"). Quasar's documented pattern for a
+        # custom body slot alongside selection is an explicit checkbox <q-td> first.
         closed_tbl.add_slot("body", '''
             <q-tr :props="props"
                   :class="props.row.funded.includes('signal') ? 'bg-grey-2' : ''">
+                <q-td auto-width>
+                    <q-checkbox v-model="props.selected" />
+                </q-td>
                 <q-td v-for="col in props.cols" :key="col.name" :props="props"
                       :class="props.row.funded.includes('signal') ?
                           (col.name === 'instrument' ? 'text-grey-7' :
