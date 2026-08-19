@@ -1113,35 +1113,39 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
     return msg
 
 
-def _last_exit_price(ib, con_id: int) -> float | None:
-    """Average price of the most recent closing fill for con_id, or None.
+def _broker_fills(ib, days: int = 45) -> list:
+    """ALL executions across the account (broker-wide, not just orders THIS client
+    placed) for the last `days` days, via reqExecutionsAsync(). Empty list on failure.
 
-    FIXED 2026-08-19: was ib.fills() -- a CLIENT-LOCAL cache (same bug class as
-    ib.openTrades(), already fixed in reprotect_naked_positions() earlier this session):
-    it only reflects fills THIS connection has itself observed, and a fill that lands
-    moments before this exact call runs isn't guaranteed to have propagated into that
-    local cache yet. Confirmed live: DBC (paper_id 14, live account) closed with a
-    genuine +2.99R take-profit fill, but ib.fills() came back empty at the exact
-    moment _resolve_from_broker() checked -- so it returned None, and the
-    GHOST_ENTRY_GRACE_MIN fallback (elapsed_min measured from the ORIGINAL entry
-    placement, 37 days earlier) wrongly concluded "never funded" and erased a real
-    win as a cancellation. Switched to reqExecutionsAsync() (broker-wide, matching
-    reqAllOpenOrders's fix for the same bug class) via the async _run() path -- a
-    45-day lookback comfortably covers this project's typical multi-week hold times
-    plus any plausible detection lag, without an unbounded query."""
+    ADDED 2026-08-19, factored out of _last_exit_price() when the SAME bug turned up a
+    second time in reconcile() -- both used to call ib.fills(), a CLIENT-LOCAL cache
+    (same bug class as ib.openTrades(), fixed in reprotect_naked_positions() earlier
+    this session): it only reflects fills THIS connection has itself observed, and a
+    fill that lands moments before the call runs isn't guaranteed to have propagated
+    into that local cache yet. Confirmed live: DBC (paper_id 14, live account) closed
+    with a genuine +2.99R take-profit fill, but ib.fills() came back empty at the exact
+    moment _resolve_from_broker() checked it -- so GHOST_ENTRY_GRACE_MIN's fallback
+    (elapsed_min measured from the ORIGINAL entry placement, 37 days earlier) wrongly
+    concluded "never funded" and erased a real win as a cancellation. A 45-day lookback
+    comfortably covers this project's typical multi-week hold times plus any plausible
+    detection lag, without an unbounded query."""
     from ib_async import ExecutionFilter
     async def _fetch():
         ef = ExecutionFilter()
         ef.clientId = 0        # broker-wide -- not just orders THIS client placed
         ef.time = (dt.datetime.now(dt.timezone.utc) -
-                  dt.timedelta(days=45)).strftime("%Y%m%d-%H:%M:%S")
+                  dt.timedelta(days=days)).strftime("%Y%m%d-%H:%M:%S")
         return await ib.reqExecutionsAsync(ef)
     try:
-        all_fills = ib_client._run(_fetch(), timeout=15)
+        return ib_client._run(_fetch(), timeout=15) or []
     except Exception as e:                             # noqa: BLE001
         log.info("ib_exec: reqExecutionsAsync failed: %s", e)
-        return None
-    fills = [f for f in (all_fills or []) if getattr(f.contract, "conId", None) == con_id]
+        return []
+
+
+def _last_exit_price(ib, con_id: int) -> float | None:
+    """Average price of the most recent closing fill for con_id, or None."""
+    fills = [f for f in _broker_fills(ib) if getattr(f.contract, "conId", None) == con_id]
     if not fills:
         return None
     fills.sort(key=lambda f: f.execution.time)
@@ -1710,7 +1714,12 @@ def reconcile() -> list[dict]:
         rows = c.execute("SELECT paper_id, con_id, qty, risk_money, status "
                          "FROM ib_mirror").fetchall()
     journal = {t["id"]: t for t in paper.all_trades()}
-    fills = ib_client.call(lambda: list(ib.fills() or []))
+    # BROKER-WIDE fills (reqExecutionsAsync via _broker_fills()), not the client-local
+    # ib.fills() cache -- see _broker_fills()'s 2026-08-19 fix docstring. This function's
+    # net P&L would silently understate/omit ANY closed trade whose fill this specific
+    # client connection hadn't itself observed, the same bug class found live in
+    # _last_exit_price().
+    fills = _broker_fills(ib)
     out = []
     for paper_id, con_id, qty, risk_money, status in rows:
         net = sum((f.commissionReport.realizedPNL or 0.0)

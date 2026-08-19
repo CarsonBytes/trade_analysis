@@ -1,7 +1,23 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-18.
+Last updated 2026-08-19.
+
+---
+
+### 🐞 FIXED 2026-08-19: a real +2.99R live win was silently mis-recorded as "CANCELLED — never funded", erasing it from Live Trades and the Retro tab
+
+**How it was caught:** the user saw a real ~3R trade close (broker-side) but it didn't show up in the dashboard's Live Trades or Retrospective tabs. Investigated by going straight to ground truth rather than trusting any local record — queried IBKR directly via a broker-wide `reqExecutionsAsync()` (not the app's own cache) for the account's real execution history.
+
+**What actually happened:** DBC (Broad Commodities) opened long on 2026-07-13, held for 37 days, and closed today (2026-08-19 16:16:18 UTC) essentially exactly at its recorded take-profit (fill 30.90 vs TP 30.9046) — a genuine +2.993R win. Seconds later, `sync_closures()`'s ghost-entry-cancel logic ran, found no matching fill via `_last_exit_price()`, and — because `elapsed_min` since the ORIGINAL entry placement was enormous (54,016 min, i.e. 37 days) and comfortably past `GHOST_ENTRY_GRACE_MIN` (30 min) — concluded the entry had "never been funded" and cancelled it, overwriting the real outcome with `status=CANCELLED, realized_r=0.0`.
+
+**Root cause:** `_last_exit_price()` read `ib.fills()` — a **CLIENT-LOCAL cache** that only reflects fills the CURRENT connection has itself observed. The real closing fill landed moments before this specific check ran and apparently hadn't propagated into that local cache yet (a race/staleness gap), so the lookup came back empty even though the broker-side execution had already happened. This is the exact same bug class as `ib.openTrades()`, already found and fixed in `reprotect_naked_positions()` earlier this session (2026-08-18) — a client-scoped IB API view standing in for broker-wide truth. The `GHOST_ENTRY_GRACE_MIN` logic's own premise (elapsed-since-placement past 30min + no fill found ⇒ "never funded") is only valid when the fill-lookup itself is reliable; once it isn't, ANY position that's been open a long while (this strategy routinely holds for weeks) will trip the same false-positive the instant its exit-fill lookup has a bad moment, since elapsed-since-placement is naturally huge for a real, legitimately-still-open trade.
+
+**Fix:** `_last_exit_price()` now queries `reqExecutionsAsync()` with `clientId=0` (broker-wide, not just this client's own orders) and a 45-day lookback, via the async `_run()` path — matching the `reqAllOpenOrders` fix pattern. Verified live: the same query immediately found DBC's real fill that `ib.fills()` had missed.
+
+**Swept for other victims:** every other "never filled at the broker" cancellation in the live journal was checked — 16 CWB cancellations all show the expected ~30min elapsed pattern (genuine broker-side entry rejections, a separate known issue, not this bug), and one older manually-diagnosed CWB case from 2026-07-16 (predates this auto-cancel logic entirely). DBC (paper_id 14) was the only trade matching this bug's signature (large elapsed_min + a real fill found via the broker-wide query that the ghost-cancel had missed). Corrected `paper_trades` id=14 and its `ib_mirror` note using the real broker data (SLD 113@30.9, execId `000103bf.6a85d038.01.01`) — confirmed live it now appears correctly in both Live Trades and the Retro tab (`broker.executed_ids()` / `paper.all_trades()` both checked directly, not just assumed from the code).
+
+**Lesson for next time:** any code that infers "never happened at the broker" from "I can't currently find evidence it happened" needs to distinguish "genuinely searched and found nothing" from "the search itself might be unreliable" — a client-scoped IB API cache (`ib.fills()`, `ib.openTrades()`, and structurally any other IB API property that's a passive local cache rather than an explicit `reqXAsync()` round-trip) is the second case, not the first, and treating it as ground truth silently erases real trade history. Both known instances of this bug class (this one and `reprotect_naked_positions()`) are now fixed; worth a quick audit of any other `ib.<property>` (non-`req...Async`) read in `ib_exec.py`/`ib_client.py` if a similar discrepancy ever surfaces again.
 
 ---
 

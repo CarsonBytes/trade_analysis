@@ -599,6 +599,55 @@ def test_last_exit_price_finds_fill_regardless_of_which_client_placed_it():
           "genuine 'never funded' ghost case", not_found, None)
 
 
+def test_reconcile_uses_broker_wide_fills_not_client_local_cache():
+    print("\nreconcile(): the SAME ib.fills() client-local-cache bug turned up a second "
+          "time here -- confirms reconcile()'s net-P&L figure now comes from "
+          "_broker_fills() (reqExecutionsAsync), so it can't silently under-report a "
+          "trade whose fill this specific client connection never itself observed:")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-07-13T00:00:00','DBC','long','ATR rr3.0',27.52,26.39,30.9,3.0,113,'WIN')")
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,319355208,'DBC',113.0,150.0,'','2026-07-13T04:00:40+00:00','CLOSED','')")
+
+        _fake_fill = SimpleNamespace(
+            contract=SimpleNamespace(conId=319355208),
+            commissionReport=SimpleNamespace(realizedPNL=380.0, commission=1.2))
+
+        class _FakeIB:
+            pass
+
+        with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+             mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec, "_broker_fills", return_value=[_fake_fill]):
+            rows = ib_exec.reconcile()
+
+        check("one reconcile row produced", len(rows), 1)
+        check("net P&L reflects the broker-wide fill (realizedPNL - commission)",
+              round(rows[0]["demo_pnl"], 2), 378.8)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 # ADDED 2026-07-18: a queued (not-yet-funded) ETF signal can sit behind PORTFOLIO_CAP for
 # days -- but _place_etf_bracket() funds at a FRESH market price while keeping the STALE
 # stop/target from signal time, so a signal that's drifted far enough against itself before
