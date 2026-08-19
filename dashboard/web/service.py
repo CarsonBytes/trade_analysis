@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from analyst.features import compute_facts  # quant/
 from analyst import usage_log
-from dashboard.instruments import active_universe
+from dashboard.instruments import active_universe, active_by_key
 from dashboard.data.providers import get_history
 from dashboard.core.scoring import score_from_facts, rank, Score
 from dashboard.web.news_sources import fetch_headlines
@@ -338,14 +338,43 @@ def _refresh_pending_ticks() -> None:
              got, len(pending_keys), ", ".join(sorted(pending_keys)))
 
 
+def _open_position_instruments() -> list:
+    """ADDED 2026-08-19: any instrument with a currently-OPEN paper trade that ISN'T in
+    the active universe (e.g. a UCITS-swap-retired key like the old EEM/SPY/etc) --
+    confirmed live: after the swap + a dashboard restart, an open position on a retired
+    key lost its chart/deterministic-facts/Details-dialog content entirely (STATE
+    caches are seeded from the PREVIOUS in-memory STATE each cycle, so they only go
+    empty on a restart -- the swap alone didn't break anything until this session's own
+    Stage 3/live-carryover redeploys cleared them, and a retired key can never be
+    re-populated by active_universe() alone again). Still needs live price/chart/facts
+    refresh so its trade card doesn't go blank while the position winds down naturally
+    -- execution (reconcile/reprotect/close) already worked fine via active_by_key();
+    this is the DISPLAY side of that same "keep resolvable" precedent."""
+    active_keys = {i.key for i in active_universe()}
+    seen: set[str] = set()
+    out = []
+    for t in paper.all_trades():
+        if t["status"] != "OPEN":
+            continue
+        key = t["instrument"]
+        if key in active_keys or key in seen:
+            continue
+        inst = active_by_key(key)
+        if inst is not None:
+            out.append(inst)
+            seen.add(key)
+    return out
+
+
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
     # dicts in place, or a UI panel iterating them races ("dict changed size during iteration").
     _sources, _scores, _live, _spark = (dict(STATE["sources"]), dict(STATE["scores"]),
                                         dict(STATE["live"]), dict(STATE["spark"]))
+    universe = active_universe() + _open_position_instruments()
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for key, score, source, live_px, live_src, spread, age, spark_v in ex.map(_score_one, active_universe()):
+        for key, score, source, live_px, live_src, spread, age, spark_v in ex.map(_score_one, universe):
             _sources[key] = source
             if score is not None:
                 _scores[key] = score

@@ -774,6 +774,11 @@ def gate_panel() -> None:
     gtable.on("detail", lambda e: _open_detail(e.args))
 
 
+def _active_universe_keys() -> set[str]:
+    from dashboard.instruments import active_universe
+    return {i.key for i in active_universe()}
+
+
 def _open_detail(key: str) -> None:
     score = service.STATE["scores"].get(key)
     sig = service.STATE["llm"].get(key)
@@ -791,6 +796,19 @@ def _open_detail(key: str) -> None:
         if sig:
             ui.separator()
             ui.label("LLM view").classes("font-bold text-sm")
+        elif key not in _active_universe_keys():
+            # ADDED 2026-08-19: a retired instrument (e.g. an old UCITS-swap key still
+            # winding down an open position) never gets a FRESH LLM view again --
+            # refresh_llm() is deliberately NOT extended to retired keys the way
+            # refresh_cheap() was (service.py::_open_position_instruments()), since an
+            # already-open position isn't making a new entry decision that needs one,
+            # and LLM calls cost real API budget. Say so explicitly rather than leaving
+            # the space blank with no explanation, which read as broken.
+            ui.separator()
+            ui.label("LLM view: not available -- this instrument was retired from "
+                    "active scanning; its open position is winding down on its own "
+                    "SL/TP, no new LLM analysis runs for it.").classes(
+                "text-xs text-grey-6 italic")
             ui.label(f"{sig.action} · {sig.bias} · confidence {sig.confidence:.0%}")
             ui.label(sig.rationale).classes("text-sm")
             # ADDED 2026-07-14: explicit check of whether a macro theme the LLM already

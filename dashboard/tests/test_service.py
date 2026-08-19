@@ -396,6 +396,46 @@ def test_refresh_pending_ticks_noop_when_nothing_pending():
         _restore_db(old, path)
 
 
+def test_open_position_instruments_includes_retired_but_open_keys():
+    print("\n_open_position_instruments(): ADDED 2026-08-19 -- an OPEN position on a key "
+          "retired from the active universe (e.g. IEF, retired under the UCITS swap) is "
+          "still included so its chart/facts keep refreshing, but a CLOSED trade on a "
+          "retired key is NOT (nothing left to keep live), and an already-ACTIVE key "
+          "isn't duplicated:")
+    old_broker = os.environ.get("BROKER")
+    old_uni = os.environ.get("UNIVERSE")
+    os.environ["BROKER"] = "ib"
+    os.environ["UNIVERSE"] = "etf"
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        from dashboard.web import service
+        with paper._LOCK, paper._conn() as c:
+            # IEF: retired key, OPEN -- should be picked up
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-08-18T00:00:00','IEF','long','ATR rr3.0',100,95,115,3.0,10,'OPEN')")
+            # TLT: retired key, but CLOSED -- should NOT be picked up
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(2,'2026-08-01T00:00:00','TLT','long','ATR rr3.0',80,75,95,3.0,10,'WIN')")
+            # CSPX: currently-active key, OPEN -- already covered by active_universe() itself
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(3,'2026-08-18T00:00:00','CSPX','long','ATR rr3.0',800,750,950,3.0,1,'OPEN')")
+
+        out = {i.key for i in service._open_position_instruments()}
+        check("retired-but-OPEN key (IEF) included", "IEF" in out, True)
+        check("retired-and-CLOSED key (TLT) excluded", "TLT" in out, False)
+        check("already-active key (CSPX) not duplicated here", "CSPX" in out, False)
+    finally:
+        _restore_db(old, path)
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        if old_uni is None: os.environ.pop("UNIVERSE", None)
+        else: os.environ["UNIVERSE"] = old_uni
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
