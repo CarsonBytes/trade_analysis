@@ -1114,11 +1114,37 @@ def _resolve_from_broker(ib, trade: dict, con_id: int) -> str | None:
 
 
 def _last_exit_price(ib, con_id: int) -> float | None:
-    """Average price of the most recent closing fill for con_id, or None."""
-    fills = ib_client.call(lambda: [f for f in (ib.fills() or [])
-                                    if getattr(f.contract, "conId", None) == con_id])
+    """Average price of the most recent closing fill for con_id, or None.
+
+    FIXED 2026-08-19: was ib.fills() -- a CLIENT-LOCAL cache (same bug class as
+    ib.openTrades(), already fixed in reprotect_naked_positions() earlier this session):
+    it only reflects fills THIS connection has itself observed, and a fill that lands
+    moments before this exact call runs isn't guaranteed to have propagated into that
+    local cache yet. Confirmed live: DBC (paper_id 14, live account) closed with a
+    genuine +2.99R take-profit fill, but ib.fills() came back empty at the exact
+    moment _resolve_from_broker() checked -- so it returned None, and the
+    GHOST_ENTRY_GRACE_MIN fallback (elapsed_min measured from the ORIGINAL entry
+    placement, 37 days earlier) wrongly concluded "never funded" and erased a real
+    win as a cancellation. Switched to reqExecutionsAsync() (broker-wide, matching
+    reqAllOpenOrders's fix for the same bug class) via the async _run() path -- a
+    45-day lookback comfortably covers this project's typical multi-week hold times
+    plus any plausible detection lag, without an unbounded query."""
+    from ib_async import ExecutionFilter
+    async def _fetch():
+        ef = ExecutionFilter()
+        ef.clientId = 0        # broker-wide -- not just orders THIS client placed
+        ef.time = (dt.datetime.now(dt.timezone.utc) -
+                  dt.timedelta(days=45)).strftime("%Y%m%d-%H:%M:%S")
+        return await ib.reqExecutionsAsync(ef)
+    try:
+        all_fills = ib_client._run(_fetch(), timeout=15)
+    except Exception as e:                             # noqa: BLE001
+        log.info("ib_exec: reqExecutionsAsync failed: %s", e)
+        return None
+    fills = [f for f in (all_fills or []) if getattr(f.contract, "conId", None) == con_id]
     if not fills:
         return None
+    fills.sort(key=lambda f: f.execution.time)
     return float(fills[-1].execution.avgPrice or fills[-1].execution.price)
 
 

@@ -532,17 +532,25 @@ def test_resolve_from_broker_elevates_loss_to_warning_level():
         win_trade = {"id": 2, "instrument": "SPY", "direction": "long",
                     "entry": 500.0, "sl": 490.0, "half_spread": 0.0}
 
+        _fake_fills = [
+            SimpleNamespace(contract=SimpleNamespace(conId=111),
+                            execution=SimpleNamespace(avgPrice=95.0, price=95.0, time="t1")),
+            SimpleNamespace(contract=SimpleNamespace(conId=222),
+                            execution=SimpleNamespace(avgPrice=510.0, price=510.0, time="t2")),
+        ]
+
         class _FakeIB:
-            def fills(self):
-                return [
-                    SimpleNamespace(contract=SimpleNamespace(conId=111),
-                                   execution=SimpleNamespace(avgPrice=95.0, price=95.0)),
-                    SimpleNamespace(contract=SimpleNamespace(conId=222),
-                                   execution=SimpleNamespace(avgPrice=510.0, price=510.0)),
-                ]
+            async def reqExecutionsAsync(self, ef):
+                return _fake_fills
 
         recorded: list[tuple[str, str]] = []
-        with mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+        # _last_exit_price() now goes through ib_client._run() (broker-wide
+        # reqExecutionsAsync -- see its 2026-08-19 fix), not ib_client.call(ib.fills()).
+        # Matching this file's own established mock style (e.g. test_sync_closures_*
+        # above): _run() is mocked to return the result directly, the coroutine it was
+        # handed is never actually awaited (a harmless, already-accepted
+        # RuntimeWarning elsewhere in this suite, not something worth avoiding here).
+        with mock.patch.object(ib_exec.ib_client, "_run", return_value=_fake_fills), \
              mock.patch("dashboard.core.notable_events.record",
                         side_effect=lambda msg, level="info": recorded.append((msg, level))):
             loss_msg = ib_exec._resolve_from_broker(_FakeIB(), loss_trade, 111)
@@ -561,6 +569,34 @@ def test_resolve_from_broker_elevates_loss_to_warning_level():
             os.remove(path)
         except OSError:
             pass
+
+
+def test_last_exit_price_finds_fill_regardless_of_which_client_placed_it():
+    print("\n_last_exit_price(): the REAL bug this fixed -- found live 2026-08-19: DBC "
+          "(live account, paper_id 14) closed with a genuine +2.99R take-profit fill, but "
+          "the OLD ib.fills() client-local cache came back empty at the exact moment "
+          "_resolve_from_broker() checked (a race/staleness gap, same bug class as "
+          "ib.openTrades() fixed earlier in reprotect_naked_positions()), so the "
+          "GHOST_ENTRY_GRACE_MIN fallback wrongly cancelled a real 37-day-old win as "
+          "'never funded'. Confirms the broker-wide reqExecutionsAsync() path finds a fill "
+          "matching by conId regardless of clientId, and returns None (not an exception) "
+          "when genuinely no execution exists for that conId -- the correct signal for the "
+          "true 'never funded' ghost case (e.g. the CWB pattern), which must keep working:")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fills = [
+        SimpleNamespace(contract=SimpleNamespace(conId=319355208),
+                        execution=SimpleNamespace(avgPrice=30.9, price=30.9, time="2026-08-19T16:16:18")),
+        SimpleNamespace(contract=SimpleNamespace(conId=999),
+                        execution=SimpleNamespace(avgPrice=1.0, price=1.0, time="2026-08-19T00:00:00")),
+    ]
+    with mock.patch.object(ib_exec.ib_client, "_run", return_value=fills):
+        found = ib_exec._last_exit_price(object(), 319355208)
+        not_found = ib_exec._last_exit_price(object(), 555)   # a genuinely never-funded conId
+    check("finds the real fill by conId (DBC's actual close)", found, 30.9)
+    check("returns None (not a crash) for a conId with no execution at all -- the "
+          "genuine 'never funded' ghost case", not_found, None)
 
 
 # ADDED 2026-07-18: a queued (not-yet-funded) ETF signal can sit behind PORTFOLIO_CAP for
