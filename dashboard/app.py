@@ -823,6 +823,12 @@ def _open_detail(key: str) -> None:
     dlg.open()
 
 
+def _sortable_cols(names: list[str]) -> list[dict]:
+    """Column defs for ui.table with click-to-sort enabled on every column (Quasar's
+    native QTable sort, asc/desc/none) -- ADDED 2026-08-19, user-requested."""
+    return [{"name": c, "label": c, "field": c, "sortable": True} for c in names]
+
+
 @ui.refreshable
 def paper_panel() -> None:
     from dashboard.core import paper
@@ -830,6 +836,16 @@ def paper_panel() -> None:
     trades = paper.all_trades()
     closed = [t for t in trades if t["status"] != "OPEN"]
     open_t = [t for t in trades if t["status"] == "OPEN"]
+    # FIXED 2026-08-19: a CANCELLED/VOID trade never had a real outcome -- its
+    # realized_r is always 0.0 by convention (see paper.py's _update_resolution()
+    # call sites), not a genuine win or loss. Feeding it into win_rate/expectancy
+    # alongside real WIN/LOSS/EXPIRED trades silently deflates both -- confirmed live:
+    # ATR rr3.0 showed "win rate 3%" (1/30) when the real figure among trades that
+    # actually resolved is 1/8 = 12.5% (still n<30, correctly untrustworthy -- just
+    # not the misleading 3%). 20 of those 30 were CWB signals that never got funded
+    # within 30min (a real, separate pattern -- see HANDOFF), not losses.
+    resolved = [t for t in closed if t["status"] in ("WIN", "LOSS", "EXPIRED")]
+    not_resolved = [t for t in closed if t["status"] not in ("WIN", "LOSS", "EXPIRED")]
 
     _title = "Live Trades — Track Record" if _bk.is_live() else "Paper Trades — Forward Track Record"
     with ui.row().classes("items-center justify-between w-full"):
@@ -843,10 +859,10 @@ def paper_panel() -> None:
              "Times shown in your local timezone.")\
         .classes("text-xs text-grey-6")
 
-    # stats grouped by method
-    methods = sorted({t["method"] for t in closed})
+    # stats grouped by method -- resolved (WIN/LOSS/EXPIRED) trades only, see fix note above
+    methods = sorted({t["method"] for t in resolved})
     with ui.row().classes("w-full flex-wrap gap-3"):
-        if not closed:
+        if not resolved:
             # FIXED 2026-07-23: this said "5-day horizon" -- wrong on two counts.
             # HORIZON_DAYS=5 is a BAR count (weekly bars), not calendar days; the actual
             # calendar-day figure is HORIZON_CAL=35 (5 weekly bars), already referenced
@@ -855,7 +871,7 @@ def paper_panel() -> None:
             ui.label("No resolved trades yet. They settle as price hits SL/TP or the "
                      f"{paper.HORIZON_CAL}-day horizon passes.").classes("text-sm text-grey")
         for m in methods:
-            rs = [t["realized_r"] for t in closed if t["method"] == m]
+            rs = [t["realized_r"] for t in resolved if t["method"] == m]
             s = paper.stats(rs)
             color = "bg-green-1" if s["expectancy_R"] > 0 else "bg-red-1"
             with ui.card().classes(f"min-w-[230px] {color}"):
@@ -877,23 +893,30 @@ def paper_panel() -> None:
     _executed = _bk.executed_ids() if _bk.is_ib() else set()
 
     # open trades (selectable -> archive specific records)
+    # COLUMN ORDER 2026-08-19, user-requested: "dir" demoted near the end -- this
+    # strategy is long-only (BROKER=ib), so per-row direction is never a decision-
+    # relevant field; ordered by what a glance actually needs (what/is-it-funded/risk
+    # params) before administrative detail (method/opened/dir/id).
     if open_t:
         with ui.row().classes("items-center gap-2 mt-2"):
             ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold")
             ui.button("Archive selected", icon="archive",
                       on_click=lambda: _archive_records(open_tbl)).props("flat dense")
-        rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
-                 "method": t["method"], "entry": round(t["entry"], 4),
-                 "SL": round(t["sl"], 4), "TP": round(t["tp"], 4), "R:R": t["rr"],
-                 "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
-                 "opened": _fmt_ts(t["ts"])} for t in open_t]
+        rows = [{"instrument": t["instrument"], "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
+                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
+                 "R:R": t["rr"], "method": t["method"], "opened": _fmt_ts(t["ts"]),
+                 "dir": t["direction"], "id": t["id"]} for t in open_t]
+        col_order = ["instrument", "funded", "entry", "SL", "TP", "R:R", "method", "opened", "dir", "id"]
         open_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
-                            columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+                            columns=_sortable_cols(col_order),
+                            pagination={"sortBy": "opened", "descending": True, "rowsPerPage": 0})\
             .classes("w-full").props("dense")
-    # recent closed (selectable -> archive specific records)
-    if closed:
+    # recent closed (selectable -> archive specific records) -- resolved (WIN/LOSS/
+    # EXPIRED) only; CANCELLED/VOID moved to a collapsed section below (2026-08-19,
+    # user-requested: they never had a real outcome, so they clutter the main table).
+    if resolved:
         with ui.row().classes("items-center gap-2 mt-2"):
-            ui.label(f"Recent closed ({len(closed)})").classes("text-sm font-bold")
+            ui.label(f"Recent closed ({len(resolved)})").classes("text-sm font-bold")
             ui.button("Archive selected", icon="archive",
                       on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
         # ADDED 2026-07-24: entry/SL/TP/exit + a $ P&L column -- R alone doesn't say how much
@@ -901,25 +924,58 @@ def paper_panel() -> None:
         # same source _monthly_attribution() uses, always USD regardless of account base ccy)
         # is only ever recorded for broker-funded trades -- '○ signal only' rows show "—"
         # rather than a fabricated dollar figure, since no real money was ever on the line.
+        # ADDED 2026-08-19: qty alongside risk_money -- "invested (USD)" = qty x entry,
+        # the actual notional committed (distinct from risk_money, which is only the
+        # $ AT RISK to the stop, not the full position size).
         with paper._LOCK, paper._conn() as c:
-            risk_by_id = dict(c.execute(f"SELECT paper_id, risk_money FROM {_bk.mirror_table()}").fetchall())
-        rows = [{"id": t["id"], "instrument": t["instrument"], "dir": t["direction"],
-                 "method": t["method"], "status": t["status"],
-                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
-                 "exit": round(t["exit_price"], 4) if t["exit_price"] else None,
-                 "R": round(t["realized_r"], 2),
-                 "P&L (USD)": (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
-                              if t["id"] in risk_by_id else "—"),
-                 "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
-                 "opened": _fmt_ts(t["ts"]),
-                 "closed": _fmt_ts(t["exit_ts"])} for t in closed[:20]]
+            mirror_rows = c.execute(
+                f"SELECT paper_id, risk_money, qty FROM {_bk.mirror_table()}").fetchall()
+        risk_by_id = {r[0]: r[1] for r in mirror_rows}
+        qty_by_id = {r[0]: r[2] for r in mirror_rows}
+        # cumulative R: chronological (oldest -> newest) running total across the FULL
+        # resolved history, not just the visible slice below -- matches how the equity
+        # curve/retrospective tab already compute it. Attached per-row as a fixed value,
+        # independent of whatever sort order the table is currently displayed in.
+        cum_r_by_id: dict[int, float] = {}
+        running = 0.0
+        for t in sorted(resolved, key=lambda t: t["exit_ts"] or ""):
+            running += t["realized_r"]
+            cum_r_by_id[t["id"]] = round(running, 2)
+
+        def _closed_row(t: dict) -> dict:
+            invested = (f"{qty_by_id[t['id']] * t['entry']:,.0f}"
+                       if t["id"] in qty_by_id else "—")
+            pnl = (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
+                  if t["id"] in risk_by_id else "—")
+            return {"instrument": t["instrument"], "status": t["status"],
+                   "R": round(t["realized_r"], 2), "cumulative R": cum_r_by_id.get(t["id"], "—"),
+                   "invested (USD)": invested, "P&L (USD)": pnl,
+                   "closed": _fmt_ts(t["exit_ts"]), "opened": _fmt_ts(t["ts"]),
+                   "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
+                   "exit": round(t["exit_price"], 4) if t["exit_price"] else None,
+                   "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
+                   "method": t["method"], "dir": t["direction"], "id": t["id"]}
+
+        col_order = ["instrument", "status", "R", "cumulative R", "invested (USD)", "P&L (USD)",
+                    "closed", "opened", "funded", "exit", "entry", "SL", "TP", "method", "dir", "id"]
+        rows = [_closed_row(t) for t in resolved[:20]]
         closed_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
-                              columns=[{"name": c, "label": c, "field": c} for c in rows[0]])\
+                              columns=_sortable_cols(col_order),
+                              pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 0})\
             .classes("w-full").props("dense")\
             .tooltip("'R' is what the signal-logic scored regardless of funding -- "
                      "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
                      "rows -- '○ signal only' rows never had a real broker order, see the "
                      "Retrospective tab for broker-executed-only KPIs")
+
+        if not_resolved:
+            with ui.expansion(f"{len(not_resolved)} cancelled — never had a real "
+                              "outcome, show").classes("w-full text-sm text-grey-6"):
+                rows = [_closed_row(t) for t in not_resolved[:20]]
+                ui.table(rows=rows, row_key="id",
+                        columns=_sortable_cols(col_order),
+                        pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 0})\
+                    .classes("w-full").props("dense")
 
 
 
