@@ -142,12 +142,14 @@ def test_tech_paused_blocks_xlk_too():
 # ADDED 2026-07-30: TECH_TICKERS expanded from {QQQ, XLK} to also cover SPY/EEM/ASHR after
 # verifying real GICS sector weights (SPY 38%, EEM 45%, ASHR 31% Information Technology --
 # all a clear plurality, same character as QQQ/XLK, unlike DIA/IWM/EFA which stay <20%).
+# UPDATED 2026-08-19: SPY/EEM renamed to CSPX/EIMI under the UCITS instrument swap --
+# TECH_TICKERS tracks the CURRENT key (dashboard/core/paper.py), same funds/sector weights.
 def test_tech_paused_blocks_spy_eem_ashr():
-    print("\nTECH_PAUSED=True: blocks SPY/EEM/ASHR too (38%/45%/31% GICS tech weight):")
+    print("\nTECH_PAUSED=True: blocks CSPX/EIMI/ASHR too (38%/45%/31% GICS tech weight):")
     old = paper.TECH_PAUSED
     paper.TECH_PAUSED = True
     try:
-        for ticker in ("SPY", "EEM", "ASHR"):
+        for ticker in ("CSPX", "EIMI", "ASHR"):
             ok, reasons, _ = evaluate_signal(ticker, _score("BUY", strength=5), _llm("BUY"))
             check(f"{ticker} rejected", ok, False)
             check(f"{ticker} tech-pause reason", reasons, ["tech investment paused"])

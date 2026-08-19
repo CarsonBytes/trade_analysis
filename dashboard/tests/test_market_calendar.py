@@ -43,6 +43,67 @@ def test_is_us_trading_day_real_2026_dates():
         check(label, market_calendar.is_us_trading_day(d), want)
 
 
+def test_is_lse_trading_day_real_2026_dates():
+    print("is_lse_trading_day(): real LSE 2026 dates -- ADDED 2026-08-19 for the UCITS "
+          "instrument swap (CSPX/IGLN/etc trade on LSE hours, not NYSE):")
+    from dashboard.core import market_calendar
+    cases = [
+        ("2026-07-31 (regular Friday)", dt.date(2026, 7, 31), True),
+        ("2026-08-01 (Saturday)", dt.date(2026, 8, 1), False),
+        ("2026-08-02 (Sunday)", dt.date(2026, 8, 2), False),
+        ("2026-01-01 (New Year's Day)", dt.date(2026, 1, 1), False),
+        ("2026-04-03 (Good Friday -- a UK holiday too, unlike Memorial Day/Juneteenth)",
+         dt.date(2026, 4, 3), False),
+        ("2026-05-25 (UK Spring Bank Holiday, NOT US Memorial Day but same date in 2026)",
+         dt.date(2026, 5, 25), False),
+        ("2026-12-25 (Christmas)", dt.date(2026, 12, 25), False),
+        ("2026-11-26 (US Thanksgiving -- an ordinary LSE trading day, not a UK holiday)",
+         dt.date(2026, 11, 26), True),
+    ]
+    for label, d, want in cases:
+        check(label, market_calendar.is_lse_trading_day(d), want)
+
+
+def test_lse_fails_open_on_calendar_fetch_error():
+    print("\nis_lse_trading_day(): fails OPEN on a calendar fetch error, same reasoning "
+          "as the NYSE version:")
+    from dashboard.core import market_calendar
+    market_calendar._lse_year_cache.clear()
+    with mock.patch("pandas_market_calendars.get_calendar", side_effect=RuntimeError("boom")):
+        check("weekday still returns True despite the fetch error",
+              market_calendar.is_lse_trading_day(dt.date(2031, 3, 10)), True)  # a Monday
+        check("weekend still correctly returns False (no calendar lookup needed at all)",
+              market_calendar.is_lse_trading_day(dt.date(2031, 3, 8)), False)  # a Saturday
+    market_calendar._lse_year_cache.clear()
+
+
+def test_us_lse_market_open_either_session():
+    print("\nus_lse_market_open(): ADDED 2026-08-19 (UCITS instrument swap) -- True if "
+          "EITHER NYSE or LSE is in session, not just NYSE:")
+    from zoneinfo import ZoneInfo
+    from dashboard.core import market_calendar
+    # Wed 2026-08-19, 9am London = LSE mid-session, but 4am ET -- hours before NYSE opens.
+    london_morning = dt.datetime(2026, 8, 19, 9, 0, tzinfo=ZoneInfo("Europe/London"))
+    check("open during LSE-only hours (NYSE not open yet)",
+          market_calendar.us_lse_market_open(london_morning), True)
+    # Wed 2026-08-19, 11:30am ET = NYSE mid-session, but 4:30pm London -- after LSE closes.
+    ny_midday = dt.datetime(2026, 8, 19, 11, 30, tzinfo=ZoneInfo("America/New_York"))
+    check("open during NYSE-only hours (LSE already closed)",
+          market_calendar.us_lse_market_open(ny_midday), True)
+    # Wed 2026-08-19, 8am ET = 1pm London -- BOTH sessions open at once.
+    both_open = dt.datetime(2026, 8, 19, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+    check("open during the NYSE/LSE overlap window",
+          market_calendar.us_lse_market_open(both_open), True)
+    # Wed 2026-08-19, 9pm ET = 2am London (Thu) -- both closed.
+    both_closed = dt.datetime(2026, 8, 19, 21, 0, tzinfo=ZoneInfo("America/New_York"))
+    check("closed when NEITHER session is in hours",
+          market_calendar.us_lse_market_open(both_closed), False)
+    # Sat 2026-08-22, mid-afternoon ET -- weekend, neither exchange open regardless of clock time.
+    weekend = dt.datetime(2026, 8, 22, 14, 0, tzinfo=ZoneInfo("America/New_York"))
+    check("closed on a weekend even at an hour that would otherwise be in both windows",
+          market_calendar.us_lse_market_open(weekend), False)
+
+
 def test_year_cache_actually_caches():
     print("\n_trading_days_for_year(): caches per year -- second call for the same year "
           "doesn't re-fetch:")

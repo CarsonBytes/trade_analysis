@@ -284,14 +284,20 @@ def front_future(spec: FutureSpec, asof: dt.date):
         return _qualify_front(ib, spec, asof)
 
 
-def stock_contract(symbol: str, currency: str = "USD"):
-    """Qualified SMART-routed Stock/ETF contract to TRADE (orders). None if IB down."""
+def stock_contract(symbol: str, currency: str = "USD", primary_exchange: str = ""):
+    """Qualified SMART-routed Stock/ETF contract to TRADE (orders). None if IB down.
+
+    primary_exchange: ADDED 2026-08-19 for the UCITS instrument swap -- non-US-listed
+    tickers don't qualify under bare SMART routing (verified directly: Stock("CSPX",
+    "SMART","USD") fails to qualify; Stock("CSPX","SMART","USD",primaryExchange="LSEETF")
+    succeeds). Empty string (default, every pre-existing caller) = unchanged behavior."""
     with _LOCK:
         ib = _ensure_conn()
         if ib is None:
             return None
         ib_async = _mod()
-        c = ib_async.Stock(symbol, "SMART", currency)
+        kwargs = {"primaryExchange": primary_exchange} if primary_exchange else {}
+        c = ib_async.Stock(symbol, "SMART", currency, **kwargs)
         try:
             _run(ib.qualifyContractsAsync(c))
         except Exception as e:                         # noqa: BLE001

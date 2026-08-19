@@ -216,6 +216,36 @@ def test_filter_by_account_regression_ghost_account_no_longer_wins():
     check("real account's non-zero unrealizedPNL survives", by_conid[12345].unrealizedPNL, 987.65)
 
 
+def test_stock_contract_primary_exchange_kwarg():
+    print("stock_contract(): ADDED 2026-08-19 (UCITS instrument swap) -- primary_exchange "
+          "threads through to Stock(primaryExchange=...) when given, and is omitted entirely "
+          "(unchanged SMART-only behavior) for every pre-existing caller that doesn't pass it:")
+    from dashboard.data import ib_client
+    captured = {}
+
+    class FakeStock:
+        def __init__(self, symbol, exchange, currency, **kwargs):
+            captured["args"] = (symbol, exchange, currency, kwargs)
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Stock = FakeStock
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", return_value=None):
+        ib_client.stock_contract("CSPX", primary_exchange="LSEETF")
+    check("primaryExchange kwarg passed when given",
+          captured["args"], ("CSPX", "SMART", "USD", {"primaryExchange": "LSEETF"}))
+
+    captured.clear()
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", return_value=None):
+        ib_client.stock_contract("GLD")
+    check("no primaryExchange kwarg at all when omitted (backward compat)",
+          captured["args"], ("GLD", "SMART", "USD", {}))
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

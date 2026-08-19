@@ -17,6 +17,13 @@ class Instrument:
     yf: str           # yfinance ticker (fallback)
     mt5: str          # MT5 symbol (broker-dependent)
     asset_class: str  # "metal" | "energy" | "fx" | "index" | "crypto"
+    # ADDED 2026-08-19 (UCITS instrument swap, estate-tax motivated): non-US-listed
+    # instruments need an explicit IBKR primaryExchange hint -- ib_client.stock_contract()'s
+    # default SMART routing (no primaryExchange) only resolves US-listed tickers; verified
+    # directly against the paper gateway that e.g. Stock("CSPX","SMART","USD") fails to
+    # qualify without primaryExchange="LSEETF" while the same call WITH it succeeds. Empty
+    # string (every existing Instrument, unchanged) = today's SMART-only behavior.
+    ib_exchange: str = ""
 
 
 UNIVERSE: list[Instrument] = [
@@ -106,16 +113,26 @@ FUT_BY_KEY = {i.key: i for i in FUTURES_UNIVERSE}
 # micros risk > a small account's budget). Same underlyings/classes; the weekly
 # TSMOM strategy ports unchanged. Tagged with the SAME asset_class so
 # WEEKLY_TREND_CLASSES / LONG_ONLY apply identically.
+# SWAPPED 2026-08-19 (user-requested: lower fees + avoid US estate tax exposure on
+# US-situs assets for a non-US person). GLD/SLV/SPY/IEF/TLT -> Ireland-domiciled UCITS
+# twins, confirmed via: (1) IBKR contract resolution -- all 5 qualify + return live
+# historical data on LSEETF/USD (no FX-quotation contamination, unlike QQQ/DIA/SHY
+# below which only have a GBP/EUR-quoted listing and were NOT swapped for that reason);
+# (2) a weekly-bar portfolio backtest (dashboard/research/) showing +2.5pp CAGR,
+# ~flat maxDD vs the old US tickers over the 5y both have in common -- a plausible but
+# NOT heavily-tested edge; the durable rationale for switching is the tax/fee structure,
+# this is a tiebreaker, not the headline. Old keys retired below (_RETIRED_ETF_UNIVERSE),
+# not deleted -- still resolvable for historical journal rows.
 ETF_UNIVERSE: list[Instrument] = [
-    Instrument("GLD",  "SPDR Gold",          "GLD",  "", "metal"),
-    Instrument("SLV",  "iShares Silver",     "SLV",  "", "metal"),
+    Instrument("IGLN", "iShares Physical Gold (UCITS)",   "IGLN.L", "", "metal", "LSEETF"),
+    Instrument("ISLN", "iShares Physical Silver (UCITS)", "ISLN.L", "", "metal", "LSEETF"),
     Instrument("CPER", "US Copper",          "CPER", "", "metal"),
-    Instrument("SPY",  "S&P 500 ETF",        "SPY",  "", "index"),
+    Instrument("CSPX", "iShares Core S&P 500 (UCITS)",    "CSPX.L", "", "index", "LSEETF"),
     Instrument("QQQ",  "Nasdaq 100 ETF",     "QQQ",  "", "index"),
     Instrument("DIA",  "Dow 30 ETF",         "DIA",  "", "index"),
     Instrument("IWM",  "Russell 2000 ETF",   "IWM",  "", "index"),
-    Instrument("IEF",  "7-10y Treasury ETF", "IEF",  "", "rate"),
-    Instrument("TLT",  "20+y Treasury ETF",  "TLT",  "", "rate"),
+    Instrument("IDTM", "iShares $ Treasury Bond 7-10y (UCITS)", "IDTM.L", "", "rate", "LSEETF"),
+    Instrument("IDTL", "iShares $ Treasury Bond 20+y (UCITS)",  "IDTL.L", "", "rate", "LSEETF"),
     Instrument("SHY",  "1-3y Treasury ETF",  "SHY",  "", "rate"),
 ]
 ETF_BY_KEY = {i.key: i for i in ETF_UNIVERSE}
@@ -127,16 +144,21 @@ ETF_BY_KEY = {i.key: i for i in ETF_UNIVERSE}
 # Adding the keepers lifted full CAGR 2.6%->3.6%, OOS 6.9%->8.4% (real diversification,
 # unlike the futures grains/softs/fx that failed). Their classes must be in
 # WEEKLY_TREND_CLASSES to trade live.
+# HYG/TIP/EEM/PFF SWAPPED 2026-08-19 -> UCITS twins, same rationale/verification as the
+# ETF_UNIVERSE swap above (see that comment). VNQ deliberately NOT swapped: the
+# signal-equivalence test (dashboard/research/ucits_equivalence_test.py) found VNQ/IUSP.L
+# direction agreement only 79.5% (fails) -- a genuinely different index construction, not
+# a domicile-only twin.
 ETF_CANDIDATES: list[Instrument] = [
-    Instrument("HYG",  "High-Yield Bonds",  "HYG",  "", "credit"),
-    Instrument("TIP",  "TIPS",              "TIP",  "", "inflation"),
+    Instrument("IHYA", "iShares $ High Yield Corp Bond (UCITS)", "IHYA.L", "", "credit", "LSEETF"),
+    Instrument("TIPS", "iShares $ TIPS (UCITS)",                 "TIPS.L", "", "inflation", "LSEETF"),
     Instrument("EFA",  "Developed Intl Eq", "EFA",  "", "intl_eq"),
-    Instrument("EEM",  "Emerging Mkt Eq",   "EEM",  "", "intl_eq"),
+    Instrument("EIMI", "iShares Core MSCI EM IMI (UCITS)",       "EIMI.L", "", "intl_eq", "LSEETF"),
     Instrument("DBC",  "Broad Commodities", "DBC",  "", "commodity"),
     Instrument("VNQ",  "US REITs",          "VNQ",  "", "reit"),
     # batch-2 keepers (screened 2026-06-22): distinct, positive, not equity-cluster.
     Instrument("EMB",  "EM Bonds",          "EMB",  "", "em_bond"),
-    Instrument("PFF",  "Preferred Stock",   "PFF",  "", "preferred"),
+    Instrument("PRFD", "Invesco Preferred Shares (UCITS)", "PRFD.L", "", "preferred", "LSEETF"),
     # batch-3/4 keepers (screened 2026-07-08, isolation-tested vs the 17/18-base):
     # CWB +1.0pp OOS CAGR (flat DD), VNQI +0.5pp OOS CAGR (flat DD) -- see HANDOFF.
     Instrument("CWB",  "Convertible Bonds", "CWB",  "", "convertible"),
@@ -172,9 +194,27 @@ ETF_CANDIDATE_BY_KEY = {i.key: i for i in ETF_CANDIDATES}
 # crashed both dashboards with AttributeError ('NoneType' has no attribute 'name').
 _RETIRED_ETF_CANDIDATES: list[Instrument] = [
     Instrument("HYD", "Muni High-Yield", "HYD", "", "muni_hy"),
+    # RETIRED 2026-08-19: UCITS-swapped (see ETF_CANDIDATES comment above).
+    Instrument("HYG",  "High-Yield Bonds",  "HYG",  "", "credit"),
+    Instrument("TIP",  "TIPS",              "TIP",  "", "inflation"),
+    Instrument("EEM",  "Emerging Mkt Eq",   "EEM",  "", "intl_eq"),
+    Instrument("PFF",  "Preferred Stock",   "PFF",  "", "preferred"),
 ]
 for _inst in _RETIRED_ETF_CANDIDATES:
     ETF_CANDIDATE_BY_KEY[_inst.key] = _inst
+
+# RETIRED 2026-08-19: UCITS-swapped (see ETF_UNIVERSE's swap comment above) -- same
+# keep-resolvable-but-excluded pattern as _RETIRED_ETF_CANDIDATES, applied to the
+# ETF_UNIVERSE side since these 5 lived there, not in ETF_CANDIDATES.
+_RETIRED_ETF_UNIVERSE: list[Instrument] = [
+    Instrument("GLD",  "SPDR Gold",          "GLD",  "", "metal"),
+    Instrument("SLV",  "iShares Silver",     "SLV",  "", "metal"),
+    Instrument("SPY",  "S&P 500 ETF",        "SPY",  "", "index"),
+    Instrument("IEF",  "7-10y Treasury ETF", "IEF",  "", "rate"),
+    Instrument("TLT",  "20+y Treasury ETF",  "TLT",  "", "rate"),
+]
+for _inst in _RETIRED_ETF_UNIVERSE:
+    ETF_BY_KEY[_inst.key] = _inst
 
 # Batch 2 to SCREEN (--etf-screen2). NOT traded unless they clear OOS + add real
 # diversification (most are redundant subsets/correlates of the held set).

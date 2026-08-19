@@ -68,7 +68,12 @@ TECH_PAUSED = True         # set True 2026-07-30 per explicit user request ("for
 # are all genuinely tech-plurality funds (IT is each one's single largest GICS sector, by a
 # wide margin) same as QQQ/XLK; DIA/IWM/EFA drop off sharply and stay genuinely diversified,
 # so were deliberately left OUT despite also holding some tech names.
-TECH_TICKERS = {"QQQ", "XLK", "SPY", "EEM", "ASHR"}
+TECH_TICKERS = {"QQQ", "XLK", "CSPX", "EIMI", "ASHR"}  # CSPX/EIMI updated 2026-08-19: SPY/EEM
+                                                        # renamed under the UCITS instrument
+                                                        # swap (dashboard/instruments.py) --
+                                                        # same underlying funds/sector weights,
+                                                        # this gate must track the CURRENT key
+                                                        # or it silently stops applying.
 CONF_THRESHOLD = 0.60      # (legacy) LLM self-reported confidence -- recorded
                            # for calibration but no longer gates entries
 MIN_EDGE_R = 0.0           # objective gate: require the empirical expectancy of

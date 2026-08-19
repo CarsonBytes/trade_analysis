@@ -132,17 +132,23 @@ def _market_open(now: dt.datetime | None = None) -> bool:
     as open -- roughly half a day of misalignment at each week boundary. Confirmed live: the
     auto-pause kicked in at HK Sat 00:00:14, which was Fri 12:00pm ET -- cutting off the
     rest of Friday's real trading session. For the MT5/FX legacy path (~24h market, no
-    single relevant exchange timezone) local weekday is kept as-is, no hours check."""
+    single relevant exchange timezone) local weekday is kept as-is, no hours check.
+
+    **CHANGED 2026-08-19 for the UCITS instrument swap (paper first)**: `refresh_llm()`
+    scans the WHOLE board in one batch, not per-instrument, so this can't just switch to a
+    single exchange's window the way ib_exec.py's per-trade
+    `within_entry_execution_window()` does -- the active universe now genuinely spans BOTH
+    NYSE (9:30am-3:30pm ET) and LSE (8:00am-4:00pm UK, ~3:00am-11:00am ET) sessions at once,
+    so this returns True if EITHER is open (an OR of both windows), not just NYSE. Before
+    this fix the gate was NYSE-only, so the LLM would sit paused (and blind to LSE-hours
+    signals) for the ~5.5h/day LSE trades before NYSE opens. The actual OR-of-both-sessions
+    logic lives in market_calendar.us_lse_market_open() -- extracted rather than inlined so
+    it has a real regression test (app.py itself can't be imported in a test, `ui.run()` at
+    module level blocks -- same reason resolve_mode() was extracted to core/mode.py)."""
     from dashboard.instruments import _ib_broker
     if _ib_broker():
-        from zoneinfo import ZoneInfo
-        from dashboard.core.market_calendar import is_us_trading_day
-        now = now or dt.datetime.now(ZoneInfo("America/New_York"))
-        if not is_us_trading_day(now.date()):       # weekend OR US market holiday
-            return False
-        open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        close_t = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        return open_t <= now <= close_t
+        from dashboard.core.market_calendar import us_lse_market_open
+        return us_lse_market_open(now)
     else:
         now = now or dt.datetime.now()
         return now.weekday() < 5  # Mon-Fri, no intraday check (MT5 path, unchanged)

@@ -53,6 +53,65 @@ def is_us_trading_day(d: dt.date) -> bool:
     return d in trading_days
 
 
+# ADDED 2026-08-19 for the UCITS instrument swap -- new LSEETF-routed instruments (CSPX,
+# IGLN, etc.) trade on LSE hours, not NYSE hours, so within_entry_execution_window() needs
+# an LSE-specific calendar too. Separate cache dict (not reusing _year_cache) since it's
+# keyed by a different exchange's schedule.
+_lse_year_cache: dict[int, set] = {}
+
+
+def _lse_trading_days_for_year(year: int) -> set:
+    if year not in _lse_year_cache:
+        try:
+            import pandas_market_calendars as mcal
+            lse = mcal.get_calendar("LSE")
+            sched = lse.schedule(start_date=f"{year}-01-01", end_date=f"{year}-12-31")
+            _lse_year_cache[year] = set(sched.index.date)
+        except Exception as e:                      # noqa: BLE001
+            log.warning("market_calendar: LSE schedule fetch failed for %d, treating "
+                       "every weekday as a trading day this year: %s", year, e)
+            _lse_year_cache[year] = None
+    return _lse_year_cache[year]
+
+
+def is_lse_trading_day(d: dt.date) -> bool:
+    """True if `d` is a real LSE trading day: not a weekend, not a UK market holiday.
+    Fails open, same reasoning as is_us_trading_day()."""
+    if d.weekday() >= 5:
+        return False
+    trading_days = _lse_trading_days_for_year(d.year)
+    if trading_days is None:
+        return True
+    return d in trading_days
+
+
+def us_lse_market_open(now: dt.datetime | None = None) -> bool:
+    """ADDED 2026-08-19 for the UCITS instrument swap -- True if EITHER NYSE (9:30am-
+    3:30pm ET) or LSE (8:00am-4:00pm UK) is currently in session. Extracted from
+    app.py::_market_open() (the LLM board-scan's auto-pause gate) so it has a real
+    regression test -- app.py itself can't be imported in a test (`ui.run()` at module
+    level blocks). Only excludes the last 30min before each close (not the first 30min
+    too, unlike ib_exec.py's stricter per-trade execution window) -- this gates whether
+    ANALYSIS runs at all, not order submission, so the tighter spread-quality reasoning
+    behind that other window doesn't apply here. `now`, if passed, may be in any tzinfo
+    (converted internally) -- for direct testing."""
+    from zoneinfo import ZoneInfo
+    now_ny = (now.astimezone(ZoneInfo("America/New_York")) if now
+             else dt.datetime.now(ZoneInfo("America/New_York")))
+    nyse_open = False
+    if is_us_trading_day(now_ny.date()):             # weekend OR US market holiday
+        open_t = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_t = now_ny.replace(hour=15, minute=30, second=0, microsecond=0)
+        nyse_open = open_t <= now_ny <= close_t
+    now_ldn = now_ny.astimezone(ZoneInfo("Europe/London"))
+    lse_open = False
+    if is_lse_trading_day(now_ldn.date()):           # weekend OR UK market holiday
+        open_t = now_ldn.replace(hour=8, minute=0, second=0, microsecond=0)
+        close_t = now_ldn.replace(hour=16, minute=0, second=0, microsecond=0)
+        lse_open = open_t <= now_ldn <= close_t
+    return nyse_open or lse_open
+
+
 # ADDED 2026-08-05, user-requested: "time until next market open/close" for the dashboard's
 # System health strip. Deliberately a SEPARATE cache/function from is_us_trading_day() above
 # -- that one only needs a whole-day yes/no SET (cheap to hold in memory for a whole

@@ -637,7 +637,7 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
             # which would otherwise cancel it first for a different reason.
             c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
                      "entry, sl, tp, rr, size_units, status) VALUES "
-                     "(1,'2026-07-13T04:00:00','IEF','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
+                     "(1,'2026-07-13T04:00:00','IDTM','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
 
         place_calls = []
 
@@ -647,11 +647,14 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
 
         # BY_KEY only contains ETF entries when UNIVERSE=etf was set at dashboard.instruments'
         # IMPORT time (too late to fix here) -- ETF_TRADED_BY_KEY is unconditionally populated
-        # so the ETF branch is reached fine, but _stale_signal_check()'s BY_KEY.get("IEF")
+        # so the ETF branch is reached fine, but _stale_signal_check()'s BY_KEY.get("IDTM")
         # lookup needs a stand-in; get_live_price is mocked below anyway so it doesn't care
-        # what instrument object it's called with.
+        # what instrument object it's called with. IDTM (not IEF, which this test used before
+        # 2026-08-19) -- IEF was retired under the UCITS swap, so it now hits the NEW
+        # "retired instrument" cancel branch instead of ever reaching _stale_signal_check(),
+        # which is a different code path than what this test exists to cover.
         with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
-             mock.patch.dict("dashboard.instruments.BY_KEY", {"IEF": object()}), \
+             mock.patch.dict("dashboard.instruments.BY_KEY", {"IDTM": object()}), \
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
@@ -673,6 +676,65 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
                 "SELECT status, exit_reason FROM paper_trades WHERE id=1").fetchone()
         check("paper_trades row marked CANCELLED", status, "CANCELLED")
         check("exit_reason explains why", "stale signal auto-cancelled" in exit_reason, True)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_mirror_new_cancels_pending_signal_on_retired_instrument():
+    print("\nmirror_new(): a signal PENDING on a key that's since been RETIRED from the "
+          "active universe (e.g. IEF, retired 2026-08-19 under the UCITS swap) gets "
+          "explicitly CANCELLED -- found via a real test failure: before this fix it fell "
+          "through mirror_new()'s dispatch silently and would sit OPEN forever, never "
+          "funded and never cancelled:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(1,'2026-08-18T04:00:00','IEF','long','ATR rr3.0',100.0,95.0,115.0,3.0,10,'OPEN')")
+
+        place_calls = []
+
+        def _fake_place_etf_bracket(ib, t, equity, acct=None, deployed=None):
+            place_calls.append(t["id"])
+            return f"{t['instrument']}: should NOT have been called"
+
+        with mock.patch.dict(os.environ, {"DD_HALT_PCT": "0"}), \
+             mock.patch.object(ib_exec, "_guard", return_value=object()), \
+             mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
+             mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
+             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
+             mock.patch.object(ib_exec, "_place_etf_bracket", side_effect=_fake_place_etf_bracket):
+            logs = ib_exec.mirror_new()
+
+        check("_place_etf_bracket was never called for the retired instrument",
+              len(place_calls), 0)
+        check("mirror_new() logged the cancellation",
+              any("retired from active universe" in l for l in logs), True)
+        with ib_exec._conn() as c:
+            status, exit_reason = c.execute(
+                "SELECT status, exit_reason FROM paper_trades WHERE id=1").fetchone()
+        check("paper_trades row marked CANCELLED (not left stuck OPEN)", status, "CANCELLED")
+        check("exit_reason explains why", "retired" in exit_reason, True)
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)
@@ -1593,6 +1655,46 @@ def test_reprotect_naked_positions_uses_account_wide_order_view():
             os.remove(path)
         except OSError:
             pass
+
+
+def test_stock_contract_for_looks_up_ib_exchange():
+    print("_stock_contract_for(): ADDED 2026-08-19 (UCITS instrument swap) -- looks up "
+          "the instrument's ib_exchange and passes it through to ib_client.stock_contract(), "
+          "so callers (bracket placement, reprotect) don't each need their own lookup:")
+    from dashboard.execution import ib_exec
+    calls = []
+    with mock.patch.object(ib_exec.ib_client, "stock_contract",
+                           side_effect=lambda sym, primary_exchange="": calls.append(
+                               (sym, primary_exchange)) or object()):
+        ib_exec._stock_contract_for("CSPX")   # LSEETF-routed UCITS instrument
+        ib_exec._stock_contract_for("IWM")    # ordinary US-listed instrument, no exchange hint
+    check("CSPX passes primary_exchange=LSEETF", calls[0], ("CSPX", "LSEETF"))
+    check("IWM passes primary_exchange='' (unchanged SMART-default behavior)",
+          calls[1], ("IWM", ""))
+
+
+def test_within_entry_execution_window_lse_vs_nyse():
+    print("\nwithin_entry_execution_window(): an LSEETF-routed instrument (CSPX) uses LSE "
+          "hours, an ordinary instrument (IWM) uses NYSE hours -- same moment, different "
+          "verdicts, since LSE's morning session barely overlaps NYSE's 10am-3:30pm ET gate:")
+    from zoneinfo import ZoneInfo
+    from dashboard.execution import ib_exec
+    # Wed 2026-08-19, 9:00am London time = LSE mid-morning session (well inside 8:30-16:00),
+    # but only 4:00am ET -- hours before NYSE's 10:00am-3:30pm gate even opens.
+    london_morning = dt.datetime(2026, 8, 19, 9, 0, tzinfo=ZoneInfo("Europe/London"))
+    check("CSPX (LSEETF) is WITHIN its window at 9am London time",
+          ib_exec.within_entry_execution_window(london_morning, instrument="CSPX"), True)
+    check("IWM (NYSE) is OUTSIDE its window at the same moment (4am ET, market not open yet)",
+          ib_exec.within_entry_execution_window(london_morning, instrument="IWM"), False)
+    check("no instrument passed at all -> unchanged NYSE-only behavior (backward compat)",
+          ib_exec.within_entry_execution_window(london_morning), False)
+    # Wed 2026-08-19, 11:30am ET = squarely inside NYSE's 10:00am-3:30pm gate, but 4:30pm
+    # London time -- after LSE's window closes at 16:00 (ET/London offset is 5h in August).
+    ny_midday = dt.datetime(2026, 8, 19, 11, 30, tzinfo=ZoneInfo("America/New_York"))
+    check("IWM (NYSE) is WITHIN its window at 11:30am ET",
+          ib_exec.within_entry_execution_window(ny_midday, instrument="IWM"), True)
+    check("CSPX (LSEETF) is OUTSIDE its window at the same moment (4:30pm London, LSE closed)",
+          ib_exec.within_entry_execution_window(ny_midday, instrument="CSPX"), False)
 
 
 if __name__ == "__main__":

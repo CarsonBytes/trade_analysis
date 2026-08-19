@@ -36,7 +36,7 @@ from dashboard.core import paper
 from dashboard.core import store
 from dashboard.data import ib_client
 from dashboard.data import contracts
-from dashboard.instruments import FUT_BY_KEY
+from dashboard.instruments import FUT_BY_KEY, active_by_key
 from dashboard.core.log import log
 
 MIRROR_METHOD = "ATR rr3.0"   # the one live variant we execute (same as MT5 exec)
@@ -252,7 +252,8 @@ def mirrored_open_symbols() -> set[str]:
 
 # ---- actions ----------------------------------------------------------------
 
-def within_entry_execution_window(now: dt.datetime | None = None) -> bool:
+def within_entry_execution_window(now: dt.datetime | None = None,
+                                  instrument: str | None = None) -> bool:
     """ADDED 2026-07-31, user-requested execution-quality gate -- holds new-entry ORDER
     SUBMISSION to 10:00am-3:30pm ET, deliberately narrower than app.py's LLM-hours gate
     (9:30am-3:30pm): this window additionally excludes the first 30min too, matching the
@@ -269,9 +270,27 @@ def within_entry_execution_window(now: dt.datetime | None = None) -> bool:
     holidays** via `market_calendar.is_us_trading_day()` (real NYSE calendar, not a
     hand-maintained list) -- superseding the earlier "not worth a maintained holiday
     calendar" call now that a real, self-maintaining calendar package was added instead of
-    a fixed list. `now` param is for direct testing."""
+    a fixed list. `now` param is for direct testing.
+
+    **CHANGED 2026-08-19 for the UCITS instrument swap**: LSE-listed instruments (CSPX,
+    IGLN, etc. -- anything with a non-empty Instrument.ib_exchange) trade ~3:00am-11:30am
+    ET (8:00am-4:30pm UK time), which barely overlaps the NYSE window above -- submitting
+    a MARKET order against the NYSE window for one of these would fire into a closed
+    exchange most of the time. `instrument` (a key, e.g. t["instrument"]) selects which
+    calendar/window applies; None (default, every pre-existing caller w/o the new param)
+    keeps the original NYSE-only behavior."""
     from zoneinfo import ZoneInfo
-    from dashboard.core.market_calendar import is_us_trading_day
+    from dashboard.core.market_calendar import is_us_trading_day, is_lse_trading_day
+    from dashboard.instruments import active_by_key
+    inst = active_by_key(instrument) if instrument else None
+    if inst is not None and inst.ib_exchange:
+        now_lse = now.astimezone(ZoneInfo("Europe/London")) if now else \
+            dt.datetime.now(ZoneInfo("Europe/London"))
+        if not is_lse_trading_day(now_lse.date()):    # weekend OR UK market holiday
+            return False
+        open_t = now_lse.replace(hour=8, minute=30, second=0, microsecond=0)
+        close_t = now_lse.replace(hour=16, minute=0, second=0, microsecond=0)
+        return open_t <= now_lse <= close_t
     now = now or dt.datetime.now(ZoneInfo("America/New_York"))
     if not is_us_trading_day(now.date()):           # weekend OR US market holiday
         return False
@@ -363,12 +382,14 @@ def mirror_new() -> list[str]:
         if t.get("manual_paused"):
             continue
         # Execution-window gate -- entries only, see within_entry_execution_window()'s
-        # docstring. Skips (not cancels) outside 10:00am-3:30pm ET, same "leave it queued,
-        # pick it up automatically next cycle" pattern as the manual-pause check above --
-        # the UI's pending-card grouping (_pending_reason() in app.py) already treats an
-        # unmirrored trade with no other blocker as "retrying" by default, so this needs no
-        # UI change to show correctly, though app.py adds a specific message for it too.
-        if not within_entry_execution_window():
+        # docstring. Skips (not cancels) outside the instrument's own market hours (NYSE
+        # 10:00am-3:30pm ET, or LSE 8:30am-4:00pm UK for the UCITS swap instruments), same
+        # "leave it queued, pick it up automatically next cycle" pattern as the manual-pause
+        # check above -- the UI's pending-card grouping (_pending_reason() in app.py)
+        # already treats an unmirrored trade with no other blocker as "retrying" by
+        # default, so this needs no UI change to show correctly, though app.py adds a
+        # specific message for it too.
+        if not within_entry_execution_window(instrument=t["instrument"]):
             continue
         if t["method"] == sleeve.SLEEVE_METHOD:
             if t["instrument"] not in sleeve.SLEEVE_UNIVERSE:
@@ -392,6 +413,27 @@ def mirror_new() -> list[str]:
                     logs.append(msg)
                     continue
                 msg = _place_etf_bracket(ib, t, equity, acct, deployed)  # ETF (shares)
+            elif active_by_key(t["instrument"]) is not None:
+                # ADDED 2026-08-19: a signal PENDING (not yet funded) on a key that's since
+                # been RETIRED from the active universe (e.g. the UCITS swap's old US
+                # tickers) -- still resolvable via active_by_key() for history, but no
+                # longer in ETF_TRADED_BY_KEY/FUTURES specs, so it fell through this dispatch
+                # silently and would sit "OPEN" forever, never funded and never cancelled
+                # (found via test_mirror_new_cancels_stale_signal_instead_of_funding after
+                # the swap retired IEF -- the exact same silent-fallthrough shape, just newly
+                # reachable at 9x the old scale). Explicit cancel, matching the tech-pause
+                # gate's own "cancel, don't silently strand" precedent above.
+                paper._update_resolution(
+                    t["id"], "CANCELLED",
+                    dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                    float(t["entry"]), 0.0,
+                    exit_reason="instrument retired from the active universe before funding")
+                msg = f"{t['instrument']}: cancelled -- instrument retired from active universe"
+                log.warning("ib_exec: %s", msg)
+                from dashboard.core import notable_events
+                notable_events.record(msg)
+                logs.append(msg)
+                continue
             else:
                 continue
         else:
@@ -572,12 +614,20 @@ def _stale_signal_check(t: dict) -> tuple[str | None, float | None, float | None
     return None, price, drifted_r
 
 
+def _stock_contract_for(key: str):
+    """stock_contract() wrapper that looks up the instrument's ib_exchange (empty for
+    every US-listed ticker, "LSEETF" etc. for the UCITS swap instruments) so callers
+    don't each have to do the active_by_key() lookup themselves."""
+    inst = active_by_key(key)
+    return ib_client.stock_contract(key, primary_exchange=(inst.ib_exchange if inst else ""))
+
+
 def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
                        deployed: list[float] | None = None) -> str | None:
     """ETF order: SHARE-based sizing (shares = floor(risk_$ / stop_per_share)) and a
     SMART stock bracket. No contract specs/rolls -- ETFs are simpler than futures and
     divide finely, so any account size works."""
-    contract = ib_client.stock_contract(t["instrument"])      # symbol == key (GLD, SPY…)
+    contract = _stock_contract_for(t["instrument"])      # symbol == key (GLD, SPY…)
     if contract is None:
         return f"{t['instrument']}: no stock contract (market data?), retry"
     stop_per_share = abs(float(t["entry"]) - float(t["sl"]))
@@ -669,7 +719,7 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
         risk_pct = None
     if risk_pct is None:
         return f"{t['instrument']}: sleeve trade missing risk_pct in entry_facts, SKIP"
-    contract = ib_client.stock_contract(t["instrument"])
+    contract = _stock_contract_for(t["instrument"])
     if contract is None:
         return f"{t['instrument']}: no stock contract (market data?), retry"
     stop_per_share = abs(float(t["entry"]) - float(t["sl"]))
@@ -1262,7 +1312,7 @@ def _reprotect_bracket(ib, trade: dict, con_id: int, qty: float, direction: str,
                        sl: float, tp: float, acct: str | None) -> str | None:
     """Re-arm a resting TP/SL OCA pair for a position the broker already holds but which
     lost its protective orders -- no market parent (we already own the shares/units)."""
-    contract = ib_client.stock_contract(trade["instrument"])
+    contract = _stock_contract_for(trade["instrument"])
     if contract is None:
         return f"{trade['instrument']}: no stock contract (market data?), retry"
     action = "SELL" if direction == "long" else "BUY"
