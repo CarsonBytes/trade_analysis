@@ -936,11 +936,27 @@ def paper_panel() -> None:
         # resolved history, not just the visible slice below -- matches how the equity
         # curve/retrospective tab already compute it. Attached per-row as a fixed value,
         # independent of whatever sort order the table is currently displayed in.
+        # FIXED 2026-08-19: was summing ALL resolved trades regardless of funding --
+        # confirmed live this disagreed with the Retro tab's own cumulative R (-4.03 here
+        # vs -0.016 there) because 4 of the 8 resolved trades were "○ signal only" (never
+        # funded at the broker, a real price-action outcome but no real money on it) --
+        # Retro's equity_curve() only ever counts broker-EXECUTED trades (see its own
+        # header text: "signals never placed are excluded"), and this table's OWN
+        # neighboring "P&L (USD)" column already makes the same distinction (shows "—"
+        # for signal-only rows). Restricting to the same _executed set makes both figures
+        # agree and keeps cumulative R meaning the same thing as the P&L column next to
+        # it -- a signal-only row's cumulative R now correctly falls through to "—" via
+        # cum_r_by_id.get()'s default below, same as its P&L.
         cum_r_by_id: dict[int, float] = {}
         running = 0.0
         for t in sorted(resolved, key=lambda t: t["exit_ts"] or ""):
+            if t["id"] not in _executed:
+                continue
             running += t["realized_r"]
-            cum_r_by_id[t["id"]] = round(running, 2)
+            # 3dp, matching equity_curve()'s own precision -- 2dp here made a
+            # mathematically-identical number LOOK different from Retro's (-0.02 vs
+            # -0.016), confusing on top of the population mismatch this same fix addresses.
+            cum_r_by_id[t["id"]] = round(running, 3)
 
         def _closed_row(t: dict) -> dict:
             invested = (f"{qty_by_id[t['id']] * t['entry']:,.0f}"
@@ -967,6 +983,27 @@ def paper_panel() -> None:
                      "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
                      "rows -- '○ signal only' rows never had a real broker order, see the "
                      "Retrospective tab for broker-executed-only KPIs")
+        # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
+        # row, muted text, thin left rule) instead of every row reading the same weight --
+        # a real broker outcome and a hypothetical never-funded one looked identical before,
+        # requiring a column scan to tell them apart. Standard Quasar body-slot override
+        # (generic over props.cols, not hand-listing every column) since QTable has no
+        # built-in per-row conditional class.
+        closed_tbl.add_slot("body", '''
+            <q-tr :props="props"
+                  :class="props.row.funded.includes('signal') ? 'bg-grey-2' : ''">
+                <q-td v-for="col in props.cols" :key="col.name" :props="props"
+                      :class="props.row.funded.includes('signal') ?
+                          (col.name === 'instrument' ? 'text-grey-7' :
+                           col.name === 'funded' ? 'text-grey-6 text-italic' : 'text-grey-6')
+                          : ''"
+                      :style="props.row.funded.includes('signal') && col.name === 'instrument' ?
+                          'border-left: 2px solid #bdbdbd' : ''">
+                    {{ col.name === 'status' && props.row.funded.includes('signal') ?
+                       col.value.toLowerCase() : col.value }}
+                </q-td>
+            </q-tr>
+        ''')
 
         if not_resolved:
             with ui.expansion(f"{len(not_resolved)} cancelled — never had a real "
