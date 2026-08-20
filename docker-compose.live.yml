@@ -50,6 +50,19 @@ services:
       - quant_docker_live_logs:/app/logs
     depends_on:
       - ib-gateway-live
+    # ADDED 2026-08-20 -- same fix as paper's docker-compose.yml (see its comment for the
+    # full incident/reproduction writeup): a stuck/unreachable IB gateway leaves this
+    # container's web server unresponsive and it does NOT self-recover once the gateway
+    # comes back, only a container restart does. Watched by WSL2's own
+    # /home/cap/docker-watchdog.sh (cron, every 1min) which restarts any container
+    # reporting "unhealthy".
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+            "import urllib.request; urllib.request.urlopen('http://localhost:8091/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Mirrors paper's ib-gateway service (docker-compose.yml) almost exactly -- see that
   # file's own comments for the full backstory on EXISTING_SESSION_DETECTED_ACTION,

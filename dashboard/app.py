@@ -3203,7 +3203,18 @@ def main_page() -> None:
     def _ui_tick() -> None:
         clock_row.refresh()
         header_status.refresh()
-    ui.timer(1.0, _ui_tick)
+    _ui_timer = ui.timer(1.0, _ui_tick)
+    # FIXED 2026-08-20: found live -- a disconnected client's ui.timer(1.0, ...) doesn't
+    # always get cleaned up by NiceGUI itself, so _ui_tick() kept firing every second for a
+    # client that no longer exists, hitting Client.check_existence()'s warn_once(...,
+    # stack_info=True) EVERY TIME (a full stack-trace capture, not cheap) -- forever, once
+    # per stale client. Confirmed in the dashboard's own logs during a real unresponsiveness
+    # incident (reproduced safely on paper too): repeated "Client has been deleted but is
+    # still being used" warnings alongside the hang. Explicitly cancelling the timer on
+    # client delete (NiceGUI's own documented hook for this) stops it at the source, rather
+    # than leaving it to accumulate across however many tabs get opened/closed/reloaded over
+    # a session's lifetime.
+    ui.context.client.on_delete(_ui_timer.cancel)
     _refresh_all_panels()   # this client's first paint reflects current STATE immediately,
                             # without waiting for the next 30s background tick
 

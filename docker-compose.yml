@@ -54,6 +54,28 @@ services:
       - quant_docker_logs:/app/logs
     depends_on:
       - ib-gateway
+    # ADDED 2026-08-20, user-requested: the dashboard has a real, reproduced failure mode --
+    # confirmed live (both on live's actual 2FA-loop incident AND reproduced safely here on
+    # paper by pausing ib-gateway) -- an unreachable/stuck IB gateway leaves the NiceGUI web
+    # server itself completely unresponsive (TCP accepts, HTTP never responds), and critically
+    # it does NOT self-recover once the gateway comes back -- confirmed directly: unpausing
+    # ib-gateway did not restore the dashboard; only a container restart did. `restart:
+    # unless-stopped` above only reacts to the process actually EXITING, which never happens
+    # here (still "Up" the whole time). This healthcheck feeds WSL2's own
+    # /home/cap/docker-watchdog.sh (cron, every 1min) which restarts any container
+    # reporting "unhealthy" --
+    # tried the standard willfarrell/autoheal sidecar first, but Docker Hub wasn't reachable
+    # from this environment (persistent TLS handshake timeout, not transient), so a small
+    # self-contained script instead, matching this project's own established pattern
+    # elsewhere (git-sync-sweep.ps1 etc) rather than fighting registry connectivity. No curl
+    # in this image (minimal Python base) -- uses urllib directly instead.
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+            "import urllib.request; urllib.request.urlopen('http://localhost:8090/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # SWITCHED TO REAL LOGIN 2026-08-12: IBKR allows only ONE active session per username
   # (confirmed via research) -- since that's a hard constraint, not a workaround-able one, the
