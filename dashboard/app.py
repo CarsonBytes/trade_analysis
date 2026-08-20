@@ -3214,7 +3214,11 @@ def main_page() -> None:
     # client delete (NiceGUI's own documented hook for this) stops it at the source, rather
     # than leaving it to accumulate across however many tabs get opened/closed/reloaded over
     # a session's lifetime.
-    ui.context.client.on_delete(_ui_timer.cancel)
+    # FIXED 2026-08-20 (same day): passing the bound method directly
+    # (`_ui_timer.cancel`) crashed on_delete's own signature-inspecting dispatch
+    # ("Timer.cancel() takes 1 positional argument but 2 were given") -- an explicit
+    # no-arg lambda sidesteps that ambiguity entirely.
+    ui.context.client.on_delete(lambda: _ui_timer.cancel())
     _refresh_all_panels()   # this client's first paint reflects current STATE immediately,
                             # without waiting for the next 30s background tick
 
