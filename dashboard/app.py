@@ -1582,6 +1582,35 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         return "Broker isn't connected right now — this will be retried automatically once it reconnects.", "retrying"
+    # ADDED 2026-08-21, user-requested: the actual cause of a real incident (HYG sitting
+    # PENDING for hours, 2026-08-20) was the LLM board-scan pipeline itself being backed
+    # off -- mirror_new() (which funds AND cancels pending signals) only ever runs after a
+    # successful board scan, so a backoff blocks EVERYTHING downstream of it: portfolio
+    # room, execution window, all of it become moot until this clears. Checked early,
+    # right after "is the broker connected," since it's upstream of every other reason
+    # below -- a signal that "has room" and "is inside its execution window" is still
+    # stuck if the pipeline that would actually act on it never runs. Reads the exact
+    # same cache key board_scan.py itself uses (not a re-derived guess).
+    from dashboard.web import board_scan
+    _backoff = board_scan._rate_limited_until()
+    if _backoff:
+        try:
+            if dt.datetime.now() < dt.datetime.fromisoformat(_backoff):
+                return (f"The AI board-scan pipeline is currently unavailable (provider "
+                        f"backing off until {_backoff[:16]}) — nothing new can be placed "
+                        "or cancelled until it recovers. This isn't specific to this "
+                        "signal.", "retrying")
+        except ValueError:
+            pass    # malformed cached value -- ignore and fall through to the normal checks
+    # ADDED 2026-08-21: a signal on a key that's been RETIRED from the active universe
+    # (e.g. the UCITS swap's old US tickers) isn't "waiting to be funded" at all -- it's
+    # waiting to be CANCELLED (see ib_exec.py's mirror_new() retirement-cancel branch).
+    # Different framing on purpose so it doesn't read as a normal funding delay.
+    from dashboard.instruments import active_by_key, ETF_TRADED_BY_KEY
+    if t["instrument"] not in ETF_TRADED_BY_KEY and active_by_key(t["instrument"]) is not None:
+        return ("This instrument was retired from the active trading universe (replaced "
+                "by its UCITS equivalent) — this signal will be automatically cancelled, "
+                "not funded.", "retrying")
     from dashboard.core import paper
     from dashboard.data import contracts
     stop_per_share = abs(t["entry"] - t["sl"])
@@ -1620,9 +1649,16 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     # 10:00am-3:30pm ET, entries only) -- give this its own message rather than falling
     # through to the generic "just logged" one below, which would be misleading outside
     # the window (it wasn't "just logged," it's deliberately waiting for the window).
+    # FIXED 2026-08-21: was calling this with no instrument arg, so it always checked
+    # NYSE hours regardless of which exchange the instrument actually trades on -- stale
+    # since the LSE-aware version shipped for the UCITS swap instruments (ib_exec.py). An
+    # LSE instrument's card was showing the wrong window entirely.
     from dashboard.execution import ib_exec
-    if not ib_exec.within_entry_execution_window():
-        return ("Outside the 10:00am-3:30pm ET execution window (avoids the wider "
+    if not ib_exec.within_entry_execution_window(instrument=t["instrument"]):
+        inst = active_by_key(t["instrument"])
+        window_txt = ("8:30am-4:00pm UK time (LSE)" if inst and inst.ib_exchange
+                      else "10:00am-3:30pm ET (NYSE)")
+        return (f"Outside the {window_txt} execution window (avoids the wider "
                 "open/close spreads) — will place automatically once it opens.", "retrying")
     return "Just logged a moment ago — should reach the broker within the next check (about a minute).", "retrying"
 
@@ -2304,30 +2340,35 @@ def retrospective_panel() -> None:
 # for the ap-comparison table if you want it back.)
 
 
-def _refresh_all_panels() -> None:
-    # FIXED 2026-08-21: this used to call .refresh() on these module-level (globally
-    # shared, not per-client) @ui.refreshable panels directly -- fine when called from
-    # WITHIN an already-active client's own page render (the "first paint" call site
-    # below), but this function is ALSO called from the GLOBAL background tick loop
-    # (_do_cheap()/_do_llm()), which runs OUTSIDE any specific browser client's context.
-    # A refreshable's target DOM lives in whichever client last rendered it -- calling
-    # .refresh() with no active client context (or a STALE one, once that client
+def _refresh_for_all_clients(*refreshables) -> None:
+    # FIXED 2026-08-21: module-level (globally shared, not per-client) @ui.refreshable
+    # panels' .refresh() is fine when called from WITHIN an already-active client's own
+    # page render, but several call sites ALSO invoke it from the GLOBAL background tick
+    # loop (_do_cheap()/_do_llm()), which runs OUTSIDE any specific browser client's
+    # context. A refreshable's target DOM lives in whichever client last rendered it --
+    # calling .refresh() with no active client context (or a STALE one, once that client
     # disconnects) hit NiceGUI's own "Client has been deleted but is still being used"
-    # error on every cheap/llm cycle -- confirmed live as the actual cause of the
-    # dashboard's own web server becoming unresponsive (reproduced safely on paper by
-    # pausing ib-gateway, but this specific crash recurred even on a fresh boot with
-    # ZERO browsers ever connected, ruling out any other cause). Explicitly entering
-    # each currently-CONNECTED client's own context before refreshing fixes this at the
-    # source: a client-less background tick now correctly refreshes nothing (nobody's
-    # watching) instead of crashing against a stale/absent one.
+    # error on every cycle -- confirmed live as the actual cause of the dashboard's own
+    # web server becoming unresponsive. FIRST fix (this same day) only wrapped
+    # _refresh_all_panels() itself and missed _do_llm()'s separate early-return path
+    # (header_status.refresh() direct, market-closed/auto-pause branch) -- confirmed
+    # live it kept crashing on THAT path specifically (fires on every tick whenever the
+    # market's closed, i.e. most of the day) even after the first fix shipped. Centralized
+    # here so every background-loop call site uses the same, single, correct pattern
+    # instead of each needing to remember to wrap itself individually."""
     from nicegui import Client
     for client in list(Client.instances.values()):
         if not client.has_socket_connection:
             continue
         with client:
-            header_status.refresh(); health_banner.refresh(); macro_banner.refresh()
-            opportunities.refresh(); grid.refresh(); paper_panel.refresh(); active_panel.refresh()
-            gate_panel.refresh(); retrospective_panel.refresh(); portfolio_panel.refresh()
+            for r in refreshables:
+                r.refresh()
+
+
+def _refresh_all_panels() -> None:
+    _refresh_for_all_clients(header_status, health_banner, macro_banner, opportunities,
+                             grid, paper_panel, active_panel, gate_panel,
+                             retrospective_panel, portfolio_panel)
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -2342,7 +2383,8 @@ async def _do_llm(force: bool = False) -> None:
     # user click should always be honoured (budget permitting).
     if not force and SETTINGS["auto_pause"] and not _market_open():
         service.STATE["last_status"] = "market closed (auto-pause) — LLM skipped"
-        header_status.refresh(); return
+        _refresh_for_all_clients(header_status)
+        return
     await run.io_bound(service.refresh_llm, SETTINGS["cap"])
     _refresh_all_panels()
 
