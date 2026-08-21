@@ -18,7 +18,22 @@ from dashboard.core import net  # noqa: F401  -- TLS bootstrap first
 import asyncio
 import datetime as dt
 import os
+import signal
+import faulthandler
 from nicegui import app, ui, run
+
+# ADDED 2026-08-21: diagnostic for the still-unresolved intermittent dashboard hang (both
+# paper and live cycle "unhealthy" every ~2-3min per the docker-watchdog log, root cause
+# unknown despite multiple fix attempts -- see HANDOFF). `py-spy dump` was the natural next
+# diagnostic but is blocked: Docker containers don't grant SYS_PTRACE by default, and
+# `docker exec -u root ... py-spy dump` still failed with Permission denied (confirmed
+# directly) -- adding that capability means recreating the live container, a bigger step
+# than needed. `faulthandler` needs no special capability: it's stdlib, runs IN-process, and
+# SIGUSR1 dumps every thread's current stack straight to stderr (captured by `docker logs`)
+# with zero extra dependencies. Guarded by hasattr since SIGUSR1 doesn't exist on native
+# Windows (this same file also runs there during local dev).
+if hasattr(signal, "SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 # Mode MUST be resolved before importing anything that touches the DB (service -> paper/store
 # compute their DB path at IMPORT time from DASH_DB_NAME). `store` itself is lightweight/self-
