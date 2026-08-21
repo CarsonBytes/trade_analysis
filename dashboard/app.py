@@ -2305,9 +2305,29 @@ def retrospective_panel() -> None:
 
 
 def _refresh_all_panels() -> None:
-    header_status.refresh(); health_banner.refresh(); macro_banner.refresh()
-    opportunities.refresh(); grid.refresh(); paper_panel.refresh(); active_panel.refresh()
-    gate_panel.refresh(); retrospective_panel.refresh(); portfolio_panel.refresh()
+    # FIXED 2026-08-21: this used to call .refresh() on these module-level (globally
+    # shared, not per-client) @ui.refreshable panels directly -- fine when called from
+    # WITHIN an already-active client's own page render (the "first paint" call site
+    # below), but this function is ALSO called from the GLOBAL background tick loop
+    # (_do_cheap()/_do_llm()), which runs OUTSIDE any specific browser client's context.
+    # A refreshable's target DOM lives in whichever client last rendered it -- calling
+    # .refresh() with no active client context (or a STALE one, once that client
+    # disconnects) hit NiceGUI's own "Client has been deleted but is still being used"
+    # error on every cheap/llm cycle -- confirmed live as the actual cause of the
+    # dashboard's own web server becoming unresponsive (reproduced safely on paper by
+    # pausing ib-gateway, but this specific crash recurred even on a fresh boot with
+    # ZERO browsers ever connected, ruling out any other cause). Explicitly entering
+    # each currently-CONNECTED client's own context before refreshing fixes this at the
+    # source: a client-less background tick now correctly refreshes nothing (nobody's
+    # watching) instead of crashing against a stale/absent one.
+    from nicegui import Client
+    for client in list(Client.instances.values()):
+        if not client.has_socket_connection:
+            continue
+        with client:
+            header_status.refresh(); health_banner.refresh(); macro_banner.refresh()
+            opportunities.refresh(); grid.refresh(); paper_panel.refresh(); active_panel.refresh()
+            gate_panel.refresh(); retrospective_panel.refresh(); portfolio_panel.refresh()
 
 
 # ---- refresh orchestration -------------------------------------------------
