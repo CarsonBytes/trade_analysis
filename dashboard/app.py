@@ -2349,20 +2349,33 @@ def _refresh_for_all_clients(*refreshables) -> None:
     # calling .refresh() with no active client context (or a STALE one, once that client
     # disconnects) hit NiceGUI's own "Client has been deleted but is still being used"
     # error on every cycle -- confirmed live as the actual cause of the dashboard's own
-    # web server becoming unresponsive. FIRST fix (this same day) only wrapped
-    # _refresh_all_panels() itself and missed _do_llm()'s separate early-return path
-    # (header_status.refresh() direct, market-closed/auto-pause branch) -- confirmed
-    # live it kept crashing on THAT path specifically (fires on every tick whenever the
-    # market's closed, i.e. most of the day) even after the first fix shipped. Centralized
-    # here so every background-loop call site uses the same, single, correct pattern
-    # instead of each needing to remember to wrap itself individually."""
+    # web server becoming unresponsive.
+    #
+    # FIRST fix (earlier the same day) only wrapped _refresh_all_panels() itself and
+    # missed _do_llm()'s separate early-return path -- fixed by centralizing every
+    # background-loop call site onto this one function.
+    #
+    # SECOND fix (later the same day): even after centralizing, the crash kept recurring
+    # -- confirmed live: has_socket_connection can be True at the top of this loop and
+    # still go stale by the time a client's actual .refresh() runs a few refreshables
+    # later (a real race, not a logic error -- the client can disconnect at any point
+    # during this synchronous-looking loop, since NiceGUI's own disconnect handling runs
+    # concurrently). Pre-checking a flag before acting on it doesn't survive that gap.
+    # Wrapping the ACTUAL refresh call defensively -- catch, log at debug (this is
+    # routine, not a bug, once a tab closes mid-cycle), move on -- is correct regardless
+    # of exactly which internal flag NiceGUI uses or when it flips.
     from nicegui import Client
     for client in list(Client.instances.values()):
         if not client.has_socket_connection:
             continue
-        with client:
-            for r in refreshables:
-                r.refresh()
+        try:
+            with client:
+                for r in refreshables:
+                    r.refresh()
+        except Exception as e:                             # noqa: BLE001
+            from dashboard.core.log import log
+            log.debug("app: skipped a panel refresh for a client that disconnected "
+                     "mid-cycle: %s", e)
 
 
 def _refresh_all_panels() -> None:
