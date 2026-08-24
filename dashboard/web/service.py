@@ -399,6 +399,23 @@ def refresh_cheap() -> None:
     except Exception as e:
         STATE["broker_conn"] = None
         log.debug("broker.connection error: %s", e)
+    # ADDED 2026-08-25: cache equity/portfolio-room here too, same reasoning as
+    # broker_conn just above ("computed here so the UI thread never blocks on a broker
+    # call") -- confirmed via a live faulthandler dump that health_banner() calling
+    # broker.equity_usd() directly during main_page()'s render was blocking the ENTIRE
+    # uvicorn event loop for up to _run()'s 30s timeout (ib_client.py's Future.result()
+    # is a genuine thread-blocking wait, not an await) whenever the gateway was slow or
+    # unreachable -- explains the recurring multi-minute "unhealthy" cycles on both
+    # paper and live. health_banner() now reads these cached values instead.
+    if broker.is_ib():
+        try:
+            STATE["equity_usd"] = broker.equity_usd()
+            STATE["portfolio_room_usd"] = broker.portfolio_room_usd()
+        except Exception as e:
+            log.debug("equity/portfolio_room cache error: %s", e)
+    else:
+        STATE["equity_usd"] = None
+        STATE["portfolio_room_usd"] = None
     # broker reconciliation: on every FRESH connection (login/reconnect -- see
     # ib_client.reconcile_needed()) PLUS periodically (RECONCILE_PERIODIC_SEC) even on a
     # long-lived, never-reconnecting connection. FIXED 2026-07-21: this used to run ONLY on

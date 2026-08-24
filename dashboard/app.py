@@ -479,8 +479,15 @@ def health_banner() -> None:
     from dashboard.execution import broker as _cap_bk
     cap_txt, cap_colour, cap_tooltip = None, "text-grey-5", ""
     if _cap_bk.is_ib():
-        _cap_eq = _cap_bk.equity_usd()
-        _cap_room = _cap_bk.portfolio_room_usd()
+        # ADDED 2026-08-25: read the cache service.refresh_cheap() now populates instead of
+        # calling equity_usd()/portfolio_room_usd() live here -- this function runs
+        # synchronously inside main_page()'s HTTP render path, and a live call could block
+        # the whole event loop for up to ib_client._run()'s 30s timeout when the gateway is
+        # slow/unreachable (confirmed via a live faulthandler thread dump -- this exact call
+        # chain was caught blocking the main uvicorn thread, explaining the recurring
+        # multi-minute dashboard-unresponsive cycles on both paper and live).
+        _cap_eq = service.STATE.get("equity_usd")
+        _cap_room = service.STATE.get("portfolio_room_usd")
         if _cap_eq and _cap_room is not None:
             _cap_total = _cap_eq * float(os.environ.get("PORTFOLIO_CAP", "1.0"))
             _cap_used_pct = (1 - _cap_room / _cap_total) if _cap_total > 0 else 0.0
@@ -2048,7 +2055,12 @@ def active_panel() -> None:
     # computed ONCE for the whole render -- both _fundable_count() and _pending_reason()
     # used to each call _bk.equity_usd() independently (a real broker round-trip), once per
     # pending CARD for the latter; see the 2026-07-13 fix note on _pending_reason().
-    eq = _bk.equity_usd() if _bk.is_ib() else None
+    # ADDED 2026-08-25: reads the cache service.refresh_cheap() populates instead of calling
+    # equity_usd() live -- this function runs synchronously inside main_page()'s HTTP render
+    # path; a live call blocks the WHOLE event loop for up to 30s when the gateway is
+    # slow/unreachable (same root cause confirmed via a live faulthandler dump for
+    # health_banner(), see its 2026-08-25 note -- fixing this call site the same way).
+    eq = service.STATE.get("equity_usd") if _bk.is_ib() else None
     if _bk.is_ib():
         fundable, total = _fundable_count(eq)
         freq = (f"Signal freq (backtest): ~{BACKTEST_SIGNAL_FREQ_YR}/yr "
@@ -2112,7 +2124,8 @@ def active_panel() -> None:
         # confirmed live to make the whole dashboard unresponsive with several pending cards
         # on screen), and (reason, status) computed once per trade here, not inside
         # _trade_card() -- passed straight through as plain values.
-        room = _bk.portfolio_room_usd() if _bk.is_ib() else None
+        # ADDED 2026-08-25: same cache-read fix as `eq` above -- was a live blocking call.
+        room = service.STATE.get("portfolio_room_usd") if _bk.is_ib() else None
         # ADDED 2026-07-14: worst-case bound on when SOMETHING currently deployed resolves
         # (see _pending_reason()'s earliest_free docstring) -- computed from confirmed
         # positions + already-placed pending orders, ONCE, before the grouping loop (which
