@@ -727,6 +727,20 @@ def refresh_cheap() -> None:
                     store.cache_set("spy_benchmark", {"base0_ts": base0_ts, "base_px": base_px,
                                                        "cur_px": cur_px, "cur_ts": _t4.time()})
                     STATE["spy_benchmark"] = {"base_px": base_px, "cur_px": cur_px}
+                # ADDED 2026-08-26: persist a WEEKLY-SAMPLED SPY close series alongside the
+                # two-point benchmark, so the portfolio equity chart can overlay "SPY over
+                # the same window" as a real line (not just a single % comparison stat).
+                # The period=max download above already happened -- sampling it here is
+                # ~free. ~1 point/5 trading days keeps 30y at ~1500 points.
+                try:
+                    step = max(1, len(spy) // 1500)
+                    sampled = spy.iloc[::step]
+                    series = [[int(pd.Timestamp(ix).timestamp()), round(float(px), 2)]
+                              for ix, px in sampled.items() if pd.notna(px)]
+                    if len(series) >= 10:
+                        store.cache_set("spy_series", series)
+                except Exception as e:
+                    log.debug("spy_series sample error: %s", e)
             else:
                 STATE["spy_benchmark"] = {"base_px": cached_spy["base_px"],
                                           "cur_px": cached_spy["cur_px"]}

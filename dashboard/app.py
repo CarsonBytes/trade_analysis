@@ -62,7 +62,8 @@ SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             # "biggest/most-recent first" for EVERY key (newest entry date, highest R, highest
             # profit, largest invested amount) -- one consistent mental model instead of
             # per-key direction semantics.
-            "active_sort": "entry_date", "active_sort_dir": "desc"}
+            "active_sort": "entry_date", "active_sort_dir": "desc",
+            "events_seen_ts": 0}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
                     "profit": "Profit", "invested": "Invested amount"}
@@ -81,6 +82,7 @@ def _save_settings() -> None:
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "active_sort": SETTINGS["active_sort"], "active_sort_dir": SETTINGS["active_sort_dir"],
+            "events_seen_ts": SETTINGS.get("events_seen_ts", 0),
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
             "tech_paused": _p.TECH_PAUSED})
@@ -97,7 +99,8 @@ def _load_settings() -> None:
         if not saved:
             return
         for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
-                 "chart_scale", "chart_view", "active_sort", "active_sort_dir"):
+                 "chart_scale", "chart_view", "active_sort", "active_sort_dir",
+                 "events_seen_ts"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -215,6 +218,66 @@ BACKTEST_MAX_DD_PCT = -8.83
 # comparable to the live dashboard's own days-underwater count below, which is measured in
 # real elapsed calendar time (hist timestamps), not trading days.
 BACKTEST_MAX_RECOVERY_DAYS = round(376 * 7 / 5)   # ~526 calendar days, ~17-18 months
+
+
+# ---- ADDED 2026-08-26: shared UI helpers (freshness badges + asset-class map) ------------
+
+def _freshness_label(ts: dt.datetime | None, warn_min: int = 90, bad_min: int = 360,
+                     prefix: str = "updated"):
+    """One standardized data-freshness badge: grey when fresh, amber past warn_min,
+    red past bad_min. Replaces the ad-hoc 'updated X ago' labels that each chose their
+    own staleness behavior -- one component means every panel's 'how stale is this'
+    reads the same way. Returns the label element so callers can chain .tooltip()."""
+    fresh = _ago(ts)
+    cls = "text-xs"
+    if ts is None:
+        cls += " text-grey-6"
+    else:
+        age_min = (dt.datetime.now() - ts).total_seconds() / 60.0
+        if age_min >= bad_min:
+            cls += " text-red-7 font-bold"
+        elif age_min >= warn_min:
+            cls += " text-orange-8 font-bold"
+        else:
+            cls += " text-grey-6"
+    return ui.label(f"{prefix} {fresh}").classes(cls)
+
+
+# Coarse asset-class grouping for the exposure-by-class bar: instruments.py's fine-grained
+# classes rolled up to the buckets the README's universe description actually uses.
+_COARSE_CLASS = {
+    "metal": "Metals", "index": "Equity", "intl_eq": "Equity", "china_eq": "Equity",
+    "rate": "Rates",
+    "credit": "Credit", "convertible": "Credit", "preferred": "Credit", "em_bond": "Credit",
+    "commodity": "Commodities", "mlp": "Commodities", "energy": "Commodities",
+    "reit": "REITs", "intl_reit": "REITs", "inflation": "Inflation",
+}
+
+
+def _asset_class_for(symbol: str | None) -> str | None:
+    """Map an instrument key/broker symbol to its coarse asset class (None if unknown --
+    unknown gets its own honest 'Other' bucket rather than being silently dropped)."""
+    if not symbol:
+        return None
+    sym = str(symbol).strip().upper()
+    sym = sym.split()[0].split(".")[0]          # "IGLN.L" -> "IGLN", "GOLD Aug26" -> "GOLD"
+    try:
+        from dashboard import instruments as _inst
+        for lookup in ("ETF_BY_KEY", "ETF_CANDIDATE_BY_KEY", "ETF_TRADED_BY_KEY"):
+            inst = getattr(_inst, lookup).get(sym)
+            if inst:
+                return _COARSE_CLASS.get(inst.asset_class, inst.asset_class.title())
+        inst = BY_KEY.get(sym) or getattr(_inst, "FUT_BY_KEY", {}).get(sym)
+        if inst:
+            return _COARSE_CLASS.get(inst.asset_class, inst.asset_class.title())
+        for lookup in ("_RETIRED_ETF_UNIVERSE",):
+            retired = getattr(_inst, lookup, None) or []
+            for inst2 in retired:
+                if inst2.key == sym:
+                    return _COARSE_CLASS.get(inst2.asset_class, inst2.asset_class.title())
+    except Exception:                                  # noqa: BLE001 -- never break rendering
+        return None
+    return None
 
 
 # ---- refreshable panels ----------------------------------------------------
@@ -1189,9 +1252,13 @@ def portfolio_panel() -> None:
 
     with ui.row().classes("items-baseline gap-3"):
         ui.label("Portfolio").classes("text-lg font-bold")
+        # B3 2026-08-26: standardized freshness badge (grey/amber/red by age) replaces the
+        # old ad-hoc always-grey "updated X ago" label.
         _lc = service.STATE.get("last_cheap")
         if _lc is not None:
-            ui.label(f"updated {_ago(_lc)}").classes("text-xs text-grey-6")
+            _freshness_label(_lc, warn_min=30, bad_min=90).tooltip(
+                "age of the last cheap-layer (price/position) refresh; amber = stale, "
+                "red = the tick loop may be stuck")
         elif service.STATE.get("portfolio_ts"):
             _t = dt.datetime.fromtimestamp(service.STATE["portfolio_ts"])
             ui.label(f"last refreshed {_t.strftime('%m-%d %H:%M')} · refreshing…")\
@@ -1357,6 +1424,70 @@ def portfolio_panel() -> None:
               "began — not trading P&L (see Total P&L above). Open Cash flows to see or "
               "edit the individual entries.")
 
+    # ADDED 2026-08-26: exposure by asset class -- breadth is this strategy's whole thesis
+    # ("the book's avg pairwise correlation stays low because the tickers span genuinely
+    # different asset classes"), yet nothing on the dashboard showed WHERE the money
+    # currently sits by class, or how much PORTFOLIO_CAP headroom remains.
+    if positions and nl:
+        try:
+            _cls_sum: dict[str, float] = {}
+            _seen_tk: set = set()
+            _sym_of_id = {t["id"]: t["instrument"] for t in paper.open_trades()}
+            for _pid in sorted(positions, key=lambda k: k not in _sym_of_id):
+                _p = positions[_pid]
+                _tk = _p.get("ticket")
+                if _tk is not None:
+                    if _tk in _seen_tk:
+                        continue
+                    _seen_tk.add(_tk)
+                _mv_usd = _p["volume"] * _p["open"] + _p.get("profit", 0.0)
+                if _mv_usd <= 0:
+                    continue
+                _sym = _sym_of_id.get(_pid) or _p.get("symbol")
+                _cls = _asset_class_for(_sym) or "Other"
+                _cls_sum[_cls] = _cls_sum.get(_cls, 0.0) + _mv_usd * usd_to_base
+            if _cls_sum:
+                _gross_pct = sum(_cls_sum.values()) / nl * 100.0
+                try:
+                    _cap_pct = float(os.environ.get("PORTFOLIO_CAP", "1.0")) * 100.0
+                except Exception:                          # noqa: BLE001
+                    _cap_pct = None
+                _head = (_cap_pct - _gross_pct) if _cap_pct is not None else None
+                _head_col = ("text-red font-bold" if _head is not None and _head < 0 else
+                             "text-orange-8 font-bold" if _head is not None and _head < 15
+                             else "text-grey-9")
+                with ui.row().classes("items-baseline gap-3 w-full mt-3 flex-wrap"):
+                    ui.label("Exposure by asset class").classes("text-sm font-bold")
+                    _head_txt = (f"gross {_gross_pct:.1f}% of NAV · cap {_cap_pct:.0f}% · "
+                                 f"headroom {_head:.1f}%" if _cap_pct is not None else
+                                 f"gross {_gross_pct:.1f}% of NAV")
+                    ui.label(_head_txt).classes(f"text-xs {_head_col}").tooltip(
+                        "Filled strategy positions only — PENDING (not-yet-filled) broker "
+                        "orders also consume portfolio-cap room but aren't shown here yet; "
+                        "the cap itself accounts for both (see README, 2026-07-13 fix). "
+                        "Amber/red headroom means new entries may be cap-blocked soon.")
+                _classes_sorted = sorted(_cls_sum.items(), key=lambda kv: -kv[1])
+                _palette = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
+                            "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc"]
+                ui.echart({
+                    "tooltip": {"trigger": "axis",
+                                "formatter": "{b}: {c}%"},
+                    "grid": {"left": 90, "right": 40, "top": 5, "bottom": 25},
+                    "xAxis": {"type": "value", "max": 100,
+                              "axisLabel": {"formatter": "{value}%"}},
+                    "yAxis": {"type": "category",
+                              "data": [f"{k} ({v / nl * 100:.1f}%)"
+                                       for k, v in reversed(_classes_sorted)]},
+                    "series": [{"type": "bar", "barWidth": 14,
+                                "data": [{"value": round(v / nl * 100, 2),
+                                          "itemStyle": {"color": _palette[i % len(_palette)]}}
+                                         for i, (_, v) in enumerate(reversed(_classes_sorted))]}],
+                }).classes("w-full").style(
+                    f"height: {min(44 + 28 * len(_classes_sorted), 260)}px")
+        except Exception as e:                             # noqa: BLE001 -- never break the panel
+            from dashboard.core.log import log
+            log.debug("exposure-by-class render failed: %s", e)
+
     # Period control: governs BOTH charts below. The drawdown "now" badge + the peak-tracking
     # always use the FULL history (correctness -- a window can't hide the true current DD from
     # the all-time peak); the period only trims which POINTS are plotted, for readability.
@@ -1434,18 +1565,59 @@ def portfolio_panel() -> None:
             _marks.append({"xAxis": xs[idx],
                            "label": {"formatter": f"{kind} {famt:+,.0f}", "fontSize": 9},
                            "lineStyle": {"color": "#6b7280", "type": "dotted"}})
+        # ADDED 2026-08-26: SPY benchmark OVERLAY -- the headline card compares returns vs
+        # SPY as a single % pair, but shapes matter ("did we diverge in the last month or
+        # gradually all year?"). When viewing P&L (ex-deposits), overlay a weekly-sampled,
+        # % -normalized SPY line over the identical window on a second y-axis. Silently
+        # omitted until service.refresh_cheap() has cached spy_series (first fetch happens
+        # on the same ~4h cadence as the two-point benchmark).
+        _spy_pts = None
+        if _use_adj:
+            try:
+                _spy_raw, _ = store.cache_get("spy_series")
+                if _spy_raw and len(_spy_raw) >= 2:
+                    _aligned: list[float] = []
+                    _j, _base = 0, None
+                    for _h in _whist:
+                        while _j + 1 < len(_spy_raw) and _spy_raw[_j + 1][0] <= _h[0]:
+                            _j += 1
+                        if _spy_raw[_j][0] > _h[0]:
+                            continue                       # SPY history starts mid-window
+                        if _base is None:
+                            _base = _spy_raw[_j][1]
+                        if _base:
+                            _aligned.append(round((_spy_raw[_j][1] / _base - 1) * 100, 2))
+                    if len(_aligned) >= 2:
+                        _spy_pts = _aligned
+            except Exception as e:                         # noqa: BLE001 -- overlay is optional
+                from dashboard.core.log import log
+                log.debug("SPY overlay unavailable: %s", e)
+        _yaxis = {"type": "value", "name": ccy}
+        if (_zero_base and not _use_adj):                  # P&L can go negative -- never clip at 0
+            _yaxis["min"] = 0
+        else:
+            _yaxis["scale"] = True
+        _series = [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
+                    "lineStyle": {"width": 2},
+                    "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"},
+                    "markLine": ({"silent": True, "symbol": "none", "data": _marks}
+                                 if _marks else None)}]
+        if _spy_pts is not None:
+            _series.append({"type": "line", "data": _spy_pts, "yAxisIndex": 1,
+                            "smooth": True, "symbol": "none",
+                            "lineStyle": {"width": 1.5, "type": "dashed", "color": "#9ca3af"},
+                            "itemStyle": {"color": "#9ca3af"}})
         ui.echart({
             "tooltip": {"trigger": "axis"},
+            "legend": ({"data": [ccy, "SPY %"], "bottom": 0, "textStyle": {"fontSize": 10}}
+                       if _spy_pts is not None else None),
             "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
-            "yAxis": ({"type": "value", "name": ccy, "min": 0}
-                     if (_zero_base and not _use_adj)     # P&L can go negative -- never clip at 0
-                     else {"type": "value", "name": ccy, "scale": True}),
-            "series": [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
-                        "lineStyle": {"width": 2},
-                        "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"},
-                        "markLine": ({"silent": True, "symbol": "none", "data": _marks}
-                                    if _marks else None)}],
-            "grid": {"left": 75, "right": 20, "top": 20, "bottom": 45},
+            "yAxis": [_yaxis, *( [{"type": "value", "name": "SPY %", "scale": True,
+                                   "splitLine": {"show": False}}]
+                                 if _spy_pts is not None else [] )],
+            "series": _series,
+            "grid": {"left": 75, "right": (_spy_pts is not None and 55 or 20), "top": 20,
+                     "bottom": (_spy_pts is not None and 65 or 45)},
         }).classes("w-full h-56").tooltip(
             "P&L (ex-deposits) nets out logged cash flows so this is pure trading performance; "
             "switch to Account value to see the raw balance, with deposits marked as dotted lines."
@@ -2252,9 +2424,110 @@ def retrospective_panel() -> None:
                         "areaStyle": {}, "lineStyle": {"width": 2}}],
             "grid": {"left": 50, "right": 20, "top": 30, "bottom": 40},
         }).classes("w-full h-64")
+        # ADDED 2026-08-26: underwater view of the SAME R-curve -- depth (maxDD) was already
+        # a KPI card, but drawdown DURATION is at least as informative ("an -8% DD that
+        # recovers in 3 weeks vs one that drags 8 months", README 2026-08-06) and only
+        # visible as a shape, not a number. Shaded area = how far below the running peak
+        # (in R) the account sat after each closed trade.
+        _peak, _under = None, []
+        for _c in curve:
+            _peak = _c if _peak is None else max(_peak, _c)
+            _under.append(round(_c - _peak, 3))
+        ui.echart({
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": list(range(1, len(curve) + 1)),
+                      "name": "closed trade #"},
+            "yAxis": {"type": "value", "name": "R below peak", "max": 0},
+            "series": [{"type": "line", "data": _under, "smooth": True, "areaStyle": {},
+                        "lineStyle": {"width": 1.5}, "itemStyle": {"color": "#dc2626"}}],
+            "grid": {"left": 50, "right": 20, "top": 20, "bottom": 40},
+        }).classes("w-full h-36").tooltip(
+            "Distance below the running equity peak after each closed trade (in R). "
+            "Wide/long shaded regions are long, deep drawdowns -- the behavioral cost "
+            "of holding through them.")
     else:
         ui.label("No closed trades yet — the equity curve appears as trades settle.")\
             .classes("text-sm text-grey")
+
+    # ADDED 2026-08-26: live-vs-backtest drift check (dashboard/web/drift.py) --
+    # research/live_vs_backtest.py's methodology surfaced continuously instead of living
+    # only as a manually-run script. Shows real per-strategy expectancy/win-rate next to
+    # the cached backtest reference, with binomial/t-test p-values once scipy can compute
+    # them; the heavy reference computation runs ONLY on explicit button click (it
+    # downloads full history for the whole universe -- minutes), then caches forever.
+    with ui.expansion("Live vs backtest drift",
+                      icon="compare_arrows",
+                      caption="are real closed trades still behaving like the backtest?")\
+            .classes("w-full mt-2"):
+        from dashboard.web import drift
+        try:
+            from dashboard.core.sleeve import SLEEVE_METHOD
+            _raw = {"core": [], "sleeve": []}
+            for _t in closed:
+                if _t["realized_r"] is None:
+                    continue
+                _raw["sleeve" if _t.get("method") == SLEEVE_METHOD else "core"].append(
+                    float(_t["realized_r"]))
+            split = {k: paper.stats(v) for k, v in _raw.items()}
+            ref, ref_ts = drift.cached_reference()
+            for strat in ("core", "sleeve"):
+                st, rs = split.get(strat) or {}, _raw[strat]
+                if not st.get("n"):
+                    continue
+                _good = st["expectancy_R"] > 0
+                with ui.row().classes("items-baseline gap-4 flex-wrap w-full"):
+                    ui.badge(strat.upper(),
+                             color="blue" if strat == "core" else "purple")
+                    ui.label(f"n={st['n']} · exp {st['expectancy_R']:+.3f}R · "
+                             f"win {st['win_rate']:.0%}")\
+                        .classes("text-sm " + ("text-green" if _good else "text-red"))
+                    if ref and ref.get("n"):
+                        cmp_ = drift.compare(st, rs, ref)
+                        ui.label(f"vs backtest exp {ref['expectancy_R']:+.3f}R / "
+                                 f"win {ref['win_rate']:.0%} "
+                                 f"(n={ref['n']}, computed {ref.get('computed_ts', '?')})")\
+                            .classes("text-xs text-grey-6")
+                        if cmp_.get("win_p") is not None:
+                            _flag = (cmp_["win_p"] < 0.05 or
+                                     (cmp_.get("exp_p") is not None and cmp_["exp_p"] < 0.05))
+                            ui.label(("⚠ diverging" if _flag else "consistent"))\
+                                .classes("text-xs font-bold " +
+                                         ("text-orange-10" if _flag else "text-grey-6"))\
+                                .tooltip(f"binomial win-rate p={cmp_['win_p']:.3f}" +
+                                         (f", expectancy t-test p={cmp_['exp_p']:.3f}"
+                                          if cmp_.get("exp_p") is not None else "") +
+                                         ". p<0.05 on either = live measurably differs "
+                                         "from the validated expectation -> investigate "
+                                         "(per the forward-test protocol, not panic).")
+                if st.get("n") and not st.get("trustworthy"):
+                    ui.label(f"⚠ n={st['n']} < 30 — provisional, per the project's own "
+                             "trustworthiness bar").classes("text-xs text-orange-8")
+            if ref is None:
+                ui.label("No cached backtest reference yet.")\
+                    .classes("text-xs text-grey-6")
+
+            _drift_busy = {"flag": False}
+
+            async def _compute_ref() -> None:
+                if _drift_busy["flag"]:
+                    return
+                _drift_busy["flag"] = True
+                btn.props("loading")
+                try:
+                    await run.io_bound(drift.compute_reference)
+                    retrospective_panel.refresh()
+                finally:
+                    _drift_busy["flag"] = False
+            btn = ui.button("Compute backtest reference", icon="calculate",
+                            on_click=_compute_ref)\
+                .props("flat dense size=sm")\
+                .tooltip("Downloads full weekly history for the whole active universe and "
+                         "re-runs the deployed-config portfolio backtest (SAME methodology "
+                         "as research/live_vs_backtest.py). Takes MINUTES -- one-time, "
+                         "then cached until the config fingerprint changes.")
+        except Exception as e:                             # noqa: BLE001
+            ui.label(f"drift check unavailable: {e}").classes("text-xs text-grey-6")
+
 
     # 2026-07-23: the four sections below (confidence calibration, monthly attribution,
     # constraint scorecard, recent events) are analysis you check occasionally, not a live
@@ -2424,7 +2697,7 @@ def _refresh_for_all_clients(*refreshables) -> None:
 def _refresh_all_panels() -> None:
     _refresh_for_all_clients(header_status, health_banner, macro_banner, opportunities,
                              grid, paper_panel, active_panel, gate_panel,
-                             retrospective_panel, portfolio_panel)
+                             retrospective_panel, portfolio_panel, bell_button)
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -3091,17 +3364,86 @@ def _open_info_modal() -> None:
     dlg.open()
 
 
+# ---- ADDED 2026-08-26: in-app notification center (bell) -----------------------------------
+# notable_events were previously visible only inside Retrospective's collapsed "Recent
+# events" expansion -- you had to KNOW to go look. The bell surfaces them on every page:
+# a red badge while unread events exist, and one click opens the full recent list with
+# severity icons. Read-state is per-instance (persisted in ui_settings), matching how
+# everything else here is scoped.
+
+def _unread_events_count() -> int:
+    seen = float(SETTINGS.get("events_seen_ts") or 0)
+    try:
+        from dashboard.core import notable_events
+        return sum(1 for ev in notable_events.recent(30)
+                   if _event_ts(ev.get("ts", "")) > seen)
+    except Exception:                                  # noqa: BLE001 -- never break rendering
+        return 0
+
+
+def _event_ts(iso: str) -> float:
+    try:
+        return dt.datetime.fromisoformat(iso).timestamp()
+    except Exception:                                  # noqa: BLE001
+        return 0.0
+
+
+@ui.refreshable
+def bell_button() -> None:
+    unread = _unread_events_count()
+    btn = ui.button(icon="notifications", on_click=_open_bell)\
+        .props(("flat dense round size=sm color=negative") if unread else
+               "flat dense round size=sm")\
+        .tooltip("Notable events" + (f" — {unread} unread" if unread else " — all read"))
+    if unread:
+        btn.badge(str(unread), color="red")
+
+
+def _open_bell() -> None:
+    from dashboard.core import notable_events
+    SETTINGS["events_seen_ts"] = dt.datetime.now(dt.timezone.utc).timestamp()
+    _save_settings()
+    dlg = ui.dialog().props("full-width")
+    with dlg, ui.card().classes("w-full"):
+        ui.label("Notable events").classes("text-lg font-bold")
+        ui.label("Same feed as Retrospective's Recent events — WARNING/ERROR levels also "
+                 "push to Telegram/ntfy when configured.").classes("text-xs text-grey-6")
+        events = notable_events.recent(50)
+        if not events:
+            ui.label("Nothing recorded yet.").classes("text-sm text-grey")
+        with ui.scroll_area().style("max-height: 60vh"):
+            for ev in reversed(events):                # oldest first inside the scroll area
+                icon = {"error": ("error", "red"),
+                        "warning": ("warning", "orange")}.get(ev["level"],
+                                                              ("circle", "grey-5"))
+                with ui.row().classes("items-start gap-2 w-full"):
+                    ui.icon(icon[0], color=icon[1]).classes("text-base mt-0.5")
+                    with ui.column().classes("gap-0"):
+                        ui.label(ev["message"]).classes("text-sm")
+                        ui.label(f"{ev['ts']} · {ev['level']}").classes(
+                            "text-xs text-grey-6")
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Close", on_click=dlg.close).props("flat")
+    dlg.open()
+    bell_button.refresh()
+
+
 # ---- page ------------------------------------------------------------------
 
 @ui.page("/")
 def main_page() -> None:
     service.restore_cache()
     _live = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
-    with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-4"):
-        with ui.row().classes("items-center gap-3 w-full"):
-            ui.label("Quantitative Trading System").classes("text-2xl font-bold")
+    with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-2 md:p-4"):
+        # B1 2026-08-26: header row now wraps on narrow screens instead of overflowing;
+        # title steps down a size below md.
+        with ui.row().classes("items-center gap-2 md:gap-3 w-full flex-wrap"):
+            ui.label("Quantitative Trading System").classes(
+                "text-xl md:text-2xl font-bold")
             ui.button(icon="info", on_click=_open_info_modal).props("flat dense round size=sm")\
                 .tooltip("Session info: connection clocks, LLM budget, account detail")
+            # B4 2026-08-26: notification center -- red badge while unread notable events exist
+            bell_button()
             # Unmistakable mode badge so concurrent PAPER/LIVE windows are never confused.
             if _live:
                 ui.badge("● LIVE — REAL MONEY", color="red").classes("text-sm px-3 py-1")
@@ -3165,6 +3507,11 @@ def main_page() -> None:
                             else "border-red-600 text-red-700"))\
                 .tooltip(f"opens the {_other} dashboard (separate always-on instance, own gateway "
                          "+ account + database; both trade concurrently)")
+            # A1 2026-08-26: one-page health check across BOTH instances (phone-friendly)
+            ui.link("Fleet status", "/fleet", new_tab=True)\
+                .classes("text-sm px-3 py-1 rounded border border-grey-400 text-grey-7")\
+                .tooltip("one page, both instances' live health at a glance "
+                         "(also reachable directly at /status?fmt=html per instance)")
         # 2026-07-24: the static mode-explainer sentence and clock_row() used to render here
         # on every visit -- the sentence is redundant with the "● LIVE — REAL MONEY" /
         # "● PAPER" badge right above it, and the clocks are rarely the first thing anyone
@@ -3195,7 +3542,9 @@ def main_page() -> None:
         # Actions stay visible (you might want Manual refresh/Restart without digging through
         # a collapsed panel); settings move into a collapsed-by-default expansion, since none
         # of them need re-checking on every visit the way account health does.
-        with ui.row().classes("items-center gap-2 w-full"):
+        # B1 2026-08-26: flex-wrap so the action buttons flow to a second line on a phone
+        # instead of overflowing horizontally.
+        with ui.row().classes("items-center gap-2 w-full flex-wrap"):
             ui.button("Manual refresh", icon="refresh", on_click=_manual_refresh).props("color=primary")
             ui.button("Log trades now", icon="playlist_add", on_click=_log_trades_now).props("flat")
             from dashboard.execution import broker as _bk_hdr
@@ -3213,7 +3562,8 @@ def main_page() -> None:
                          "relaunches it (~30-60s + 2FA if prompted)")
 
         with ui.expansion("Settings", icon="tune").classes("w-full"):
-            with ui.row().classes("items-center gap-4 w-full"):
+            # B1 2026-08-26: settings groups wrap on narrow screens instead of overflowing.
+            with ui.row().classes("items-center gap-4 w-full flex-wrap"):
                 ui.label("LLM scan:").classes("text-sm")
                 ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
                           value=SETTINGS["llm_min"],
@@ -3293,11 +3643,51 @@ def main_page() -> None:
                     .props("dense").tooltip("% of demo equity risked per trade "
                                             "(applied to real equity at order time); remembered across restarts")
 
+        # B3 2026-08-26: explicit lowercase tab values so the URL hash (#board, #trades, …)
+        # is stable even if a display label gets reworded. Selection syncs to the hash and
+        # the hash selects the tab on load -- views become bookmarkable/shareable ("open
+        # the live dashboard straight on the trades tab"). All JS round-trips are wrapped
+        # so any failure degrades to plain non-deep-linked tabs.
         with ui.tabs().classes("w-full") as tabs:
-            t_board = ui.tab("Board", icon="dashboard")
-            t_signals = ui.tab("Signals & Gates", icon="traffic")
-            t_trades = ui.tab("Live Trades" if _live else "Paper Trades", icon="receipt_long")
-            t_retro = ui.tab("Retrospective", icon="insights")
+            t_board = ui.tab("Board", icon="dashboard", value="board")
+            t_signals = ui.tab("Signals & Gates", icon="traffic", value="signals")
+            t_trades = ui.tab("Live Trades" if _live else "Paper Trades",
+                              icon="receipt_long", value="trades")
+            t_retro = ui.tab("Retrospective", icon="insights", value="retro")
+
+        def _on_tab_change(e) -> None:
+            try:
+                v = e.args if isinstance(e.args, str) else (e.args.get("value") if
+                                                            isinstance(e.args, dict) else "")
+                if v:
+                    ui.run_javascript(
+                        f"try{{history.replaceState(null,'','#{v}')}}catch(e){{}}", respond=False)
+            except Exception:                              # noqa: BLE001 -- cosmetic only
+                pass
+
+        def _on_hash_event(e) -> None:
+            try:
+                h = None
+                if isinstance(e.args, dict):
+                    h = e.args.get("hash")
+                elif isinstance(e.args, list) and e.args and isinstance(e.args[0], dict):
+                    h = e.args[0].get("hash")
+                v = str(h or "").lstrip("#").lower()
+                if v in ("board", "signals", "trades", "retro"):
+                    tabs.set_value(v)
+            except Exception:                              # noqa: BLE001 -- cosmetic only
+                pass
+
+        tabs.on_value_change(_on_tab_change)
+        ui.on("qts_hash", _on_hash_event)
+        try:
+            ui.run_javascript("""
+              const emit=()=>{try{emitEvent('qts_hash',{hash:location.hash})}catch(e){}};
+              window.addEventListener('hashchange', emit);
+              if(location.hash) emit();
+            """, respond=False)
+        except Exception:                                  # noqa: BLE001
+            pass
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
             with ui.tab_panel(t_board):                # statistics only
                 macro_banner()
@@ -3353,4 +3743,30 @@ if not _bk0.is_ib():
 _DASH_PORT = int(os.environ.get("DASH_PORT", "8080"))
 _LIVE = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
 _MODE = "LIVE" if _LIVE else "PAPER"
+
+# ADDED 2026-08-26: /status (JSON or ?fmt=html) + /fleet -- see dashboard/web/fleet.py.
+# CORS header on /status is required: the fleet page fetches BOTH instances' /status
+# cross-origin (each behind its own hostname), which browsers block without it. The
+# snapshot carries only what the dashboard already shows publicly behind the tunnel.
+from starlette.responses import JSONResponse, HTMLResponse   # noqa: E402
+from nicegui import app as _webapp                           # noqa: E402
+from dashboard.web import fleet as _fleet_mod                # noqa: E402
+
+_CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+async def _status_route(request):
+    snap = await run.io_bound(_fleet_mod.status_snapshot)
+    if request.query_params.get("fmt") == "html":
+        return HTMLResponse(_fleet_mod.render_status_html(snap), headers=_CORS)
+    return JSONResponse(snap, headers=_CORS)
+
+
+async def _fleet_route(request):
+    return HTMLResponse(_fleet_mod.render_fleet_html())
+
+
+_webapp.add_route("/status", _status_route, methods=["GET"])
+_webapp.add_route("/fleet", _fleet_route, methods=["GET"])
+
 ui.run(title=f"Quantitative Trading System [{_MODE}]", favicon="📈", port=_DASH_PORT, reload=False, show=False)

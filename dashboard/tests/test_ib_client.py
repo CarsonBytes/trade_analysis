@@ -246,6 +246,72 @@ def test_stock_contract_primary_exchange_kwarg():
           captured["args"], ("GLD", "SMART", "USD", {}))
 
 
+def test_fx_to_usd_falls_back_to_usd_base_pair_and_inverts():
+    print("\nfx_to_usd(): REGRESSION for the 2026-08-25 incident -- Forex(f'{ccy}USD') (e.g. "
+          "'HKDUSD') doesn't exist on IDEALPRO for HKD, confirmed live: every call failed "
+          "with 'No security definition has been found', continuously, on both paper and "
+          "live (ib_exec.py's own keep_cash_usd() already uses the correct pair, 'USDHKD', "
+          "for the same currency). Must fall back to the USD-base pair and invert its close:")
+    from dashboard.data import ib_client
+
+    requested = []
+
+    class FakeForex:
+        def __init__(self, symbol):
+            requested.append(symbol)
+            self.symbol = symbol
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Forex = FakeForex
+
+    class _Bar:
+        def __init__(self, close):
+            self.close = close
+
+    def _run_side_effect(coro, timeout=8):
+        # first attempt ("HKDUSD") fails -- doesn't exist; second ("USDHKD") succeeds
+        if len(requested) == 1:
+            raise Exception("No security definition has been found for the request")
+        return [_Bar(7.80)]                    # USDHKD close: 7.80 HKD per 1 USD
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", side_effect=_run_side_effect):
+        rate = ib_client.fx_to_usd("HKD")
+
+    check("tried CCY-base pair first, then USD-base pair",
+          requested, ["HKDUSD", "USDHKD"])
+    check("inverted USDHKD's close (HKD per USD) to USD per HKD",
+          round(rate, 6), round(1.0 / 7.80, 6))
+
+
+def test_fx_to_usd_uses_ccy_base_pair_directly_when_it_exists():
+    print("fx_to_usd(): a currency whose CCY-base pair DOES exist (e.g. EUR -> EURUSD, the "
+          "IBKR-standard convention for majors) must use that close directly, not invert:")
+    from dashboard.data import ib_client
+
+    requested = []
+
+    class FakeForex:
+        def __init__(self, symbol):
+            requested.append(symbol)
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Forex = FakeForex
+
+    class _Bar:
+        def __init__(self, close):
+            self.close = close
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", return_value=[_Bar(1.08)]):
+        rate = ib_client.fx_to_usd("EUR")
+
+    check("only the CCY-base pair was requested, first try succeeded", requested, ["EURUSD"])
+    check("close used directly, no inversion", rate, 1.08)
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

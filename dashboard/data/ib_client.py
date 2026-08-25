@@ -314,7 +314,16 @@ _PEG_USD_PER = {"HKD": 1.0 / 7.80}
 def fx_to_usd(ccy: str) -> float | None:
     """USD per 1 unit of `ccy` (1.0 for USD). For converting a non-USD account's
     equity into USD before sizing US ETFs. Uses DELAYED historical FX (works without a
-    real-time sub); falls back to a pegged constant (e.g. HKD). None if all fail."""
+    real-time sub); falls back to a pegged constant (e.g. HKD). None if all fail.
+
+    FIXED 2026-08-25: was requesting Forex(f"{ccy}USD") (e.g. "HKDUSD") unconditionally --
+    IDEALPRO doesn't list that pair at all for HKD (confirmed live: this has been failing
+    with "No security definition has been found" on EVERY call, continuously, on both paper
+    and live -- ib_exec.py's own keep_cash_usd() already uses the correct pair, "USDHKD",
+    for the same currency). Try the CCY-base convention first (correct for majors quoted
+    against USD, e.g. EURUSD), then fall back to the USD-base convention (correct for HKD
+    and similar) and invert its close (USDHKD's close is HKD per 1 USD, so 1/close is USD
+    per 1 HKD -- matching this function's own contract)."""
     ccy = (ccy or "USD").upper()
     if ccy == "USD":
         return 1.0
@@ -322,15 +331,17 @@ def fx_to_usd(ccy: str) -> float | None:
         ib = _ensure_conn()
         if ib is not None:
             ib_async = _mod()
-            pair = ib_async.Forex(f"{ccy}USD")         # e.g. HKDUSD -> USD per HKD
-            try:
-                bars = _run(ib.reqHistoricalDataAsync(
-                    pair, endDateTime="", durationStr="5 D", barSizeSetting="1 day",
-                    whatToShow="MIDPOINT", useRTH=False, formatDate=2), timeout=8)
-                if bars and bars[-1].close and bars[-1].close > 0:
-                    return float(bars[-1].close)
-            except Exception:                          # noqa: BLE001
-                pass
+            for symbol, invert in ((f"{ccy}USD", False), (f"USD{ccy}", True)):
+                pair = ib_async.Forex(symbol)
+                try:
+                    bars = _run(ib.reqHistoricalDataAsync(
+                        pair, endDateTime="", durationStr="5 D", barSizeSetting="1 day",
+                        whatToShow="MIDPOINT", useRTH=False, formatDate=2), timeout=8)
+                    if bars and bars[-1].close and bars[-1].close > 0:
+                        close = float(bars[-1].close)
+                        return (1.0 / close) if invert else close
+                except Exception:                      # noqa: BLE001
+                    continue
     return _PEG_USD_PER.get(ccy)                        # pegged fallback (HKD), else None
 
 
