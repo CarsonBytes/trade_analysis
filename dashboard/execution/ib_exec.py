@@ -937,7 +937,12 @@ def sync_closures() -> list[str]:
                                         for p in ib_client.filter_by_account(ib.positions() or [], acct)})
     for paper_id, con_id, local_symbol, qty, expiry, mstatus, mts in rows:
         pt = journal.get(paper_id)
-        if pt is None or mstatus == "CLOSED":
+        # ADDED 2026-08-25: VOID is equally terminal as CLOSED here -- both mean "nothing
+        # more to do," see the 2026-08-25 note further down on why VOID exists as a distinct
+        # status at all (harmless without this -- the row would just fall through inert on
+        # every later cycle instead of being skipped up front -- but this is clearer and
+        # cheaper).
+        if pt is None or mstatus in ("CLOSED", "VOID"):
             continue
         open_pos = positions.get(con_id)
         # GUARD: "no position" can mean NOT-YET-FILLED (parent order still working,
@@ -957,14 +962,24 @@ def sync_closures() -> list[str]:
             # trade done and would never ask again. Cancel the stale working order(s) for
             # this contract (parent + any still-working children -- OCA groups do NOT
             # auto-cancel siblings on a manual cancel, only on a FILL) and mark the mirror
-            # row closed to match, instead of leaving a real order live with no local trade
-            # tracking it anymore.
+            # row VOID to match -- FIXED 2026-08-25: this used to set status='CLOSED', which
+            # is indistinguishable from a genuinely-filled-then-closed position everywhere
+            # else that reads ib_mirror (confirmed live: paper #140 and others showed a real
+            # dollar "invested"/"P&L" in the Recent Closed table and polluted monthly $
+            # attribution, even though NOTHING was ever actually bought -- the order was
+            # cancelled while still unfilled). 'VOID' is the status this codebase already
+            # has, and already defines, for exactly this situation (see broker.executed_ids()'s
+            # docstring: "we found out this never actually filled/was cancelled at the
+            # broker") -- this path just wasn't using it. VOID rows are already correctly
+            # excluded from executed_ids() (used by app.py's "funded" column, cumulative R,
+            # and now also the invested/P&L columns and monthly attribution -- see their
+            # 2026-08-25 fixes).
             if pt["status"] != "OPEN":
                 for o in open_trades:
                     if o.contract.conId == con_id:
                         ib.cancelOrder(o.order)
                 with paper._LOCK, _conn() as c:
-                    c.execute("UPDATE ib_mirror SET status='CLOSED', note=? WHERE paper_id=?",
+                    c.execute("UPDATE ib_mirror SET status='VOID', note=? WHERE paper_id=?",
                               (f"order cancelled: paper independently resolved to "
                                f"{pt['status']} while still unfilled at the broker", paper_id))
                 msg = (f"{local_symbol}: cancelled stale unfilled order (paper already "
@@ -1250,6 +1265,43 @@ def live_positions() -> dict | None:
             # instead of them falling back to str(paper_id).
             "symbol": local_symbol}
     return out
+
+
+def heal_flagged_positions() -> list[str]:
+    """Structural fix (2026-08-25): the OTHER direction of the same root-cause class as
+    reprotect_naked_positions() (paper_trades resolving independently of real broker
+    state) -- a real broker position with NO OPEN paper_trades row. Root cause: close_
+    expired_trades() only ever looks at status='OPEN' rows; if the broker was unreachable
+    during the exact refresh cycle a trade's horizon passed (confirmed live: trade #27,
+    EEM, orphaned this way during the 2026-08-21..25 dashboard-hang incident -- see
+    app.py's 2026-08-25 faulthandler fix), resolve_open() still marks it EXPIRED from
+    local price/horizon data alone (broker-independent), but close_expired_trades() never
+    got to submit the real closing order -- and once status leaves 'OPEN', close_expired_
+    trades() never revisits that row again. A PERMANENT gap without this: exactly the
+    "Flagged positions" class app.py's active_panel() has shown read-only since
+    2026-08-17 (manual remediation via paper.reopen_trade(), see HANDOFF.md).
+
+    Auto-heals it the same way a human already had to: reopen_trade() resets the row to
+    OPEN with a FRESH horizon (not the stale original), so close_expired_trades() (or an
+    ordinary SL/TP/dynamic exit) can act on it for real next cycle -- same primitive,
+    just no longer requiring someone to notice the flagged card first."""
+    positions = live_positions()
+    if not positions:
+        return []
+    with paper._LOCK, _conn() as c:
+        open_ids = {r[0] for r in c.execute(
+            "SELECT id FROM paper_trades WHERE status='OPEN'").fetchall()}
+    logs: list[str] = []
+    from dashboard.core import notable_events
+    for paper_id in positions:
+        if paper_id in open_ids:
+            continue
+        msg = paper.reopen_trade(paper_id)
+        if msg:
+            logs.append(msg)
+            log.warning("ib_exec: %s", msg)
+            notable_events.record(f"Flagged position auto-healed: {msg}", level="warning")
+    return logs
 
 
 def reprotect_naked_positions() -> list[str]:

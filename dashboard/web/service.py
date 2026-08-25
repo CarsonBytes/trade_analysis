@@ -589,6 +589,19 @@ def refresh_cheap() -> None:
              len(STATE["scores"]),
              "MT5" if n_mt5 else ("yfinance" if live else "none"),
              n_mt5, len(live))
+    # ADDED 2026-08-25: MUST run before reprotect_naked_positions()/close_expired_trades()/
+    # resolve_open() below -- the inverse gap: a real broker position whose paper_trades row
+    # ALREADY resolved (e.g. EXPIRED) without a real closing order ever executing, because
+    # close_expired_trades() lost the broker-unreachable race on some earlier cycle and never
+    # gets a second chance once status leaves 'OPEN' (see heal_flagged_positions()'s
+    # docstring; confirmed live: EEM #27, orphaned during the 2026-08-21..25 dashboard-hang
+    # incident). Reopens it with a fresh horizon so the checks below can act on it for real.
+    try:
+        heal_logs = broker.heal_flagged_positions()
+        if heal_logs:
+            log.info("flagged-position heal: %d action(s) this refresh", len(heal_logs))
+    except Exception as e:
+        log.exception("heal_flagged_positions error: %s", e)
     # ADDED 2026-08-18: MUST run before close_expired_trades()/resolve_open() below -- a
     # resting TP/SL bracket can vanish at the broker independent of anything this app does
     # (confirmed live: a paper-gateway session drop lost a sleeve trade's bracket, leaving a

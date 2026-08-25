@@ -207,7 +207,12 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
     print("\nsync_closures(): paper resolved independently (EXPIRED) while a real order is "
           "still working at the broker -- must cancel it, not leave it orphaned forever "
           "(2026-07-13 fix: paper.resolve_open() runs regardless of broker fill status, so "
-          "a trade can resolve via real price/horizon while its bracket order never filled):")
+          "a trade can resolve via real price/horizon while its bracket order never filled). "
+          "ALSO REGRESSION for 2026-08-25: the mirror row must be marked VOID, not CLOSED -- "
+          "nothing was ever actually bought, and CLOSED is indistinguishable from a real "
+          "funded-then-closed position everywhere else that reads ib_mirror (confirmed live: "
+          "a fabricated dollar 'invested'/'P&L' in the Recent Closed table for a position "
+          "that was never actually funded):")
     from types import SimpleNamespace
     from dashboard.execution import ib_exec
 
@@ -255,7 +260,12 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
               any("cancelled stale unfilled order" in l and "EXPIRED" in l for l in logs), True)
         with ib_exec._conn() as c:
             status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
-        check("ib_mirror row marked CLOSED to match", status, "CLOSED")
+        check("ib_mirror row marked VOID (never actually filled), not CLOSED", status, "VOID")
+        from dashboard.execution import broker
+        with mock.patch.object(broker, "mirror_table", return_value="ib_mirror"):
+            ids = broker.executed_ids()
+        check("correctly excluded from executed_ids() -- was never real broker truth",
+              1 in ids, False)
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)
@@ -1731,6 +1741,99 @@ def test_reprotect_naked_positions_uses_account_wide_order_view():
         with paper._LOCK, paper._conn() as c:
             s20 = c.execute("SELECT status FROM paper_trades WHERE id=20").fetchone()[0]
         check("CPER untouched, still OPEN", s20, "OPEN")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_heal_flagged_positions():
+    print("\nib_exec.heal_flagged_positions(): REGRESSION for the 2026-08-25 incident -- a "
+          "real broker position (EEM #27) whose paper_trades row already resolved to "
+          "EXPIRED without a real closing order ever executing, because close_expired_"
+          "trades() lost the broker-unreachable race on an earlier cycle and never "
+          "revisits a non-OPEN row. Must reopen the trade with a fresh (future) horizon; "
+          "a genuinely-still-OPEN position with a matching real broker position must be "
+          "left completely alone:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    class _Contract:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _Position:
+        def __init__(self, con_id, qty, avg_cost=64.19):
+            self.contract = _Contract(con_id)
+            self.position = qty
+            self.avgCost = avg_cost
+
+    class _PortfolioItem:
+        def __init__(self, con_id, market_price):
+            self.contract = _Contract(con_id)
+            self.marketPrice = market_price
+            self.unrealizedPNL = 1.56
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as c:
+            # id=27 EEM: broker still genuinely holds 1 share, but locally EXPIRED on
+            # 2026-08-21 -- exactly the real live incident.
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(27,'2026-07-17T13:32:06+00:00','EEM','long','ATR rr3.0',"
+                     "64.19,60.63,74.87,3.0,28.09,'2026-08-21T13:32:06+00:00',0.55,'test',"
+                     "'EXPIRED','2026-08-21 00:00:00+00:00',67.34,0.883)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(27,0,111111,'EEM',1.0,64.62,'','2026-07-17T13:32:06','OPEN','etf')")
+            # id=28 SPY: still genuinely OPEN locally, broker holds it too -- must NOT be
+            # touched (only a NON-open local row with a real broker position qualifies).
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(28,'2026-08-01T00:00:00+00:00','SPY','long','ATR rr3.0',"
+                     "560.0,540.0,600.0,3.0,5.0,'2099-01-01T00:00:00',0.6,'test',"
+                     "'OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(28,0,222222,'SPY',5.0,560.0,'','2026-08-01T00:00:00','OPEN','etf')")
+
+        class _FakeIB:
+            def positions(self):
+                return [_Position(111111, 1.0), _Position(222222, 5.0)]
+            def portfolio(self):
+                return [_PortfolioItem(111111, 66.186), _PortfolioItem(222222, 561.0)]
+
+        with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True), \
+             mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U12991898"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, acct: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            logs = ib_exec.heal_flagged_positions()
+
+        check("exactly one heal action (EEM #27)", len(logs), 1)
+        check("log mentions REOPENED", "REOPENED" in logs[0], True)
+
+        with paper._LOCK, paper._conn() as c:
+            row27 = c.execute("SELECT status, horizon_end, entry, sl, tp FROM paper_trades "
+                              "WHERE id=27").fetchone()
+            row28 = c.execute("SELECT status FROM paper_trades WHERE id=28").fetchone()
+        check("EEM #27 flipped back to OPEN", row27[0], "OPEN")
+        check("EEM #27's horizon pushed into the future (not the stale original)",
+              row27[1] > "2026-08-25", True)
+        check("EEM #27's original entry/sl/tp untouched", (row27[2], row27[3], row27[4]),
+              (64.19, 60.63, 74.87))
+        check("SPY #28 (already OPEN, matched) left completely alone", row28[0], "OPEN")
     finally:
         if old is None:
             os.environ.pop("DASH_DB_NAME", None)

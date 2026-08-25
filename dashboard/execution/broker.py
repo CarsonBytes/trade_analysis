@@ -83,6 +83,17 @@ def live_positions() -> dict:
     return _backend().live_positions()
 
 
+def heal_flagged_positions() -> list[str]:
+    """Reopen (fresh horizon) any real broker position whose paper_trades row resolved
+    locally without a real closing order ever executing (IB only; see ib_exec.
+    heal_flagged_positions()'s docstring). No-op on backends that don't support it
+    (e.g. MT5)."""
+    b = _backend()
+    if hasattr(b, "heal_flagged_positions"):
+        return b.heal_flagged_positions()
+    return []
+
+
 def reprotect_naked_positions() -> list[str]:
     """Re-arm or actively close a funded position whose broker-side TP/SL bracket has
     vanished (IB only; see ib_exec.reprotect_naked_positions()'s docstring). No-op on

@@ -981,10 +981,18 @@ def paper_panel() -> None:
             cum_r_by_id[t["id"]] = round(running, 3)
 
         def _closed_row(t: dict) -> dict:
+            # FIXED 2026-08-25: gated on _executed (same broker-truth set the neighboring
+            # "funded" column already uses), not merely "does an ib_mirror row exist" -- a
+            # row can exist for an order that was cancelled while STILL UNFILLED (see
+            # ib_exec.py's 2026-08-25 note), meaning NOTHING was ever actually bought. That
+            # row's stale qty/risk_money (recorded at order-placement time, never zeroed)
+            # used to show a fabricated real-looking "invested"/"P&L (USD)" here -- confirmed
+            # live: paper #140 showed "invested $257, P&L +$270" for a position that was
+            # never actually funded at all.
             invested = (f"{qty_by_id[t['id']] * t['entry']:,.0f}"
-                       if t["id"] in qty_by_id else "—")
+                       if t["id"] in qty_by_id and t["id"] in _executed else "—")
             pnl = (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
-                  if t["id"] in risk_by_id else "—")
+                  if t["id"] in risk_by_id and t["id"] in _executed else "—")
             return {"instrument": t["instrument"], "status": t["status"],
                    "R": round(t["realized_r"], 2), "cumulative R": cum_r_by_id.get(t["id"], "—"),
                    "invested (USD)": invested, "P&L (USD)": pnl,
@@ -1066,9 +1074,16 @@ def _monthly_attribution() -> list[dict]:
     with paper._LOCK, paper._conn() as c:
         mirror_rows = c.execute(f"SELECT paper_id, risk_money FROM {_bk.mirror_table()}").fetchall()
     risk_by_id = dict(mirror_rows)
+    # FIXED 2026-08-25: same gate as paper_panel()'s _closed_row() -- an ib_mirror row can
+    # exist for an order cancelled while still UNFILLED (nothing ever actually bought), whose
+    # stale risk_money (from order-placement time) would otherwise silently pollute this $
+    # attribution. See ib_exec.py's 2026-08-25 note.
+    _executed = _bk.executed_ids() if _bk.is_ib() else set()
 
     buckets: dict[str, dict] = {}
     for t in closed:
+        if t["id"] not in _executed:
+            continue
         risk_money = risk_by_id.get(t["id"])
         if risk_money is None:
             continue
