@@ -3396,7 +3396,14 @@ def bell_button() -> None:
                "flat dense round size=sm")\
         .tooltip("Notable events" + (f" — {unread} unread" if unread else " — all read"))
     if unread:
-        btn.badge(str(unread), color="red")
+        # FIXED 2026-08-25: Button has no .badge() method in the installed NiceGUI version
+        # (confirmed via inspection: ui.badge is a standalone element, not a Button
+        # chainable) -- crashed main_page() with a 500 on EVERY load the instant unread > 0
+        # for the first time (confirmed live: only surfaced once real notable_events started
+        # accumulating from today's other fixes). A badge is a CHILD element of the button
+        # it decorates, not a method on it.
+        with btn:
+            ui.badge(str(unread), color="red").props("floating")
 
 
 def _open_bell() -> None:
@@ -3649,11 +3656,11 @@ def main_page() -> None:
         # the live dashboard straight on the trades tab"). All JS round-trips are wrapped
         # so any failure degrades to plain non-deep-linked tabs.
         with ui.tabs().classes("w-full") as tabs:
-            t_board = ui.tab("Board", icon="dashboard", value="board")
-            t_signals = ui.tab("Signals & Gates", icon="traffic", value="signals")
-            t_trades = ui.tab("Live Trades" if _live else "Paper Trades",
-                              icon="receipt_long", value="trades")
-            t_retro = ui.tab("Retrospective", icon="insights", value="retro")
+            t_board = ui.tab("board", "Board", icon="dashboard")
+            t_signals = ui.tab("signals", "Signals & Gates", icon="traffic")
+            t_trades = ui.tab("trades", "Live Trades" if _live else "Paper Trades",
+                              icon="receipt_long")
+            t_retro = ui.tab("retro", "Retrospective", icon="insights")
 
         def _on_tab_change(e) -> None:
             try:
