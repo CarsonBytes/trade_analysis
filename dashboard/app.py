@@ -286,20 +286,29 @@ def _asset_class_for(symbol: str | None) -> str | None:
     return None
 
 
+# HKT is the user's wall clock (UTC+8, no DST) -- used for every timestamp the
+# user sees. Containers run in UTC; relying on system-local `astimezone()` would show
+# the wrong wall time there. One definition here ensures every display path is consistent.
+HKT = dt.timezone(dt.timedelta(hours=8))
+
+
 # ---- refreshable panels ----------------------------------------------------
 
 def _fmt_ts(s: str) -> str:
-    """Format a stored timestamp for display in the user's LOCAL timezone.
-    Stored values are UTC (the canonical form); we convert to local here."""
+    """Format a stored timestamp for display in HKT.
+    Stored values are UTC (the canonical form); we convert to HKT here."""
     if not s:
         return "—"
     try:
         d = dt.datetime.fromisoformat(str(s))
     except Exception:
         return str(s).replace("T", " ")[:16]
-    if d.tzinfo is not None:        # UTC-aware -> local wall time
-        d = d.astimezone()
-    return d.strftime("%Y-%m-%d %H:%M")
+    if d.tzinfo is not None:        # UTC-aware -> HKT wall time
+        d = d.astimezone(HKT)
+    elif d.tzinfo is None:
+        # naive timestamps in this codebase are UTC by convention
+        d = d.replace(tzinfo=dt.timezone.utc).astimezone(HKT)
+    return d.strftime("%Y-%m-%d %H:%M") + " HKT"
 
 
 def _fmt_age(secs: float) -> str:
@@ -345,9 +354,8 @@ def _data_source_text() -> tuple[str, str]:
 @ui.refreshable
 def clock_row() -> None:
     now_utc = dt.datetime.now(dt.timezone.utc)
-    loc = now_utc.astimezone()
-    loc_off = loc.utcoffset().total_seconds() / 3600
-    parts = [f"Local {loc:%H:%M:%S} (UTC{loc_off:+.0f})", f"UTC {now_utc:%H:%M:%S}"]
+    hkt = now_utc.astimezone(HKT)
+    parts = [f"HKT {hkt:%H:%M:%S} (UTC+8)", f"UTC {now_utc:%H:%M:%S}"]
     from dashboard.execution import broker as _bk
     off = service.STATE.get("mt5_offset_sec", 0) or 0
     # FIXED 2026-07-24: this used to ALWAYS append a third "Broker UTC (IBKR)" entry for the
@@ -1217,7 +1225,7 @@ def _monthly_attribution() -> list[dict]:
     adj = paper.deposit_adjusted_series(hist, flows)
     month_end_usd: dict[str, float] = {}
     for (ts, *_), av in zip(hist, adj):
-        m = dt.datetime.fromtimestamp(ts).strftime("%Y-%m")
+        m = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone(HKT).strftime("%Y-%m")
         month_end_usd[m] = av * usd_per_ccy   # last write per month wins (hist is ascending)
 
     months = sorted(set(list(buckets.keys()) + list(month_end_usd.keys())))
@@ -1309,8 +1317,8 @@ def portfolio_panel() -> None:
                 "age of the last cheap-layer (price/position) refresh; amber = stale, "
                 "red = the tick loop may be stuck")
         elif service.STATE.get("portfolio_ts"):
-            _t = dt.datetime.fromtimestamp(service.STATE["portfolio_ts"])
-            ui.label(f"last refreshed {_t.strftime('%m-%d %H:%M')} · refreshing…")\
+            _t = dt.datetime.fromtimestamp(service.STATE["portfolio_ts"], tz=dt.timezone.utc).astimezone(HKT)
+            ui.label(f"last refreshed {_t.strftime('%m-%d %H:%M')} HKT · refreshing…")\
                 .classes("text-xs text-orange")
 
     # HEADLINE: the one question everything else on this panel supports -- are you up or
