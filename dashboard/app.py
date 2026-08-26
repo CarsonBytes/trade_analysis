@@ -63,7 +63,7 @@ SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             # profit, largest invested amount) -- one consistent mental model instead of
             # per-key direction semantics.
             "active_sort": "entry_date", "active_sort_dir": "desc",
-            "alerts_filter": "unread", "density": "comfortable"}
+            "alerts_filter": "all", "density": "comfortable"}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
                     "profit": "Profit", "invested": "Invested amount"}
@@ -82,7 +82,10 @@ def _save_settings() -> None:
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "active_sort": SETTINGS["active_sort"], "active_sort_dir": SETTINGS["active_sort_dir"],
-            "alerts_filter": SETTINGS.get("alerts_filter", "unread"),
+            # "unread" is NOT a valid ALERTS_FILTERS key -- this stale default is what put an
+            # unusable value into ui_settings in the first place (see alerts_panel's own
+            # 2026-08-26 note). Keep this in sync with ALERTS_FILTERS.
+            "alerts_filter": SETTINGS.get("alerts_filter", "all"),
             "density": SETTINGS.get("density", "comfortable"),
             "trades_filter": SETTINGS.get("trades_filter", "all"),
             "trades_search": SETTINGS.get("trades_search", ""),
@@ -981,7 +984,8 @@ def paper_panel() -> None:
     # is a local SQLite query, not a broker round-trip, so this is cheap to check per render.
     _executed = _bk.executed_ids() if _bk.is_ib() else set()
 
-    # P1 spec: Trades sub-filter (All / Active funded / Pending signal-only / Closed) + search
+    # P1 spec: Trades sub-filter (All / Active funded / Pending signal-only / Closed /
+    # Cancelled) + search
     _trades_filter = SETTINGS.get("trades_filter", "all")
     _trades_search = SETTINGS.get("trades_search", "")
     def _set_trades_filter(e) -> None:
@@ -989,7 +993,8 @@ def paper_panel() -> None:
     def _set_trades_search(e) -> None:
         SETTINGS.update(trades_search=e.value or ""); _save_settings(); paper_panel.refresh()
     with ui.row().classes("items-center gap-2 w-full flex-wrap mt-2"):
-        ui.toggle({"all": "All", "active": "Active ✓", "pending": "Pending ○", "closed": "Closed"},
+        ui.toggle({"all": "All", "active": "Active ✓", "pending": "Pending ○",
+                   "closed": "Closed", "cancelled": "Cancelled"},
                   value=_trades_filter, on_change=_set_trades_filter).props("dense")
         ui.input(placeholder="Filter instrument…", value=_trades_search,
                  on_change=_set_trades_search).props("dense clearable").classes("w-[200px]")
@@ -1003,6 +1008,7 @@ def paper_panel() -> None:
     # params) before administrative detail (method/opened/dir/id).
     _show_open = _trades_filter in ("all", "active", "pending")
     _show_closed = _trades_filter in ("all", "closed")
+    _show_cancelled = _trades_filter in ("all", "cancelled")
     if _show_open and open_t:
         # apply active/pending filter + search
         _open_filtered = [t for t in open_t if (
@@ -1145,7 +1151,7 @@ def paper_panel() -> None:
             # keep variable defined for outer scope (archive logic checks closed_tbl)
             closed_tbl = None  # type: ignore
 
-        if not_resolved and _show_closed:
+        if not_resolved and _show_cancelled:
             # filtered cancelled too
             _cancelled_filtered = [t for t in not_resolved
                                    if not _trades_search or _trades_search.lower() in t["instrument"].lower()]
@@ -3469,7 +3475,15 @@ def alerts_panel() -> None:
     per incident and changes ONLY via explicit user actions here."""
     from dashboard.core import notable_events
 
+    # FIXED 2026-08-26: a PERSISTED alerts_filter can name an option that no longer exists
+    # (confirmed live: "unread" survived in ui_settings after the filter options were
+    # renamed to all/attention). ui.toggle raises ValueError on a value outside its options
+    # dict, so a stale setting was a hard 500 on the whole page. Fall back to the default
+    # rather than trusting whatever was persisted by an older build.
     filt = SETTINGS.get("alerts_filter", "all")
+    if filt not in ALERTS_FILTERS:
+        filt = "all"
+        SETTINGS["alerts_filter"] = filt
 
     def _set_filter(e) -> None:
         SETTINGS["alerts_filter"] = e.value
@@ -3549,8 +3563,11 @@ def alerts_panel() -> None:
             _sym_q["v"] = (e.value or "").strip().lower()
             alerts_panel.refresh()
 
-        ui.input(placeholder="Filter by symbol…", on_change=_set_sym,
-                 clearable=True).props("dense outlined").classes("w-[180px]")
+        # FIXED 2026-08-26: `clearable=True` is not a ui.input kwarg in the installed NiceGUI
+        # (3.12.1 -- ui.select/ui.toggle have it, ui.input does not), so this raised TypeError
+        # and 500'd the whole page. Quasar's own `clearable` prop does the same job.
+        ui.input(placeholder="Filter by symbol…", on_change=_set_sym)\
+            .props("dense outlined clearable").classes("w-[180px]")
         ui.label("Only 🔴 needs-attention events push to Telegram/ntfy.")\
             .classes("text-xs text-grey-6 ml-auto")
 
