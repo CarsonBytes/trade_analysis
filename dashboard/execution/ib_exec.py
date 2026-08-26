@@ -692,6 +692,16 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
     perm_id = getattr(trades[0].order, "permId", 0)
+    # ADDED 2026-08-26 (traceability): if the parent order is immediately Inactive/
+    # Cancelled/Rejected at the broker, say so NOW with the broker's own status -- instead
+    # of only discovering a "ghost, never filled" 31min later via the grace-period cleanup.
+    _st = getattr(trades[0].orderStatus, "status", "") or ""
+    if _st.lower() in ("inactive", "cancelled", "apicancelled", "rejected"):
+        from dashboard.core import notable_events
+        notable_events.record(
+            f"{t['instrument']}: order NOT accepted by broker (status {_st}) -- "
+            "it will be auto-cancelled unless it starts working",
+            level="warning", kind="order-cancelled", symbol=t["instrument"])
     with paper._LOCK, _conn() as c:
         c.execute("INSERT OR IGNORE INTO ib_mirror VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (t["id"], perm_id, getattr(contract, "conId", 0), t["instrument"],
@@ -701,7 +711,8 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
     msg = (f"{t['instrument']}: paper bracket placed {action} {qty}sh "
           f"SL {sl_px} TP {tp_px}")
     from dashboard.core import notable_events
-    notable_events.record(f"New order placed: {msg}")
+    notable_events.record(f"New order placed: {msg}", kind="order-placed",
+                          symbol=t["instrument"])
     return msg
 
 

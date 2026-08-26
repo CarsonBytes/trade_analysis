@@ -151,6 +151,31 @@ def _ensure_conn():
         _S["ib"], _S["connected"] = ib, True
         _S["needs_reconcile"] = True    # a FRESH connect (not a reuse) -- flag for the next
                                          # refresh_cheap() cycle to run a broker reconciliation
+        # ADDED 2026-08-26 (traceability spec): surface broker ORDER errors into the
+        # changelog. Before this, a rejected entry (Error 110/200/201...) died in ib_insync's
+        # internal warning log -- the journal only inferred "ghost, never filled" ~31min later
+        # with perm_id=0 and no reason. Now every IB error mentioning our quant orders becomes
+        # a first-class notable_event (warning tier; deduped by symbol so a flapping reject
+        # doesn't spam). Market-data/other non-order errors are ignored here.
+        try:
+            def _on_ib_error(reqId, errorCode, errorString, contract):
+                try:
+                    code = int(errorCode)
+                except Exception:                  # noqa: BLE001
+                    return
+                # 110=price does not conform, 200=no security definition,
+                # 201=rejected (margin/size), 10197=no market rules during RTH flip;
+                # ignore pure warnings >=2100 (market data type info etc.)
+                if code not in (110, 200, 201, 202, 10197) or code >= 2100:
+                    return
+                sym = getattr(contract, "symbol", None) or (
+                    str(getattr(contract, "localSymbol", "") or "") or None)
+                from dashboard.core import notable_events as _ne
+                _ne.record(f"{sym or 'order'}: broker error {code} -- {errorString}"
+                           .strip(), level="error")
+            ib.errorEvent += _on_ib_error
+        except Exception as e:                          # noqa: BLE001
+            log.debug("ib_client: errorEvent hook failed: %s", e)
         # ADDED 2026-07-30: without this, every reqTickersAsync/reqMktData call implicitly
         # requests LIVE (type 1) data, which silently fails (empty/NaN, not an exception) for
         # any symbol this account doesn't have a real-time subscription for -- confirmed live:

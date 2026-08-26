@@ -32,6 +32,7 @@ _table_ready: set[str] = set()   # DB paths already confirmed to have the schema
 
 _COLS = ("id, ts, level, message, read_ts, kind, symbol, title, "
          "dedupe_key, count, last_ts")
+_KEYS = _COLS.split(", ")
 
 
 def _conn() -> sqlite3.Connection:
@@ -91,7 +92,12 @@ def _kind_symbol(message: str) -> tuple[str, str | None]:
     if mm:
         sym = mm.group(1)
     if "mismatch" in ml:
-        return "reconcile-mismatch", sym
+        # pull symbols out of the bracket lists -- "['EIMI']" / "['CSPX', 'EIMI']"
+        syms = re.findall(r"'([A-Z][A-Z0-9]{1,9})'", m)
+        if not syms:
+            seg = m.split("only_local")[-1]
+            syms = re.findall(r"[A-Z][A-Z0-9]{1,9}", seg)
+        return "reconcile-mismatch", ("+".join(sorted(set(syms))[:3]) or None)
     if "auto-cancelled" in ml or "never filled" in ml:
         return "order-cancelled", sym
     if "new order placed" in ml or "new sleeve order placed" in ml:
@@ -155,7 +161,10 @@ def record(message: str, level: str = "info", kind: str | None = None,
         symbol = symbol or ev_sym
         tier = classify(level, message)
         title, detail = humanize(message)
-        dedupe_key = f"{kind}:{symbol or '-'}"
+        # dedupe key: symbol-scoped when we know the symbol; otherwise scoped to the
+        # normalized message itself so UNRELATED generic events never collapse together
+        dedupe_symbol = symbol or re.sub(r"\s+", " ", message.strip())[:48].lower()
+        dedupe_key = f"{kind}:{dedupe_symbol}"
 
         from dashboard.core import paper
         with paper._LOCK, _conn() as c:
@@ -205,15 +214,20 @@ def recent(limit: int = 20, tiers: list[str] | None = None) -> list[dict]:
         where = ""
         args: list = []
         if tiers:
-            where = "WHERE tier IN (%s)" % ",".join("?" * len(tiers))
+            where = "WHERE COALESCE(tier,'yellow') IN (%s)" % ",".join("?" * len(tiers))
             args = list(tiers)
         with _conn() as c:
             cur = c.execute(
-                f"SELECT {_COLS}, COALESCE(tier,'yellow') AS tier_eff FROM changelog "
-                f"{where} ORDER BY COALESCE(last_ts, ts) DESC LIMIT ?", (*args, limit))
+                f"SELECT {_COLS}, COALESCE(tier,'yellow') AS tier FROM changelog "
+                f"{where} ORDER BY COALESCE(last_ts, ts) DESC, id DESC LIMIT ?", (*args, limit))
             out = []
             for r in cur.fetchall():
-                keys = [k.strip() for k in _COLS.split(",")] + ["tier_eff"]
+                # FIXED 2026-08-26: this alias was `tier_eff`, so the returned dict carried
+                # no "tier" key at all -- contradicting this function's own docstring and
+                # crashing every consumer (alerts_panel() ->  KeyError: 'tier', a hard 500
+                # on the whole dashboard page). _COLS deliberately omits `tier` so the
+                # COALESCE'd value below is the single source for it.
+                keys = [k.strip() for k in _COLS.split(",")] + ["tier"]
                 d = dict(zip(keys, r))
                 title, detail = humanize(d["message"])
                 d["title"] = d["title"] or title
