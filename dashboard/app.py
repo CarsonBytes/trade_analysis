@@ -63,7 +63,7 @@ SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             # profit, largest invested amount) -- one consistent mental model instead of
             # per-key direction semantics.
             "active_sort": "entry_date", "active_sort_dir": "desc",
-            "alerts_filter": "unread"}
+            "alerts_filter": "unread", "density": "comfortable"}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
                     "profit": "Profit", "invested": "Invested amount"}
@@ -83,6 +83,9 @@ def _save_settings() -> None:
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "active_sort": SETTINGS["active_sort"], "active_sort_dir": SETTINGS["active_sort_dir"],
             "alerts_filter": SETTINGS.get("alerts_filter", "unread"),
+            "density": SETTINGS.get("density", "comfortable"),
+            "trades_filter": SETTINGS.get("trades_filter", "all"),
+            "trades_search": SETTINGS.get("trades_search", ""),
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
             "tech_paused": _p.TECH_PAUSED})
@@ -100,7 +103,7 @@ def _load_settings() -> None:
             return
         for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
                  "chart_scale", "chart_view", "active_sort", "active_sort_dir",
-                 "alerts_filter"):
+                 "alerts_filter", "density", "trades_filter", "trades_search"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -843,20 +846,21 @@ def gate_panel() -> None:
                  "WAIT/WATCH.").classes("text-sm text-grey")
         return
     cols = [c for c in rows[0] if c != "key"]
-    gtable = ui.table(rows=rows,
-             columns=[{"name": c, "label": "" if c == "detail" else c,
-                       "field": c,
-                       "align": "left" if c in ("blocked by", "status", "instrument") else "center",
-                       "sortable": c in ("instrument", "strength", "edge", "status")}
-                      for c in cols])\
-        .classes("w-full").props("dense")
-    gtable.add_slot("body-cell-detail", '''
-        <q-td :props="props">
-            <q-btn flat dense size="sm" icon="info" color="primary"
-                   @click="() => $parent.$emit('detail', props.row.key)" />
-        </q-td>
-    ''')
-    gtable.on("detail", lambda e: _open_detail(e.args))
+    with ui.element("div").classes("w-full overflow-x-auto rounded border"):
+        gtable = ui.table(rows=rows,
+                 columns=[{"name": c, "label": "" if c == "detail" else c,
+                           "field": c,
+                           "align": "left" if c in ("blocked by", "status", "instrument") else "center",
+                           "sortable": c in ("instrument", "strength", "edge", "status")}
+                          for c in cols])\
+            .classes("w-full min-w-[720px]").props("dense flat pagination=15")
+        gtable.add_slot("body-cell-detail", '''
+            <q-td :props="props">
+                <q-btn flat dense size="sm" icon="info" color="primary"
+                       @click="() => $parent.$emit('detail', props.row.key)" />
+            </q-td>
+        ''')
+        gtable.on("detail", lambda e: _open_detail(e.args))
 
 
 def _active_universe_keys() -> set[str]:
@@ -977,33 +981,61 @@ def paper_panel() -> None:
     # is a local SQLite query, not a broker round-trip, so this is cheap to check per render.
     _executed = _bk.executed_ids() if _bk.is_ib() else set()
 
+    # P1 spec: Trades sub-filter (All / Active funded / Pending signal-only / Closed) + search
+    _trades_filter = SETTINGS.get("trades_filter", "all")
+    _trades_search = SETTINGS.get("trades_search", "")
+    def _set_trades_filter(e) -> None:
+        SETTINGS.update(trades_filter=e.value); _save_settings(); paper_panel.refresh()
+    def _set_trades_search(e) -> None:
+        SETTINGS.update(trades_search=e.value or ""); _save_settings(); paper_panel.refresh()
+    with ui.row().classes("items-center gap-2 w-full flex-wrap mt-2"):
+        ui.toggle({"all": "All", "active": "Active ✓", "pending": "Pending ○", "closed": "Closed"},
+                  value=_trades_filter, on_change=_set_trades_filter).props("dense")
+        ui.input(placeholder="Filter instrument…", value=_trades_search,
+                 on_change=_set_trades_search).props("dense clearable").classes("w-[200px]")
+        ui.label(f"Total {len(trades)} · Open {len(open_t)} · Closed {len(closed)}")\
+            .classes("text-xs text-grey-6 ml-auto")
+
     # open trades (selectable -> archive specific records)
     # COLUMN ORDER 2026-08-19, user-requested: "dir" demoted near the end -- this
     # strategy is long-only (BROKER=ib), so per-row direction is never a decision-
     # relevant field; ordered by what a glance actually needs (what/is-it-funded/risk
     # params) before administrative detail (method/opened/dir/id).
-    if open_t:
-        with ui.row().classes("items-center gap-2 mt-2"):
-            ui.label(f"Open ({len(open_t)})").classes("text-sm font-bold")
-            ui.button("Archive selected", icon="archive",
-                      on_click=lambda: _archive_records(open_tbl)).props("flat dense")
-        rows = [{"instrument": t["instrument"], "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
-                 "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
-                 "R:R": t["rr"], "method": t["method"], "opened": _fmt_ts(t["ts"]),
-                 "dir": t["direction"], "id": t["id"]} for t in open_t]
-        col_order = ["instrument", "funded", "entry", "SL", "TP", "R:R", "method", "opened", "dir", "id"]
-        open_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
-                            columns=_sortable_cols(col_order),
-                            pagination={"sortBy": "opened", "descending": True, "rowsPerPage": 0})\
-            .classes("w-full").props("dense")
+    _show_open = _trades_filter in ("all", "active", "pending")
+    _show_closed = _trades_filter in ("all", "closed")
+    if _show_open and open_t:
+        # apply active/pending filter + search
+        _open_filtered = [t for t in open_t if (
+            (_trades_filter != "active" or t["id"] in _executed) and
+            (_trades_filter != "pending" or t["id"] not in _executed) and
+            (not _trades_search or _trades_search.lower() in t["instrument"].lower()))]
+        if _open_filtered:
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.label(f"Open ({len(_open_filtered)}/{len(open_t)})").classes("text-sm font-bold")
+                ui.button("Archive selected", icon="archive",
+                          on_click=lambda: _archive_records(open_tbl)).props("flat dense")
+            rows = [{"instrument": t["instrument"], "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
+                     "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
+                     "R:R": t["rr"], "method": t["method"], "opened": _fmt_ts(t["ts"]),
+                     "dir": t["direction"], "id": t["id"]} for t in _open_filtered]
+            col_order = ["instrument", "funded", "entry", "SL", "TP", "R:R", "method", "opened", "dir", "id"]
+            with ui.element("div").classes("w-full overflow-x-auto rounded border"):
+                open_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
+                                    columns=_sortable_cols(col_order),
+                                    pagination={"sortBy": "opened", "descending": True, "rowsPerPage": 10})\
+                    .classes("w-full min-w-[680px]").props("dense flat")
+        elif _trades_search or _trades_filter != "all":
+            ui.label("No open trades match filters.").classes("text-sm text-grey")
     # recent closed (selectable -> archive specific records) -- resolved (WIN/LOSS/
-    # EXPIRED) only; CANCELLED/VOID moved to a collapsed section below (2026-08-19,
-    # user-requested: they never had a real outcome, so they clutter the main table).
-    if resolved:
-        with ui.row().classes("items-center gap-2 mt-2"):
-            ui.label(f"Recent closed ({len(resolved)})").classes("text-sm font-bold")
-            ui.button("Archive selected", icon="archive",
-                      on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
+    # EXPIRED) only; CANCELLED/VOID moved to a collapsed section below.
+    if _show_closed and resolved:
+        _resolved_filtered = [t for t in resolved
+                              if not _trades_search or _trades_search.lower() in t["instrument"].lower()]
+        if _resolved_filtered:
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.label(f"Recent closed ({len(_resolved_filtered)}/{len(resolved)})").classes("text-sm font-bold")
+                ui.button("Archive selected", icon="archive",
+                          on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
         # ADDED 2026-07-24: entry/SL/TP/exit + a $ P&L column -- R alone doesn't say how much
         # a closed trade actually won or lost. risk_money (the real $ risked at execution,
         # same source _monthly_attribution() uses, always USD regardless of account base ccy)
@@ -1067,54 +1099,65 @@ def paper_panel() -> None:
 
         col_order = ["instrument", "status", "R", "cumulative R", "invested (USD)", "P&L (USD)",
                     "closed", "opened", "funded", "exit", "entry", "SL", "TP", "method", "dir", "id"]
-        rows = [_closed_row(t) for t in resolved[:20]]
-        closed_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
-                              columns=_sortable_cols(col_order),
-                              pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 0})\
-            .classes("w-full").props("dense")\
-            .tooltip("'R' is what the signal-logic scored regardless of funding -- "
-                     "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
-                     "rows -- '○ signal only' rows never had a real broker order, see the "
-                     "Retrospective tab for broker-executed-only KPIs")
-        # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
-        # row, muted text, thin left rule) instead of every row reading the same weight --
-        # a real broker outcome and a hypothetical never-funded one looked identical before,
-        # requiring a column scan to tell them apart. Standard Quasar body-slot override
-        # (generic over props.cols, not hand-listing every column) since QTable has no
-        # built-in per-row conditional class.
-        # FIXED 2026-08-19: this override replaced the WHOLE row template but omitted the
-        # selection checkbox cell Quasar's own default body slot adds for selection="multiple"
-        # -- confirmed live: 17 <th> (16 data + checkbox) vs only 16 <td> per row, so every
-        # column rendered one position early (TP showed the method value, SL showed TP's,
-        # etc. -- user caught it as "TP shows ATR rr3.0"). Quasar's documented pattern for a
-        # custom body slot alongside selection is an explicit checkbox <q-td> first.
-        closed_tbl.add_slot("body", '''
-            <q-tr :props="props"
-                  :class="props.row.funded.includes('signal') ? 'bg-grey-2' : ''">
-                <q-td auto-width>
-                    <q-checkbox v-model="props.selected" />
-                </q-td>
-                <q-td v-for="col in props.cols" :key="col.name" :props="props"
-                      :class="props.row.funded.includes('signal') ?
-                          (col.name === 'instrument' ? 'text-grey-7' :
-                           col.name === 'funded' ? 'text-grey-6 text-italic' : 'text-grey-6')
-                          : ''"
-                      :style="props.row.funded.includes('signal') && col.name === 'instrument' ?
-                          'border-left: 2px solid #bdbdbd' : ''">
-                    {{ col.name === 'status' && props.row.funded.includes('signal') ?
-                       col.value.toLowerCase() : col.value }}
-                </q-td>
-            </q-tr>
-        ''')
+        if _resolved_filtered:
+            rows = [_closed_row(t) for t in _resolved_filtered[:20]]
+            with ui.element("div").classes("w-full overflow-x-auto rounded border"):
+                closed_tbl = ui.table(rows=rows, row_key="id", selection="multiple",
+                                      columns=_sortable_cols(col_order),
+                                      pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 10})\
+                    .classes("w-full min-w-[900px]").props("dense flat")\
+                    .tooltip("'R' is what the signal-logic scored regardless of funding -- "
+                             "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
+                             "rows -- '○ signal only' rows never had a real broker order, see the "
+                             "Retrospective tab for broker-executed-only KPIs")
+                # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
+                # row, muted text, thin left rule) instead of every row reading the same weight --
+                # a real broker outcome and a hypothetical never-funded one looked identical before,
+                # requiring a column scan to tell them apart. Standard Quasar body-slot override
+                # (generic over props.cols, not hand-listing every column) since QTable has no
+                # built-in per-row conditional class.
+                # FIXED 2026-08-19: this override replaced the WHOLE row template but omitted the
+                # selection checkbox cell Quasar's own default body slot adds for selection="multiple"
+                # -- confirmed live: 17 <th> (16 data + checkbox) vs only 16 <td> per row, so every
+                # column rendered one position early (TP showed the method value, SL showed TP's,
+                # etc. -- user caught it as "TP shows ATR rr3.0"). Quasar's documented pattern for a
+                # custom body slot alongside selection is an explicit checkbox <q-td> first.
+                closed_tbl.add_slot("body", '''
+                    <q-tr :props="props"
+                          :class="props.row.funded.includes('signal') ? 'bg-grey-2' : ''">
+                        <q-td auto-width>
+                            <q-checkbox v-model="props.selected" />
+                        </q-td>
+                        <q-td v-for="col in props.cols" :key="col.name" :props="props"
+                              :class="props.row.funded.includes('signal') ?
+                                  (col.name === 'instrument' ? 'text-grey-7' :
+                                   col.name === 'funded' ? 'text-grey-6 text-italic' : 'text-grey-6')
+                                  : ''"
+                              :style="props.row.funded.includes('signal') && col.name === 'instrument' ?
+                                  'border-left: 2px solid #bdbdbd' : ''">
+                            {{ col.name === 'status' && props.row.funded.includes('signal') ?
+                               col.value.toLowerCase() : col.value }}
+                        </q-td>
+                    </q-tr>
+                ''')
+        else:
+            ui.label("No closed trades match filters.").classes("text-sm text-grey mt-2")
+            # keep variable defined for outer scope (archive logic checks closed_tbl)
+            closed_tbl = None  # type: ignore
 
-        if not_resolved:
-            with ui.expansion(f"{len(not_resolved)} cancelled — never had a real "
-                              "outcome, show").classes("w-full text-sm text-grey-6"):
-                rows = [_closed_row(t) for t in not_resolved[:20]]
-                ui.table(rows=rows, row_key="id",
-                        columns=_sortable_cols(col_order),
-                        pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 0})\
-                    .classes("w-full").props("dense")
+        if not_resolved and _show_closed:
+            # filtered cancelled too
+            _cancelled_filtered = [t for t in not_resolved
+                                   if not _trades_search or _trades_search.lower() in t["instrument"].lower()]
+            if _cancelled_filtered:
+                with ui.expansion(f"{len(_cancelled_filtered)}/{len(not_resolved)} cancelled — never had a real "
+                                  "outcome, show").classes("w-full text-sm text-grey-6"):
+                    rows = [_closed_row(t) for t in _cancelled_filtered[:20]]
+                    with ui.element("div").classes("w-full overflow-x-auto rounded border"):
+                        ui.table(rows=rows, row_key="id",
+                                columns=_sortable_cols(col_order),
+                                pagination={"sortBy": "closed", "descending": True, "rowsPerPage": 0})\
+                            .classes("w-full min-w-[900px]").props("dense flat")
 
 
 
@@ -3500,7 +3543,9 @@ def alerts_panel() -> None:
 def main_page() -> None:
     service.restore_cache()
     _live = os.environ.get("IB_ALLOW_LIVE", "").lower() in ("1", "true", "yes")
-    with ui.column().classes("w-full max-w-[1200px] mx-auto gap-3 p-2 md:p-4"):
+    _density_gap = "gap-2" if SETTINGS.get("density")=="compact" else "gap-3"
+    _density_pad = "p-2" if SETTINGS.get("density")=="compact" else "p-3"
+    with ui.column().classes(f"w-full max-w-[1280px] mx-auto {_density_gap} p-2 md:p-4"):
         # B1 2026-08-26: header row now wraps on narrow screens instead of overflowing;
         # title steps down a size below md.
         with ui.row().classes("items-center gap-2 md:gap-3 w-full flex-wrap"):
@@ -3627,87 +3672,103 @@ def main_page() -> None:
                          "if the IB Gateway link is down, also force-kills and "
                          "relaunches it (~30-60s + 2FA if prompted)")
 
-        with ui.expansion("Settings", icon="tune").classes("w-full"):
-            # B1 2026-08-26: settings groups wrap on narrow screens instead of overflowing.
-            with ui.row().classes("items-center gap-4 w-full flex-wrap"):
-                ui.label("LLM scan:").classes("text-sm")
-                ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
-                          value=SETTINGS["llm_min"],
-                          on_change=lambda e: (SETTINGS.update(llm_min=e.value),
-                                               _save_settings())).props("dense")
-                ui.checkbox("Pause LLM outside market hours",
-                            value=SETTINGS["auto_pause"],
-                            on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
-                                                 _save_settings()))\
-                    .tooltip("Skips the LLM board scan on weekends AND outside 9:30am-"
-                             "3:30pm ET on trading days (was weekends-only before "
-                             "2026-07-31) -- avoids spending API budget analyzing signals "
-                             "nobody can act on for hours. Manual refresh always overrides "
-                             "this. Price/position tracking is untouched -- only the LLM "
-                             "call is gated.")
-                ui.label("Columns:").classes("text-sm")
+        # P1 spec: Settings moved from inline expansion (pushed Board down) to dialog
+        def _open_settings() -> None:
+            with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[680px] max-h-[85vh] overflow-auto"):
+                ui.label("Settings").classes("text-lg font-bold")
+                ui.label("Changes persist across restarts.").classes("text-xs text-grey-6")
+                ui.separator()
+                # Row 1: LLM + Pause
+                with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+                    ui.label("LLM scan:").classes("text-sm w-[90px]")
+                    ui.toggle({15: "15m", 30: "30m", 60: "60m", 120: "2h", 240: "4h"},
+                              value=SETTINGS["llm_min"],
+                              on_change=lambda e: (SETTINGS.update(llm_min=e.value),
+                                                   _save_settings())).props("dense")
+                    ui.checkbox("Pause LLM outside market hours",
+                                value=SETTINGS["auto_pause"],
+                                on_change=lambda e: (SETTINGS.update(auto_pause=e.value),
+                                                     _save_settings()))\
+                        .tooltip("Skips the LLM board scan on weekends AND outside 9:30am-"
+                                 "3:30pm ET on trading days -- avoids spending API budget "
+                                 "analyzing signals nobody can act on for hours. Manual refresh "
+                                 "always overrides this.")
+                # Row 2: Grid columns + Density
+                with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+                    ui.label("Columns:").classes("text-sm w-[90px]")
+                    def _set_cols2(e) -> None:
+                        SETTINGS.update(grid_cols=e.value)
+                        _save_settings()
+                        grid.refresh(); opportunities.refresh()
+                    ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
+                              value=SETTINGS["grid_cols"], on_change=_set_cols2).props("dense")
+                    ui.label("Density:").classes("text-sm")
+                    def _set_density(e) -> None:
+                        SETTINGS.update(density=e.value)
+                        _save_settings()
+                        ui.notify(f"Density: {e.value}", type="positive", timeout=1200)
+                    ui.toggle({"comfortable": "Comfy", "compact": "Compact"},
+                              value=SETTINGS.get("density","comfortable"),
+                              on_change=_set_density).props("dense")\
+                        .tooltip("Compact reduces card padding & chart heights for dense monitoring")
 
-                def _set_cols(e) -> None:
-                    SETTINGS.update(grid_cols=e.value)
-                    _save_settings()
-                    grid.refresh(); opportunities.refresh()
-                ui.toggle({1: "1", 2: "2", 3: "3", 4: "4", 5: "5"},
-                          value=SETTINGS["grid_cols"], on_change=_set_cols).props("dense")
+                from dashboard.core import paper as _paper2
 
-                from dashboard.core import paper as _paper
-
-                def _set_overext(e) -> None:
-                    _paper.OVEREXT_FILTER = bool(e.value)
+                def _set_overext2(e) -> None:
+                    _paper2.OVEREXT_FILTER = bool(e.value)
                     _save_settings()
                     gate_panel.refresh()
 
-                def _set_band(e) -> None:
-                    _paper.OVEREXT_HI = float(e.value)
-                    _paper.OVEREXT_LO = float(100 - e.value)
+                def _set_band2(e) -> None:
+                    _paper2.OVEREXT_HI = float(e.value)
+                    _paper2.OVEREXT_LO = float(100 - e.value)
                     _save_settings()
                     gate_panel.refresh()
-                ui.checkbox("Block overextended", value=_paper.OVEREXT_FILTER,
-                            on_change=_set_overext)\
-                    .tooltip("skip longs above / shorts below the RSI band (don't chase)")
-                ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
-                          value=int(_paper.OVEREXT_HI), on_change=_set_band).props("dense")
+                with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+                    ui.checkbox("Block overextended", value=_paper2.OVEREXT_FILTER,
+                                on_change=_set_overext2)\
+                        .tooltip("skip longs above / shorts below the RSI band (don't chase)")
+                    ui.toggle({75: "75/25", 70: "70/30", 65: "65/35"},
+                              value=int(_paper2.OVEREXT_HI), on_change=_set_band2).props("dense")
 
-                def _set_tech_paused(e) -> None:
-                    _paper.TECH_PAUSED = bool(e.value)
+                def _set_tech_paused2(e) -> None:
+                    _paper2.TECH_PAUSED = bool(e.value)
                     _save_settings()
-                    # ADDED 2026-07-30: the CONSEQUENCE (mirror_new() cancelling a specific
-                    # pending tech trade) was already logged to notable_events -- but the
-                    # CAUSE, flipping this toggle itself, wasn't, so the retro trail was
-                    # missing the actual decision point, only its downstream effects. Plain
-                    # info level, matching every other manual-action record on this page --
-                    # the user is already looking at the checkbox they just clicked.
                     from dashboard.core import notable_events
                     notable_events.record(
                         "tech investment " +
-                        ("PAUSED" if _paper.TECH_PAUSED else "RESUMED") +
+                        ("PAUSED" if _paper2.TECH_PAUSED else "RESUMED") +
                         " manually (QQQ/XLK/SPY/EEM/ASHR)")
                     gate_panel.refresh(); active_panel.refresh()
-                ui.checkbox("Pause tech-concentrated ETFs (core only)", value=_paper.TECH_PAUSED,
-                            on_change=_set_tech_paused)\
-                    .tooltip("Manual override for the CORE strategy only, checked before "
-                             "every other core gate. Blocks new core entries and actively "
-                             "cancels any already-pending, not-yet-funded CORE signal for "
-                             "QQQ (~55% IT sector), XLK (~100%), EEM (45%), SPY (38%), and "
-                             "ASHR (31%) -- funds verified to have Information Technology as "
-                             "their single largest GICS sector by a wide margin (2026-07-30). "
-                             "Deliberately LOWER priority than the dipbuy-sleeve strategy "
-                             "(2026-07-30, user request): a QQQ/XLK/SPY/EEM/ASHR dip-buy can "
-                             "still fire and fund even while this is paused. Existing FILLED "
-                             "positions are never touched -- their own broker-side SL/TP "
-                             "brackets keep protecting them regardless of this setting.")
-                ui.label("Risk/trade:").classes("text-sm")
-                def _set_risk(e) -> None:
-                    setattr(_paper, "RISK_PER_TRADE", e.value)
-                    _save_settings()
-                ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
-                          value=_paper.RISK_PER_TRADE, on_change=_set_risk)\
-                    .props("dense").tooltip("% of demo equity risked per trade "
-                                            "(applied to real equity at order time); remembered across restarts")
+                ui.checkbox("Pause tech-concentrated ETFs (core only)", value=_paper2.TECH_PAUSED,
+                            on_change=_set_tech_paused2)\
+                    .tooltip("Manual override for the CORE strategy only. Blocks new core entries "
+                             "and cancels already-pending CORE signals for QQQ/XLK/SPY/EEM/ASHR.")
+                with ui.row().classes("items-center gap-4 w-full flex-wrap"):
+                    ui.label("Risk/trade:").classes("text-sm w-[90px]")
+                    def _set_risk2(e) -> None:
+                        setattr(_paper2, "RISK_PER_TRADE", e.value)
+                        _save_settings()
+                    ui.toggle({0.0025: "0.25%", 0.005: "0.5%", 0.01: "1%", 0.02: "2%"},
+                              value=_paper2.RISK_PER_TRADE, on_change=_set_risk2)\
+                        .props("dense").tooltip("% of demo equity risked per trade "
+                                                "(applied to real equity at order time)")
+
+                ui.separator()
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Close", on_click=dlg.close).props("flat")
+            dlg.open()
+
+        with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+            ui.button("Settings", icon="tune", on_click=_open_settings).props("flat dense")\
+                .tooltip("Open settings dialog")
+            ui.label("Grid & risk settings moved to dialog to keep Board focused.").classes("text-xs text-grey-6")
+            # Density quick toggle (also in dialog)
+            ui.toggle({"comfortable": "Comfy", "compact": "Compact"},
+                      value=SETTINGS.get("density","comfortable"),
+                      on_change=lambda e: (SETTINGS.update(density=e.value),
+                                           _save_settings())).props("dense")\
+                .tooltip("Quick density switch")
 
         # B3 2026-08-26: explicit lowercase tab values so the URL hash (#board, #trades, …)
         # is stable even if a display label gets reworded. Selection syncs to the hash and
@@ -3759,16 +3820,22 @@ def main_page() -> None:
         except Exception:                                  # noqa: BLE001
             pass
         with ui.tab_panels(tabs, value=t_board).classes("w-full"):
-            with ui.tab_panel(t_board):                # statistics only
-                macro_banner()
-                portfolio_panel()
-                active_panel()
+            with ui.tab_panel(t_board):
+                with ui.element("div").classes("grid grid-cols-12 gap-3"):
+                    with ui.element("div").classes("col-span-12"):
+                        macro_banner()
+                    with ui.element("div").classes("col-span-12"):
+                        portfolio_panel()
+                    with ui.element("div").classes("col-span-12"):
+                        active_panel()
             with ui.tab_panel(t_alerts):               # notable events, read at your pace
                 alerts_panel()
-            with ui.tab_panel(t_signals):              # why trades fire + what's ranking
-                gate_panel()
-                opportunities()
-                grid()
+            with ui.tab_panel(t_signals):
+                with ui.column().classes("w-full gap-4"):
+                    gate_panel()
+                    ui.separator().classes("my-1")
+                    opportunities()
+                    grid()
             with ui.tab_panel(t_trades):
                 paper_panel()
             with ui.tab_panel(t_retro):
