@@ -956,7 +956,7 @@ def paper_panel() -> None:
             ui.button("View archive", icon="history", on_click=_open_archive).props("flat dense")
     ui.label("Auto-logged from qualifying signals (both SL/TP methods). "
              "Expectancy in R is the number that matters, not win rate. "
-             "Times shown in your local timezone.")\
+             "Times shown in HKT (UTC+8).")\
         .classes("text-xs text-grey-6")
 
     # stats grouped by method -- resolved (WIN/LOSS/EXPIRED) trades only, see fix note above
@@ -1601,7 +1601,7 @@ def portfolio_panel() -> None:
     _win_idx = [i for i, h in enumerate(hist) if _cutoff is None or h[0] >= _cutoff]
     _whist = [hist[i] for i in _win_idx]
     if len(hist) >= 2:
-        xs = [dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M") for h in _whist]
+        xs = [dt.datetime.fromtimestamp(h[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%m-%d %H:%M") + " HKT" for h in _whist]
         _use_adj = SETTINGS["chart_view"] == "P&L (ex-deposits)"
         # P&L view must be ZERO-referenced (matches the Total P&L stat's own math: nl - base0 -
         # flows) -- _adj_full alone only nets out cash flows, leaving the series sitting at the
@@ -1708,7 +1708,7 @@ def portfolio_panel() -> None:
         dxs, dys = [], []
         for i, h in enumerate(hist):          # ALWAYS the full series -- true peak, never windowed
             if _cutoff is None or h[0] >= _cutoff:
-                dxs.append(dt.datetime.fromtimestamp(h[0]).strftime("%m-%d %H:%M"))
+                dxs.append(dt.datetime.fromtimestamp(h[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%m-%d %H:%M") + " HKT")
                 dys.append(round(dd_full[i], 2))
         ddcol = ("#16a34a" if cur_dd > -5 else
                  "#d97706" if cur_dd > BACKTEST_MAX_DD_PCT else "#dc2626")
@@ -3031,7 +3031,7 @@ def _open_cash_flows() -> None:
                     return
                 for f in sorted(cur, key=lambda x: x[0]):
                     with ui.row().classes("items-center gap-2 w-full"):
-                        ui.label(dt.datetime.fromtimestamp(f[0]).strftime("%Y-%m-%d %H:%M"))\
+                        ui.label(dt.datetime.fromtimestamp(f[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%Y-%m-%d %H:%M") + " HKT")\
                             .classes("text-xs text-grey-7 font-mono")
                         ui.label(f"{f[1]:+,.2f} {f[2]}").classes(
                             "text-sm font-bold " + ("text-green" if f[1] > 0 else "text-red"))
@@ -3059,7 +3059,7 @@ def _open_cash_flows() -> None:
             .classes("w-full")\
             .tooltip("positive = deposit into the account, negative = withdrawal out of it")
         when = ui.input("When (YYYY-MM-DD HH:MM)",
-                        value=dt.datetime.now().strftime("%Y-%m-%d %H:%M"))\
+                        value=dt.datetime.now(HKT).strftime("%Y-%m-%d %H:%M"))\
             .props("dense outlined").classes("w-full")\
             .tooltip("Should match when the money actually landed, so the equity chart and "
                      "drawdown baseline are corrected from that point onward -- not just today")
@@ -3072,7 +3072,7 @@ def _open_cash_flows() -> None:
                 return
             ts, delta = found
             amt.set_value(round(delta, 2))
-            when.set_value(dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"))
+            when.set_value(dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone(HKT).strftime("%Y-%m-%d %H:%M"))
             hint.set_text(f"Found an unexplained {delta:+,.0f} {ccy} move — check the amount "
                           "against your bank/IBKR record before saving (this is the NetLiq "
                           "delta, so it may include a little market drift).")
