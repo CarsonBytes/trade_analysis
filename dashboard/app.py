@@ -3407,19 +3407,38 @@ def bell_button() -> None:
 
 
 def _open_bell() -> None:
+    # FIXED 2026-08-26 (found live): the first version stamped events-seen BEFORE building
+    # anything, then created the dialog inside the refreshable's slot and immediately
+    # called bell_button.refresh() -- destroying the just-opened dialog's DOM. Net effect:
+    # clicking showed nothing AND marked every unread event as read. Now: ONE persistent
+    # per-client dialog (attached to the client, immune to badge refreshes -- the global
+    # _refresh_all_panels() also refreshes bell_button every tick, which would keep
+    # killing an open dialog otherwise); content rebuilt on each open; read-state stamped
+    # only AFTER a successful render, using the NEWEST event shown (not wall-clock now),
+    # so anything arriving while the dialog sits open stays unread.
     from dashboard.core import notable_events
-    SETTINGS["events_seen_ts"] = dt.datetime.now(dt.timezone.utc).timestamp()
-    _save_settings()
-    dlg = ui.dialog().props("full-width")
-    with dlg, ui.card().classes("w-full"):
-        ui.label("Notable events").classes("text-lg font-bold")
-        ui.label("Same feed as Retrospective's Recent events — WARNING/ERROR levels also "
-                 "push to Telegram/ntfy when configured.").classes("text-xs text-grey-6")
+    try:
+        client = ui.context.client
+        dlg = getattr(client, "_bell_dlg", None)
+        if dlg is None:
+            dlg = ui.dialog().props("full-width")
+            with dlg, ui.card().classes("w-full"):
+                ui.label("Notable events").classes("text-lg font-bold")
+                ui.label("Same feed as Retrospective's Recent events — WARNING/ERROR "
+                         "levels also push to Telegram/ntfy when configured.")\
+                    .classes("text-xs text-grey-6")
+                setattr(client, "_bell_body",
+                        ui.column().classes("w-full gap-1").style("max-height: 60vh"))
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Close", on_click=dlg.close).props("flat")
+            setattr(client, "_bell_dlg", dlg)
         events = notable_events.recent(50)
-        if not events:
-            ui.label("Nothing recorded yet.").classes("text-sm text-grey")
-        with ui.scroll_area().style("max-height: 60vh"):
-            for ev in reversed(events):                # oldest first inside the scroll area
+        body = getattr(client, "_bell_body")
+        body.clear()
+        with body:
+            if not events:
+                ui.label("Nothing recorded yet.").classes("text-sm text-grey")
+            for ev in reversed(events):                # oldest first inside the list
                 icon = {"error": ("error", "red"),
                         "warning": ("warning", "orange")}.get(ev["level"],
                                                               ("circle", "grey-5"))
@@ -3429,10 +3448,17 @@ def _open_bell() -> None:
                         ui.label(ev["message"]).classes("text-sm")
                         ui.label(f"{ev['ts']} · {ev['level']}").classes(
                             "text-xs text-grey-6")
-        with ui.row().classes("justify-end w-full"):
-            ui.button("Close", on_click=dlg.close).props("flat")
-    dlg.open()
-    bell_button.refresh()
+        if events:
+            newest = max(_event_ts(ev.get("ts", "")) for ev in events)
+            if newest > float(SETTINGS.get("events_seen_ts") or 0):
+                SETTINGS["events_seen_ts"] = newest
+                _save_settings()
+        dlg.open()
+        bell_button.refresh()                          # badge clears; dialog is out of its subtree
+    except Exception as e:                             # noqa: BLE001 -- never break the header
+        from dashboard.core.log import log
+        log.warning("bell dialog failed (read-state left untouched): %s", e)
+        ui.notify(f"Couldn't load notifications: {e}", type="negative")
 
 
 # ---- page ------------------------------------------------------------------
