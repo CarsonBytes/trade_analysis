@@ -63,7 +63,7 @@ SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
             # profit, largest invested amount) -- one consistent mental model instead of
             # per-key direction semantics.
             "active_sort": "entry_date", "active_sort_dir": "desc",
-            "events_seen_ts": 0}
+            "alerts_filter": "unread"}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
                     "profit": "Profit", "invested": "Invested amount"}
@@ -82,7 +82,7 @@ def _save_settings() -> None:
             "grid_cols": SETTINGS["grid_cols"], "chart_period": SETTINGS["chart_period"],
             "chart_scale": SETTINGS["chart_scale"], "chart_view": SETTINGS["chart_view"],
             "active_sort": SETTINGS["active_sort"], "active_sort_dir": SETTINGS["active_sort_dir"],
-            "events_seen_ts": SETTINGS.get("events_seen_ts", 0),
+            "alerts_filter": SETTINGS.get("alerts_filter", "unread"),
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
             "tech_paused": _p.TECH_PAUSED})
@@ -100,7 +100,7 @@ def _load_settings() -> None:
             return
         for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
                  "chart_scale", "chart_view", "active_sort", "active_sort_dir",
-                 "events_seen_ts"):
+                 "alerts_filter"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -2697,7 +2697,8 @@ def _refresh_for_all_clients(*refreshables) -> None:
 def _refresh_all_panels() -> None:
     _refresh_for_all_clients(header_status, health_banner, macro_banner, opportunities,
                              grid, paper_panel, active_panel, gate_panel,
-                             retrospective_panel, portfolio_panel, bell_button)
+                             retrospective_panel, portfolio_panel, bell_button,
+                             alerts_panel)
 
 
 # ---- refresh orchestration -------------------------------------------------
@@ -3366,99 +3367,131 @@ def _open_info_modal() -> None:
 
 # ---- ADDED 2026-08-26: in-app notification center (bell) -----------------------------------
 # notable_events were previously visible only inside Retrospective's collapsed "Recent
-# events" expansion -- you had to KNOW to go look. The bell surfaces them on every page:
-# a red badge while unread events exist, and one click opens the full recent list with
-# severity icons. Read-state is per-instance (persisted in ui_settings), matching how
-# everything else here is scoped.
+# events" expansion -- you had to KNOW to go look. v2 (2026-08-26, user feedback: the
+# dialog's open-everything-as-read behavior dismissed real alerts the user never saw):
+# the bell is now just a POINTER -- it shows the true unread count (per-event read_ts in
+# the changelog table) and clicking it navigates to the dedicated ALERTS TAB, where read/
+# unread transitions happen only through explicit user actions (per-row check or a
+# deliberate "Mark all as read" button). Nothing auto-marks anything.
 
 def _unread_events_count() -> int:
-    seen = float(SETTINGS.get("events_seen_ts") or 0)
     try:
         from dashboard.core import notable_events
-        return sum(1 for ev in notable_events.recent(30)
-                   if _event_ts(ev.get("ts", "")) > seen)
+        return notable_events.unread_count()
     except Exception:                                  # noqa: BLE001 -- never break rendering
         return 0
-
-
-def _event_ts(iso: str) -> float:
-    try:
-        return dt.datetime.fromisoformat(iso).timestamp()
-    except Exception:                                  # noqa: BLE001
-        return 0.0
 
 
 @ui.refreshable
 def bell_button() -> None:
     unread = _unread_events_count()
-    btn = ui.button(icon="notifications", on_click=_open_bell)\
+    btn = ui.button(icon="notifications", on_click=_goto_alerts)\
         .props(("flat dense round size=sm color=negative") if unread else
                "flat dense round size=sm")\
-        .tooltip("Notable events" + (f" — {unread} unread" if unread else " — all read"))
+        .tooltip("Notable events" +
+                 (f" — {unread} unread — click to review" if unread else " — all read"))\
+        .classes("relative")
     if unread:
-        # FIXED 2026-08-25: Button has no .badge() method in the installed NiceGUI version
-        # (confirmed via inspection: ui.badge is a standalone element, not a Button
-        # chainable) -- crashed main_page() with a 500 on EVERY load the instant unread > 0
-        # for the first time (confirmed live: only surfaced once real notable_events started
-        # accumulating from today's other fixes). A badge is a CHILD element of the button
-        # it decorates, not a method on it.
+        # Button has no .badge() method in the installed NiceGUI version -- a badge is a
+        # CHILD element of the button it decorates, not a method on it.
         with btn:
-            ui.badge(str(unread), color="red").props("floating")
+            ui.badge(str(min(unread, 99)) + ("+" if unread > 99 else ""),
+                     color="red").props("floating")
 
 
-def _open_bell() -> None:
-    # FIXED 2026-08-26 (found live): the first version stamped events-seen BEFORE building
-    # anything, then created the dialog inside the refreshable's slot and immediately
-    # called bell_button.refresh() -- destroying the just-opened dialog's DOM. Net effect:
-    # clicking showed nothing AND marked every unread event as read. Now: ONE persistent
-    # per-client dialog (attached to the client, immune to badge refreshes -- the global
-    # _refresh_all_panels() also refreshes bell_button every tick, which would keep
-    # killing an open dialog otherwise); content rebuilt on each open; read-state stamped
-    # only AFTER a successful render, using the NEWEST event shown (not wall-clock now),
-    # so anything arriving while the dialog sits open stays unread.
-    from dashboard.core import notable_events
+def _goto_alerts() -> None:
+    """Bell click: jump to the Alerts tab pre-filtered to UNREAD (never marks anything)."""
+    SETTINGS["alerts_filter"] = "unread"
+    _save_settings()
     try:
-        client = ui.context.client
-        dlg = getattr(client, "_bell_dlg", None)
-        if dlg is None:
-            dlg = ui.dialog().props("full-width")
-            with dlg, ui.card().classes("w-full"):
-                ui.label("Notable events").classes("text-lg font-bold")
-                ui.label("Same feed as Retrospective's Recent events — WARNING/ERROR "
-                         "levels also push to Telegram/ntfy when configured.")\
-                    .classes("text-xs text-grey-6")
-                setattr(client, "_bell_body",
-                        ui.column().classes("w-full gap-1").style("max-height: 60vh"))
-                with ui.row().classes("justify-end w-full"):
-                    ui.button("Close", on_click=dlg.close).props("flat")
-            setattr(client, "_bell_dlg", dlg)
-        events = notable_events.recent(50)
-        body = getattr(client, "_bell_body")
-        body.clear()
-        with body:
-            if not events:
-                ui.label("Nothing recorded yet.").classes("text-sm text-grey")
-            for ev in reversed(events):                # oldest first inside the list
-                icon = {"error": ("error", "red"),
-                        "warning": ("warning", "orange")}.get(ev["level"],
-                                                              ("circle", "grey-5"))
-                with ui.row().classes("items-start gap-2 w-full"):
-                    ui.icon(icon[0], color=icon[1]).classes("text-base mt-0.5")
-                    with ui.column().classes("gap-0"):
-                        ui.label(ev["message"]).classes("text-sm")
-                        ui.label(f"{ev['ts']} · {ev['level']}").classes(
-                            "text-xs text-grey-6")
-        if events:
-            newest = max(_event_ts(ev.get("ts", "")) for ev in events)
-            if newest > float(SETTINGS.get("events_seen_ts") or 0):
-                SETTINGS["events_seen_ts"] = newest
-                _save_settings()
-        dlg.open()
-        bell_button.refresh()                          # badge clears; dialog is out of its subtree
-    except Exception as e:                             # noqa: BLE001 -- never break the header
+        tabs = getattr(ui.context.client, "_tabs", None)
+        if tabs is not None:
+            tabs.set_value("alerts")
+    except Exception as e:                             # noqa: BLE001 -- cosmetic only
         from dashboard.core.log import log
-        log.warning("bell dialog failed (read-state left untouched): %s", e)
-        ui.notify(f"Couldn't load notifications: {e}", type="negative")
+        log.debug("bell navigation failed: %s", e)
+    alerts_panel.refresh()
+
+
+ALERTS_FILTERS = {"all": "All", "unread": "Unread",
+                  "warn": "Warning+Error", "info": "Info"}
+_ALERTS_PAGE_SIZE = 50
+
+
+@ui.refreshable
+def alerts_panel() -> None:
+    """Dedicated reading home for notable events (Alerts tab). Read/unread is PER EVENT,
+    persisted in the changelog table itself, and changes ONLY via the explicit controls
+    here -- opening this tab, refreshing, or navigating away never touches it."""
+    from dashboard.core import notable_events
+
+    filt = SETTINGS.get("alerts_filter", "unread")
+
+    def _set_filter(e) -> None:
+        SETTINGS["alerts_filter"] = e.value
+        _save_settings()
+        alerts_panel.refresh()
+
+    def _mark_all() -> None:
+        notable_events.mark_all_read()
+        alerts_panel.refresh()
+        bell_button.refresh()
+
+    events = notable_events.recent(300)
+    shown = [ev for ev in events if (
+        filt == "all" or
+        (filt == "unread" and not ev["read"]) or
+        (filt == "warn" and ev["level"] in ("warning", "error")) or
+        (filt == "info" and ev["level"] == "info"))]
+    unread_total = _unread_events_count()
+
+    with ui.row().classes("items-center justify-between w-full flex-wrap gap-2"):
+        ui.label("Alerts — notable events").classes("text-lg font-bold")
+        ui.badge(f"{unread_total} unread", color="red" if unread_total else "grey")
+        if unread_total:
+            ui.button("Mark all as read", icon="done_all", on_click=_mark_all)\
+                .props("flat dense")\
+                .tooltip("Explicitly clears every unread flag. This is the ONLY "
+                         "bulk way anything gets marked read.")
+    with ui.row().classes("items-center gap-2 w-full"):
+        ui.label("Show:").classes("text-xs text-grey-6")
+        ui.toggle(ALERTS_FILTERS, value=filt, on_change=_set_filter).props("dense")
+        ui.label("Read/unread state is per event and never changes automatically.")\
+            .classes("text-xs text-grey-6 ml-auto")
+
+    if not shown:
+        ui.label(("No unread events — you're all caught up." if filt == "unread"
+                  else "Nothing recorded yet.")).classes("text-sm text-grey mt-2")
+        return
+
+    with ui.column().classes("w-full gap-0 mt-2"):
+        for ev in shown[:_ALERTS_PAGE_SIZE]:
+            sev_icon, sev_color = {
+                "error": ("error", "red"),
+                "warning": ("warning", "orange")}.get(ev["level"], ("circle", "grey-5"))
+            accent = {"error": "border-l-4 border-red-500 bg-red-1",
+                      "warning": "border-l-4 border-orange-400 bg-orange-1"
+                      }.get(ev["level"], "")
+            row_cls = ("items-start gap-2 w-full p-2 rounded-b "
+                       + (accent if not ev["read"] else "opacity-60"))
+            with ui.row().classes(row_cls):
+                ui.icon(sev_icon, color=sev_color).classes("text-base mt-0.5")
+                with ui.column().classes("gap-0 grow"):
+                    ui.label(ev["message"]).classes(
+                        "text-sm " + ("font-bold" if not ev["read"] else ""))
+                    ui.label(f"{ev['ts']} · {ev['level']}"
+                             + (" · UNREAD" if not ev["read"] else ""))\
+                        .classes("text-xs text-grey-6")
+                if not ev["read"]:
+                    ui.button(icon="check", on_click=lambda ev=ev: (
+                        notable_events.mark_read(ev["id"]),
+                        alerts_panel.refresh(), bell_button.refresh()))\
+                        .props("flat dense round size=sm")\
+                        .tooltip("Mark this one event as read")
+    if len(shown) > _ALERTS_PAGE_SIZE:
+        remaining = len(shown) - _ALERTS_PAGE_SIZE
+        ui.label(f"…{remaining} older event(s) not shown — use the filters to narrow.")\
+            .classes("text-xs text-grey-6 mt-2")
 
 
 # ---- page ------------------------------------------------------------------
@@ -3683,10 +3716,14 @@ def main_page() -> None:
         # so any failure degrades to plain non-deep-linked tabs.
         with ui.tabs().classes("w-full") as tabs:
             t_board = ui.tab("board", "Board", icon="dashboard")
+            t_alerts = ui.tab("alerts", "Alerts", icon="notifications_active")
             t_signals = ui.tab("signals", "Signals & Gates", icon="traffic")
             t_trades = ui.tab("trades", "Live Trades" if _live else "Paper Trades",
                               icon="receipt_long")
             t_retro = ui.tab("retro", "Retrospective", icon="insights")
+        # Alerts-tab spec: stash the tabs element per client so the header bell (a
+        # module-level refreshable, outside this page closure) can navigate to it.
+        setattr(ui.context.client, "_tabs", tabs)
 
         def _on_tab_change(e) -> None:
             try:
@@ -3726,6 +3763,8 @@ def main_page() -> None:
                 macro_banner()
                 portfolio_panel()
                 active_panel()
+            with ui.tab_panel(t_alerts):               # notable events, read at your pace
+                alerts_panel()
             with ui.tab_panel(t_signals):              # why trades fire + what's ranking
                 gate_panel()
                 opportunities()

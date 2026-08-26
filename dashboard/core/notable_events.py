@@ -29,15 +29,25 @@ def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(db_path, check_same_thread=False)
     if db_path not in _table_ready:
         c.execute("""CREATE TABLE IF NOT EXISTS changelog (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT)""")
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT,
+            read_ts TEXT DEFAULT NULL)""")
+        # ADDED 2026-08-26 (Alerts-tab spec): per-event read tracking. Additive migration
+        # for pre-existing DBs -- same pattern as paper.py's own _MIGRATIONS. Unread is
+        # simply read_ts IS NULL; NOTHING in the system auto-marks events read (the old
+        # bell dialog's open-everything-as-read behavior was found live to dismiss real
+        # alerts the user never saw).
+        cols = [r[1] for r in c.execute("PRAGMA table_info(changelog)").fetchall()]
+        if "read_ts" not in cols:
+            c.execute("ALTER TABLE changelog ADD COLUMN read_ts TEXT DEFAULT NULL")
         _table_ready.add(db_path)
     return c
 
 
 def record(message: str, level: str = "info") -> None:
-    """Log + record a notable event locally, and alert (Telegram) if configured. Never
-    raises -- a failure in the changelog write or the alert must not break whatever real
-    trading/monitoring logic triggered this."""
+    """Log + record a notable event locally (as UNREAD), and alert (Telegram/ntfy) if
+    configured. Never raises -- a failure in the changelog write or the alert must not
+    break whatever real trading/monitoring logic triggered this. New events are always
+    unread by definition; only explicit mark_read()/mark_all_read() calls clear them."""
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     try:
         from dashboard.core import paper
@@ -55,12 +65,53 @@ def record(message: str, level: str = "info") -> None:
 
 
 def recent(limit: int = 20) -> list[dict]:
-    """Most recent notable events, newest first."""
+    """Most recent notable events, newest first. Each row carries its id and a 'read'
+    flag (read_ts IS NOT NULL) so UIs can distinguish seen from unread."""
     try:
         with _conn() as c:
             cur = c.execute(
-                "SELECT ts, level, message FROM changelog ORDER BY id DESC LIMIT ?", (limit,))
-            return [{"ts": r[0], "level": r[1], "message": r[2]} for r in cur.fetchall()]
+                "SELECT id, ts, level, message, read_ts FROM changelog "
+                "ORDER BY id DESC LIMIT ?", (limit,))
+            return [{"id": r[0], "ts": r[1], "level": r[2], "message": r[3],
+                     "read": r[4] is not None} for r in cur.fetchall()]
     except Exception as e:                       # noqa: BLE001
         log.debug("notable_events: recent() read failed: %s", e)
         return []
+
+
+def unread_count() -> int:
+    """How many recorded events have never been marked read. Uncapped -- callers decide
+    how to display large counts."""
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) FROM changelog WHERE read_ts IS NULL").fetchone()
+            return int(row[0]) if row else 0
+    except Exception as e:                       # noqa: BLE001
+        log.debug("notable_events: unread_count() failed: %s", e)
+        return 0
+
+
+def mark_read(event_id: int) -> None:
+    """Mark ONE event read by id. Never raises -- a failed write must not break the UI."""
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, _conn() as c:
+            c.execute("UPDATE changelog SET read_ts = ? "
+                      "WHERE id = ? AND read_ts IS NULL",
+                      (dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                       event_id))
+    except Exception as e:                       # noqa: BLE001
+        log.debug("notable_events: mark_read(%s) failed: %s", event_id, e)
+
+
+def mark_all_read() -> None:
+    """Explicitly mark EVERY event read -- a deliberate user action on the Alerts tab,
+    never something the system does as a side effect of opening anything."""
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, _conn() as c:
+            c.execute("UPDATE changelog SET read_ts = ? WHERE read_ts IS NULL",
+                      (dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),))
+    except Exception as e:                       # noqa: BLE001
+        log.debug("notable_events: mark_all_read() failed: %s", e)

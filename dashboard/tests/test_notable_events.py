@@ -130,6 +130,101 @@ def test_record_never_raises_if_notify_fails():
             pass
 
 
+def test_read_tracking_lifecycle():
+    print("\nread tracking (2026-08-26 Alerts-tab spec): new events are UNREAD; only "
+          "explicit mark_read()/mark_all_read() change that:")
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import notable_events, notify
+        with mock.patch.object(notify, "send", return_value=False):
+            notable_events.record("event A")
+            notable_events.record("event B", level="warning")
+        rows = notable_events.recent(limit=10)
+        check("fresh events are unread", [r["read"] for r in rows], [False, False])
+        check("rows carry their ids for per-row actions",
+              sorted(r["id"] for r in rows), [1, 2])
+        check("unread_count sees both", notable_events.unread_count(), 2)
+
+        b_id = next(r["id"] for r in rows if r["message"] == "event B")
+        notable_events.mark_read(b_id)
+        rows = notable_events.recent(limit=10)
+        check("mark_read clears exactly the one event",
+              {r["message"]: r["read"] for r in rows},
+              {"event A": False, "event B": True})
+        check("unread_count drops to 1", notable_events.unread_count(), 1)
+
+        # a NEW event arriving afterwards must be unread again -- opening a panel must
+        # never have side effects on events recorded after it rendered
+        with mock.patch.object(notify, "send", return_value=False):
+            notable_events.record("event C")
+        check("new event is unread again", notable_events.unread_count(), 2)
+
+        notable_events.mark_all_read()
+        rows = notable_events.recent(limit=10)
+        check("mark_all_read clears everything",
+              all(r["read"] for r in rows), True)
+        check("unread_count now zero", notable_events.unread_count(), 0)
+
+        # idempotency: re-marking already-read rows is harmless
+        notable_events.mark_read(b_id)
+        notable_events.mark_all_read()
+        check("re-marking is idempotent", notable_events.unread_count(), 0)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_read_ts_migration_for_pre_existing_db():
+    print("\nread_ts migration: a changelog table created BEFORE the column existed "
+          "gains it additively, existing rows read as UNREAD:")
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        import sqlite3
+        import datetime as dt
+        # simulate the OLD schema by hand (no read_ts column) with one pre-existing row
+        c = sqlite3.connect(path)
+        c.execute("""CREATE TABLE changelog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, message TEXT)""")
+        c.execute("INSERT INTO changelog(ts, level, message) VALUES (?,?,?)",
+                  (dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "warning", "pre-migration alert"))
+        c.commit()
+        c.close()
+
+        from dashboard.core import notable_events, notify
+        with mock.patch.object(notify, "send", return_value=False):
+            notable_events.record("post-migration event")
+        rows = notable_events.recent(limit=10)
+        check("migration kept the old row",
+              any(r["message"] == "pre-migration alert" for r in rows), True)
+        check("old rows count as UNREAD (user never saw them)",
+              [r["read"] for r in rows], [False, False])
+        check("unread_count includes migrated rows", notable_events.unread_count(), 2)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
