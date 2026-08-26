@@ -1,7 +1,65 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-19.
+Last updated 2026-08-26.
+
+---
+
+### 🔧 INFRASTRUCTURE 2026-08-26: public-outage chain, native/Docker session fight, and a self-healing gateway-relogin stack deployed
+
+A multi-hour incident chain, root-caused end to end. The durable writeup lives in
+README's new "Infrastructure & deployment" section (source of truth going forward);
+this entry records the incident chain and what was deployed.
+
+**How it started:** both public URLs (quant.carsonng.com / quant-live.carsonng.com) were
+reported down while the WSL2 Docker stacks were actually healthy. The investigating
+session misdiagnosed the deployment target — Docker isn't visible from the Windows shell,
+and the disabled Windows scheduled tasks (`DashboardApp`/`DashboardAppLive`) looked like
+the operative deployment — and made things worse in three compounding ways:
+1. Repointed Cloudflare ingress from the Docker ports (18080/18081) to the dead native
+   ports (8080/8081). Reverted same day (config version 13).
+2. Enabled + started `DashboardApp`, which launched `C:\Scripts\dashboard.ps1` — whose
+   embedded infinite watchdog loop kept relaunching the NATIVE paper IB Gateway every
+   ~77s because its port-4002 health check could never pass while Docker held the IBKR
+   session. This was the "IBKR login keeps popping up on Windows" symptom. Killed the
+   process tree (elevation required — task-launched processes carry an elevated token)
+   and re-disabled both tasks.
+3. Started the native LIVE instance against the real-money account while the live Docker
+   gateway held that username — the exact session fight documented on 2026-08-12.
+   Stopped + disabled.
+
+**The actual outage cause:** broken WSL2→Windows localhost port forwarding (containers
+healthy inside WSL; `localhost:18080/18081` unreachable from Windows; direct-to-WSL-IP
+worked). Fixed by `wsl --shutdown` + VM restart; containers auto-recovered. Note: a
+Cloudflare Access-gated hostname returns HTTP 200 with a sign-in page even when the
+origin is dead — verify origins via `/status`, never an unauthenticated page GET.
+
+**Root enabler:** nothing documented the deployment topology anywhere. Fixed by the README
+section; keep it current.
+
+**Deployed same day — self-healing gateway relogin stack:**
+- `scripts/gateway-login-watchdog.sh` (WSL cron every min): detects a gateway stuck
+  mid-login (its OWN API port — paper 4002 / live 4001 — closed inside the container;
+  socat relay ports always listen so they prove nothing), auto-cycles bounded fresh
+  login/2FA attempts (5 min stall → restart, ≥3 min between attempts, max 3/hour),
+  pushes Telegram/ntfy at each cycle, escalates MANUAL-ACTION-NEEDED at the cap. Also
+  writes `/home/cap/cron-heartbeat.log` every minute so silently-dead cron is detectable —
+  the pre-market cron had *never demonstrably fired* (its log file did not exist) and
+  nothing could have noticed.
+- `scripts/gateway-relogin.sh [paper|live|both] [reason]`: deterministic bounce+poll+log
+  path shared by the watchdog, the pre-market cron, and humans.
+- Pre-market cron fixed: covers BOTH gateways (was live-only), runs through
+  gateway-relogin.sh so verdicts land in `/home/cap/gateway-restart.log`.
+- `/status` honesty fix (`web/service.py` + `web/fleet.py`): cached account snapshots are
+  stamped (`acct_ts`); `ok:true` now requires a broker read <15 min old and the payload
+  reports `acct_age_sec`. Before this, a stuck login showed cached NAV as ok:true — which
+  is exactly why today's outage looked green from the dashboard during diagnosis.
+
+**Standing rules reinforced:** (1) native Windows tasks stay DISABLED — starting one
+starts a session fight, not a dashboard; (2) verify deployments by what is actually
+listening on the port inside WSL, not by HTTP status codes through Access-gated
+hostnames; (3) after any gateway restart expect exactly one IBKR phone push per account —
+expired prompts are what stalls look like.
 
 ---
 

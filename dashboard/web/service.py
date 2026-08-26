@@ -457,6 +457,11 @@ def refresh_cheap() -> None:
                 _pending_val = _pending.get("val") if _pending else None
                 if pending_confirms(_pending_val, _new_nl):
                     STATE["account"] = _acct         # confirmed on 2 consecutive reads -> accept
+                    # F3 2026-08-26: record WHEN the broker data was actually read -- /status's
+                    # ok-verdict now requires freshness so a cached snapshot can't read green
+                    # (found live: a stuck gateway login left the dashboard reporting cached
+                    # NAV as ok:true for hours, masking the outage during diagnosis)
+                    STATE["acct_ts"] = int(dt.datetime.now().timestamp())
                     store.cache_set("account_pending_anomaly", None)
                     log.warning("account_summary: CONFIRMED sustained change %.2f -> %.2f",
                                 _prev_nl, _new_nl)
@@ -469,6 +474,7 @@ def refresh_cheap() -> None:
             else:
                 store.cache_set("account_pending_anomaly", None)
                 STATE["account"] = _acct
+                STATE["acct_ts"] = int(dt.datetime.now().timestamp())   # see F3 note above
     except Exception as e:
         log.debug("account_summary error: %s", e)
     # record an equity (NetLiq) snapshot for the portfolio line chart (throttled ~10min)
@@ -906,3 +912,7 @@ def restore_cache() -> None:
             STATE["positions"] = {int(k): v for k, v in pos.items()}   # JSON str keys -> int
         if STATE.get("last_cheap") is None and snap.get("ts"):
             STATE["portfolio_ts"] = snap["ts"]                         # data-as-of for the UI
+        # F3 2026-08-26: restored account data is CACHE -- stamp it with the snapshot's age
+        # so /status can tell "live broker read" from "restored last-known" apart.
+        if snap.get("ts") and not STATE.get("acct_ts"):
+            STATE["acct_ts"] = int(snap["ts"])

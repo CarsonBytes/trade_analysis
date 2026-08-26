@@ -4,7 +4,7 @@ A research + trading platform for a diversified multi-asset ETF book, with three
 
 1. **Anti-self-deception backtester** — proves whether a strategy idea actually has an edge (walk-forward, deflated Sharpe, noise test). See [backtester details](#backtester) below.
 2. **Multi-agent analyst** (`analyst/`) — deterministic facts feed LLM agents (regime / technical / sentiment) → a head-trader decision → deterministic risk gate. Decision support, not auto-execution. See [analyst/README.md](analyst/README.md).
-3. **Real-time dashboard + trading** (`dashboard/`) — NiceGUI board that scores a 22-ETF weekly-trend universe and mirrors signals to IBKR (`BROKER=ib UNIVERSE=etf`), auto-manages idle cash (USD → SGOV), and forward-tests fills against the backtest. Runs as **two independent instances**: a paper account (DUK968178) and, as of 2026-07, a **real-money live account** (U12991898) — same code, hard-guarded so a config mistake can never trade the wrong one. See [dashboard/README.md](dashboard/README.md).
+3. **Real-time dashboard + trading** (`dashboard/`) — NiceGUI board that scores a 22-ETF weekly-trend universe and mirrors signals to IBKR (`BROKER=ib UNIVERSE=etf`), auto-manages idle cash (USD → SGOV), and forward-tests fills against the backtest. Runs as **two independent instances**: a paper account (DUK968178) and, as of 2026-07, a **real-money live account** (U12991898) — same code, hard-guarded so a config mistake can never trade the wrong one. Both are deployed via **Docker inside WSL2** — see [Infrastructure & deployment](#infrastructure--deployment-how-this-actually-runs). See [dashboard/README.md](dashboard/README.md).
 
 > **Honest framing:** this measures whether ideas work before risking money on them, and every real-money safety gate (`PORTFOLIO_CAP`, `DD_HALT_PCT`, the paper/live account guard) exists because something real needed guarding against, not as a theoretical checkbox. Decision support, not unattended auto-execution — every trade traces back to a specific, auditable signal.
 
@@ -405,6 +405,58 @@ uncertainty — not on marketing appeal:
 — it is not a "get rich" system, it is a disciplined, diversified, risk-managed way to
 participate in markets with a small, real, measured edge over a passive alternative, at the
 cost of real operational overhead to keep it running correctly.
+
+---
+
+## Infrastructure & deployment (how this actually runs)
+
+> **Source of truth as of 2026-08-26** — before this section existed, a session that
+> assumed the wrong deployment target broke production routing for an hour. Read this
+> before touching anything operational.
+
+**The operative deployment of both dashboards is Docker inside WSL2** (Ubuntu,
+`/home/cap/quant`), not Windows-native processes:
+
+| Instance | Compose file | Container(s) | Host port | Public URL |
+|---|---|---|---|---|
+| Paper | `docker-compose.yml` | `quant-dashboard-docker` (+ `quant-ibgateway-docker`) | **18080** → container 8090 | quant.carsonng.com |
+| Live | `docker-compose.live.yml` | `quant-dashboard-live-docker` (+ `quant-ibgateway-live-docker`) | **18081** → container 8091 | quant-live.carsonng.com |
+
+- **Push = deploy (paper only).** `.githooks/pre-push` fires
+  `scripts/wsl2-docker-deploy.sh` in the background on every push to master:
+  rsync `/mnt/d/quant` → `/home/cap/quant`, compose build, up -d, health check.
+  Log: `/home/cap/quant-deploy.log` inside WSL2. The **live** stack is deliberately
+  *never* touched by a push (`scripts/wsl2-docker-deploy-live.sh` exists but stays
+  manually invoked — an ordinary code push must never recreate/relogin the real-money
+  gateway).
+- **Public route:** one `cloudflared` tunnel on Windows (`C:\cloudflared\`, with its own
+  watchdog) + Cloudflare's remote ingress config: `quant.carsonng.com → http://localhost:18080`,
+  `quant-live.carsonng.com → http://localhost:18081` (plus other projects' routes).
+  Edit ingress only via the Cloudflare API pattern in `fix-tunnel-route*.ps1`.
+  Some hostnames sit behind Cloudflare Access — a 200 serving a sign-in page does NOT
+  prove the origin is up; verify with `/status`.
+- **Watchdog stack (inside WSL2 cron unless noted):**
+  - `docker-watchdog.sh` (every min) — restarts unhealthy dashboard containers.
+  - `scripts/gateway-login-watchdog.sh` (every min) — NEW 2026-08-26: detects a gateway
+    stuck mid-login (its own API port closed) and auto-cycles bounded fresh login/2FA
+    attempts with pushed notifications; escalates to MANUAL-ACTION-NEEDED after 3
+    failed cycles/hour. Cron liveness itself is proven by `/home/cap/cron-heartbeat.log`.
+  - Pre-market cron (20:00 HKT Mon–Fri): `scripts/gateway-relogin.sh both scheduled` —
+    restarts BOTH gateways before US open so a fresh login+2FA happens while the user
+    is awake to approve it. Verdicts logged to `/home/cap/gateway-restart.log`.
+- **The native Windows deployments are DECOMMISSIONED — leave them off.**
+  Scheduled tasks `DashboardApp` (:8080) and `DashboardAppLive` (:8081) and their
+  launcher/watchdog scripts (`C:\Scripts\dashboard.ps1`, `run_dashboard_live.ps1`,
+  `watchdog.ps1`) predate the Docker cutover (paper 2026-08-12, live 2026-08-18).
+  They are disabled because **IBKR allows one active session per username**: if a native
+  gateway starts while the Docker gateways hold the sessions, the two fight — repeated
+  login windows, kicked sessions, stalled logins (all three confirmed live 2026-08-26).
+  Their databases (`dashboard/dashboard.db`, `dashboard/dashboard_live.db`) remain as
+  historical archives only; the Docker volumes own current data.
+- **Quick health check:** each instance serves `/status` (JSON, `?fmt=html`) and either
+  host serves `/fleet` (both instances on one page). `ok:true` requires a FRESH broker
+  read — cached account data reports high `acct_age_sec` / `ok:false`, so a stuck login
+  can't masquerade as healthy.
 
 ---
 
