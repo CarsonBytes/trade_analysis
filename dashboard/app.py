@@ -3418,9 +3418,11 @@ def _open_info_modal() -> None:
 # deliberate "Mark all as read" button). Nothing auto-marks anything.
 
 def _unread_events_count() -> int:
+    """Bell counts ONLY red-tier (needs attention) unread events -- worth-knowing/log
+    never interrupt."""
     try:
         from dashboard.core import notable_events
-        return notable_events.unread_count()
+        return notable_events.unread_count(tier="red")
     except Exception:                                  # noqa: BLE001 -- never break rendering
         return 0
 
@@ -3443,8 +3445,9 @@ def bell_button() -> None:
 
 
 def _goto_alerts() -> None:
-    """Bell click: jump to the Alerts tab pre-filtered to UNREAD (never marks anything)."""
-    SETTINGS["alerts_filter"] = "unread"
+    """Bell click: jump to the Alerts tab pre-filtered to NEEDS-ATTENTION only (never
+    marks anything read)."""
+    SETTINGS["alerts_filter"] = "attention"
     _save_settings()
     try:
         tabs = getattr(ui.context.client, "_tabs", None)
@@ -3456,85 +3459,138 @@ def _goto_alerts() -> None:
     alerts_panel.refresh()
 
 
-ALERTS_FILTERS = {"all": "All", "unread": "Unread",
-                  "warn": "Warning+Error", "info": "Info"}
+ALERTS_FILTERS = {"all": "All", "attention": "Needs attention"}
 _ALERTS_PAGE_SIZE = 50
 
 
 @ui.refreshable
 def alerts_panel() -> None:
-    """Dedicated reading home for notable events (Alerts tab). Read/unread is PER EVENT,
-    persisted in the changelog table itself, and changes ONLY via the explicit controls
-    here -- opening this tab, refreshing, or navigating away never touches it."""
+    """Alerts v3 -- three tiers, grouped incidents, plain-language titles. Read/unread is
+    per incident and changes ONLY via explicit user actions here."""
     from dashboard.core import notable_events
 
-    filt = SETTINGS.get("alerts_filter", "unread")
+    filt = SETTINGS.get("alerts_filter", "all")
 
     def _set_filter(e) -> None:
         SETTINGS["alerts_filter"] = e.value
         _save_settings()
         alerts_panel.refresh()
 
-    def _mark_all() -> None:
-        notable_events.mark_all_read()
-        alerts_panel.refresh()
-        bell_button.refresh()
-
     events = notable_events.recent(300)
-    shown = [ev for ev in events if (
-        filt == "all" or
-        (filt == "unread" and not ev["read"]) or
-        (filt == "warn" and ev["level"] in ("warning", "error")) or
-        (filt == "info" and ev["level"] == "info"))]
-    unread_total = _unread_events_count()
+    reds = [ev for ev in events if ev["tier"] == "red"]
+    yellows = [ev for ev in events if ev["tier"] == "yellow"]
+    whites = [ev for ev in events if ev["tier"] == "white"]
+    unread_red = notable_events.unread_count(tier="red")
+
+    def _render_card(ev: dict, accent: str, bg: str) -> None:
+        sym = ev.get("symbol")
+
+        def _mark() -> None:
+            notable_events.mark_read(ev["id"])
+            alerts_panel.refresh()
+            bell_button.refresh()
+
+        def _open_trade() -> None:
+            SETTINGS.update(trades_filter="closed" if "cancel" in (ev.get("kind") or "")
+                            else "all", trades_search=sym or "")
+            _save_settings()
+            try:
+                tabs = getattr(ui.context.client, "_tabs", None)
+                if tabs is not None:
+                    tabs.set_value("trades")
+            except Exception:                          # noqa: BLE001
+                pass
+            paper_panel.refresh()
+
+        cls = ("items-start gap-2 w-full p-2 rounded-b border-l-4 "
+               f"{accent} {bg}" + ("" if ev["read"] else " font-medium"))
+        with ui.row().classes(cls):
+            with ui.column().classes("gap-0 grow min-w-[220px]"):
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    ui.label(ev["title"]).classes(
+                        "text-sm " + ("font-bold" if not ev["read"] else ""))
+                    if (ev.get("count") or 1) > 1:
+                        ui.badge(f"x{ev['count']}", color="grey-7").classes("text-xs")
+                    if not ev["read"]:
+                        ui.badge("UNREAD", color="blue").props("outline").classes("text-xs")
+                    ui.label((ev.get("last_ts") or ev["ts"]).replace("T", " ")[:16])\
+                        .classes("text-xs text-grey-6")
+                if ev.get("detail"):
+                    ui.label(ev["detail"]).classes("text-xs text-grey-7")
+                with ui.expansion("details", caption="raw event text")\
+                        .classes("text-xs text-grey-6").style("min-height:0"):
+                    ui.label(ev["message"]).classes("text-xs font-mono whitespace-pre-wrap")
+            with ui.row().classes("items-center gap-1 self-center"):
+                if sym and ev.get("kind") in ("order-cancelled", "position-closed",
+                                              "reconcile-mismatch"):
+                    ui.button(icon="receipt_long", on_click=_open_trade)\
+                        .props("flat dense round size=sm")\
+                        .tooltip(f"Open Trades filtered to {sym}")
+                if not ev["read"]:
+                    ui.button(icon="check", on_click=_mark)\
+                        .props("flat dense round size=sm").tooltip("Mark as read")
 
     with ui.row().classes("items-center justify-between w-full flex-wrap gap-2"):
-        ui.label("Alerts — notable events").classes("text-lg font-bold")
-        ui.badge(f"{unread_total} unread", color="red" if unread_total else "grey")
-        if unread_total:
-            ui.button("Mark all as read", icon="done_all", on_click=_mark_all)\
+        ui.label("Alerts").classes("text-lg font-bold")
+        ui.badge(f"{unread_red} need attention",
+                 color="red" if unread_red else "grey")
+        if any(not ev["read"] for ev in events):
+            ui.button("Mark all as read", icon="done_all",
+                      on_click=lambda: (notable_events.mark_all_read(),
+                                        alerts_panel.refresh(), bell_button.refresh()))\
                 .props("flat dense")\
                 .tooltip("Explicitly clears every unread flag. This is the ONLY "
                          "bulk way anything gets marked read.")
-    with ui.row().classes("items-center gap-2 w-full"):
-        ui.label("Show:").classes("text-xs text-grey-6")
+    with ui.row().classes("items-center gap-2 w-full flex-wrap"):
         ui.toggle(ALERTS_FILTERS, value=filt, on_change=_set_filter).props("dense")
-        ui.label("Read/unread state is per event and never changes automatically.")\
+        _sym_q = {"v": ""}
+
+        def _set_sym(e) -> None:
+            _sym_q["v"] = (e.value or "").strip().lower()
+            alerts_panel.refresh()
+
+        ui.input(placeholder="Filter by symbol…", on_change=_set_sym,
+                 clearable=True).props("dense outlined").classes("w-[180px]")
+        ui.label("Only 🔴 needs-attention events push to Telegram/ntfy.")\
             .classes("text-xs text-grey-6 ml-auto")
 
-    if not shown:
-        ui.label(("No unread events — you're all caught up." if filt == "unread"
-                  else "Nothing recorded yet.")).classes("text-sm text-grey mt-2")
+    def _matches(ev: dict) -> bool:
+        return not _sym_q["v"] or _sym_q["v"] in (ev.get("symbol") or "").lower() \
+            or _sym_q["v"] in (ev["title"] or "").lower()
+
+    shown = [ev for ev in events if _matches(ev)]
+    reds_shown = [ev for ev in shown if ev["tier"] == "red"]
+    yellows_shown = [ev for ev in shown if ev["tier"] == "yellow"]
+    whites_shown = [ev for ev in shown if ev["tier"] == "white"]
+
+    if filt == "attention":
+        if reds_shown:
+            with ui.column().classes("w-full gap-2 mt-2"):
+                for ev in reds_shown:
+                    _render_card(ev, "border-red-500", "bg-red-1")
+        else:
+            ui.label("Nothing needs attention.").classes("text-sm text-grey mt-2")
         return
 
-    with ui.column().classes("w-full gap-0 mt-2"):
-        for ev in shown[:_ALERTS_PAGE_SIZE]:
-            sev_icon, sev_color = {
-                "error": ("error", "red"),
-                "warning": ("warning", "orange")}.get(ev["level"], ("circle", "grey-5"))
-            accent = {"error": "border-l-4 border-red-500 bg-red-1",
-                      "warning": "border-l-4 border-orange-400 bg-orange-1"
-                      }.get(ev["level"], "")
-            row_cls = ("items-start gap-2 w-full p-2 rounded-b "
-                       + (accent if not ev["read"] else "opacity-60"))
-            with ui.row().classes(row_cls):
-                ui.icon(sev_icon, color=sev_color).classes("text-base mt-0.5")
-                with ui.column().classes("gap-0 grow"):
-                    ui.label(ev["message"]).classes(
-                        "text-sm " + ("font-bold" if not ev["read"] else ""))
-                    ui.label(f"{ev['ts']} · {ev['level']}"
-                             + (" · UNREAD" if not ev["read"] else ""))\
-                        .classes("text-xs text-grey-6")
-                if not ev["read"]:
-                    ui.button(icon="check", on_click=lambda ev=ev: (
-                        notable_events.mark_read(ev["id"]),
-                        alerts_panel.refresh(), bell_button.refresh()))\
-                        .props("flat dense round size=sm")\
-                        .tooltip("Mark this one event as read")
-    if len(shown) > _ALERTS_PAGE_SIZE:
-        remaining = len(shown) - _ALERTS_PAGE_SIZE
-        ui.label(f"…{remaining} older event(s) not shown — use the filters to narrow.")\
-            .classes("text-xs text-grey-6 mt-2")
+    if reds_shown:
+        ui.label("🔴 Needs attention").classes("text-sm font-bold mt-2 text-red")
+        with ui.column().classes("w-full gap-2"):
+            for ev in reds_shown:
+                _render_card(ev, "border-red-500", "bg-red-1")
+    if yellows_shown:
+        ui.label("🟡 Worth knowing").classes("text-sm font-bold mt-3 text-orange-8")
+        with ui.column().classes("w-full gap-2"):
+            for ev in yellows_shown[:_ALERTS_PAGE_SIZE]:
+                _render_card(ev, "border-orange-400", "")
+    with ui.expansion(f"⚪ Log ({len(whites_shown)})", caption="bookkeeping events")\
+            .classes("w-full mt-2"):
+        with ui.column().classes("w-full gap-1"):
+            for ev in whites_shown[:_ALERTS_PAGE_SIZE]:
+                _render_card(ev, "border-grey-400", "")
+    if not shown:
+        ui.label("Nothing recorded yet.").classes("text-sm text-grey mt-2")
+    elif not reds_shown and not yellows_shown and filt == "all":
+        pass
 
 
 # ---- page ------------------------------------------------------------------
