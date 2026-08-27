@@ -161,7 +161,10 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     backoff = _rate_limited_until()
     if backoff:
         try:
-            if _dt.datetime.now(_dt.timezone.utc) < _dt.datetime.fromisoformat(backoff):
+            bo_dt = _dt.datetime.fromisoformat(backoff)
+            if bo_dt.tzinfo is None:
+                bo_dt = bo_dt.replace(tzinfo=_dt.timezone.utc)  # legacy naive value = UTC
+            if _dt.datetime.now(_dt.timezone.utc) < bo_dt:
                 return None, f"provider unavailable -- backing off until {backoff[:16]}"
         except ValueError:
             pass    # malformed cached value -- ignore and attempt normally
