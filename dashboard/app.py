@@ -3791,7 +3791,7 @@ def main_page() -> None:
                     def _set_density(e) -> None:
                         SETTINGS.update(density=e.value)
                         _save_settings()
-                        ui.notify(f"Density: {e.value}", type="positive", timeout=1200)
+                        ui.navigate.reload()
                     ui.toggle({"comfortable": "Comfy", "compact": "Compact"},
                               value=SETTINGS.get("density","comfortable"),
                               on_change=_set_density).props("dense")\
@@ -3852,7 +3852,8 @@ def main_page() -> None:
             ui.toggle({"comfortable": "Comfy", "compact": "Compact"},
                       value=SETTINGS.get("density","comfortable"),
                       on_change=lambda e: (SETTINGS.update(density=e.value),
-                                           _save_settings())).props("dense")\
+                                           _save_settings(),
+                                           ui.navigate.reload())).props("dense")\
                 .tooltip("Quick density switch")
 
         # B3 2026-08-26: explicit lowercase tab values so the URL hash (#board, #trades, …)
