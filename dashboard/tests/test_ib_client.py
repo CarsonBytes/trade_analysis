@@ -246,12 +246,10 @@ def test_stock_contract_primary_exchange_kwarg():
           captured["args"], ("GLD", "SMART", "USD", {}))
 
 
-def test_fx_to_usd_falls_back_to_usd_base_pair_and_inverts():
-    print("\nfx_to_usd(): REGRESSION for the 2026-08-25 incident -- Forex(f'{ccy}USD') (e.g. "
-          "'HKDUSD') doesn't exist on IDEALPRO for HKD, confirmed live: every call failed "
-          "with 'No security definition has been found', continuously, on both paper and "
-          "live (ib_exec.py's own keep_cash_usd() already uses the correct pair, 'USDHKD', "
-          "for the same currency). Must fall back to the USD-base pair and invert its close:")
+def test_fx_to_usd_uses_usd_base_first_for_hkd():
+    print("\nfx_to_usd(): HKD is in _INVERTED_FX -- must try USDHKD first (correct), "
+          "not HKDUSD (which doesn't exist on IBKR and generated error 200 on every "
+          "call). FIXED 2026-08-27:")
     from dashboard.data import ib_client
 
     requested = []
@@ -269,9 +267,6 @@ def test_fx_to_usd_falls_back_to_usd_base_pair_and_inverts():
             self.close = close
 
     def _run_side_effect(coro, timeout=8):
-        # first attempt ("HKDUSD") fails -- doesn't exist; second ("USDHKD") succeeds
-        if len(requested) == 1:
-            raise Exception("No security definition has been found for the request")
         return [_Bar(7.80)]                    # USDHKD close: 7.80 HKD per 1 USD
 
     with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
@@ -279,8 +274,8 @@ def test_fx_to_usd_falls_back_to_usd_base_pair_and_inverts():
          mock.patch.object(ib_client, "_run", side_effect=_run_side_effect):
         rate = ib_client.fx_to_usd("HKD")
 
-    check("tried CCY-base pair first, then USD-base pair",
-          requested, ["HKDUSD", "USDHKD"])
+    check("tried USD-base pair first (not HKDUSD)",
+          requested, ["USDHKD"])
     check("inverted USDHKD's close (HKD per USD) to USD per HKD",
           round(rate, 6), round(1.0 / 7.80, 6))
 

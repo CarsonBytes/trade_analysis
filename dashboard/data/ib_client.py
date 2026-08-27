@@ -335,20 +335,24 @@ def stock_contract(symbol: str, currency: str = "USD", primary_exchange: str = "
 # robust fallback when no FX market-data subscription is available.
 _PEG_USD_PER = {"HKD": 1.0 / 7.80}
 
+# Currencies quoted as USD/CCY on IBKR (not CCY/USD) — requesting the wrong
+# convention generates error 200 "No security definition" every single call.
+# Try the correct pair first to avoid the spam; still fall back to the other
+# convention in case the set is incomplete.
+_INVERTED_FX = frozenset({"HKD", "CNY", "TWD", "INR", "THB", "PHP", "KRW",
+                          "IDR", "MYR", "VND", "CLP", "COP", "ARS", "PLN",
+                          "HUF", "CZK", "TRY", "ZAR", "MXN"})
+
 
 def fx_to_usd(ccy: str) -> float | None:
     """USD per 1 unit of `ccy` (1.0 for USD). For converting a non-USD account's
     equity into USD before sizing US ETFs. Uses DELAYED historical FX (works without a
     real-time sub); falls back to a pegged constant (e.g. HKD). None if all fail.
 
-    FIXED 2026-08-25: was requesting Forex(f"{ccy}USD") (e.g. "HKDUSD") unconditionally --
-    IDEALPRO doesn't list that pair at all for HKD (confirmed live: this has been failing
-    with "No security definition has been found" on EVERY call, continuously, on both paper
-    and live -- ib_exec.py's own keep_cash_usd() already uses the correct pair, "USDHKD",
-    for the same currency). Try the CCY-base convention first (correct for majors quoted
-    against USD, e.g. EURUSD), then fall back to the USD-base convention (correct for HKD
-    and similar) and invert its close (USDHKD's close is HKD per 1 USD, so 1/close is USD
-    per 1 HKD -- matching this function's own contract)."""
+    FIXED 2026-08-25: was requesting Forex(f"{ccy}USD") (e.g. "HKDUSD") unconditionally
+    -- IDEALPRO doesn't list that pair at all for HKD, generating error 200 on every
+    call. FIXED 2026-08-27: try the correct convention first for known inverted pairs
+    (HKD, CNY, etc.) so the failing request is never made in the first place."""
     ccy = (ccy or "USD").upper()
     if ccy == "USD":
         return 1.0
@@ -356,7 +360,12 @@ def fx_to_usd(ccy: str) -> float | None:
         ib = _ensure_conn()
         if ib is not None:
             ib_async = _mod()
-            for symbol, invert in ((f"{ccy}USD", False), (f"USD{ccy}", True)):
+            # Known inverted pairs go first (USDHKD); others try CCYUSD first (EURUSD)
+            if ccy in _INVERTED_FX:
+                pairs = ((f"USD{ccy}", True), (f"{ccy}USD", False))
+            else:
+                pairs = ((f"{ccy}USD", False), (f"USD{ccy}", True))
+            for symbol, invert in pairs:
                 pair = ib_async.Forex(symbol)
                 try:
                     bars = _run(ib.reqHistoricalDataAsync(
