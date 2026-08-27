@@ -1587,6 +1587,13 @@ def sweep_cash() -> dict:
               "ccy": "", "log": ""}
     if not _sweep_on():
         return status
+    # ADDED 2026-08-27: SGOV is a US-listed ETF -- placing MARKET orders when NYSE is
+    # closed just fails/retries every 30s tick for hours. Read-only status (SGOV qty/value)
+    # still updates; only the order placement is skipped.
+    if not within_entry_execution_window():
+        status["ok"] = True          # SGOV holding was read successfully (will read below)
+        status["log"] = "cash-sweep: market closed, rebalance deferred to next US session"
+        return status
     ib = _guard()
     if ib is None:
         return status
