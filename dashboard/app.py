@@ -1867,7 +1867,7 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
             if dt.datetime.now(dt.timezone.utc) < _bo_dt:
                 _bo_cst = _bo_dt.astimezone(dt.timezone(dt.timedelta(hours=8)))
                 return (f"The AI board-scan pipeline is currently unavailable (provider "
-                        f"backing off until {_bo_cst:%a %H:%M CST}) — nothing new can be "
+                        f"backing off until {_bo_cst:%a %H:%M HKT}) — nothing new can be "
                         "placed or cancelled until it recovers. This isn't specific to this "
                         "signal.", "retrying")
         except ValueError:

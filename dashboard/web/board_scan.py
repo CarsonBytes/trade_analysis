@@ -121,8 +121,8 @@ def _clear_backoff() -> None:
 
 
 def _set_rate_limit_backoff() -> None:
-    """Back off until the next provider reset (00:00 CST / 16:00 UTC).
-    The provider's own message says "请00:00后再试" -- that's Beijing time (UTC+8),
+    """Back off until the next provider reset (00:00 HKT / 16:00 UTC).
+    The provider's own message says "请00:00后再试" -- that's Hong Kong time (UTC+8),
     NOT UTC midnight. The previous code used UTC midnight, extending the blackout
     by an unnecessary 8 hours."""
     import datetime as _dt
