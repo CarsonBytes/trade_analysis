@@ -107,6 +107,7 @@ MAX_NEWS = 10
 # real, ongoing degradation (checked timestamps: every ~15-30s, matching the tick cadence)
 # during a routine response-time check for an unrelated change, not something invented.
 _RATE_LIMIT_BACKOFF_KEY = "llm_rate_limited_until"
+_CST = __import__("datetime").timezone(__import__("datetime").timedelta(hours=8))
 
 
 def _rate_limited_until() -> str | None:
@@ -114,14 +115,28 @@ def _rate_limited_until() -> str | None:
     return cached
 
 
+def _clear_backoff() -> None:
+    """Clear the backoff so the next run_board_scan() attempt is unrestricted."""
+    store.cache_set(_RATE_LIMIT_BACKOFF_KEY, None)
+
+
 def _set_rate_limit_backoff() -> None:
-    """Back off until the next local midnight -- matches this provider's own stated reset
-    schedule ("请00:00后再试" / "please try again after 00:00"). A different provider's
-    actual reset time may differ; this is a reasonable default, not a guarantee."""
+    """Back off until the next provider reset (00:00 CST / 16:00 UTC).
+    The provider's own message says "请00:00后再试" -- that's Beijing time (UTC+8),
+    NOT UTC midnight. The previous code used UTC midnight, extending the blackout
+    by an unnecessary 8 hours."""
     import datetime as _dt
-    tomorrow = _dt.date.today() + _dt.timedelta(days=1)
-    until = _dt.datetime.combine(tomorrow, _dt.time.min).isoformat()
-    store.cache_set(_RATE_LIMIT_BACKOFF_KEY, until)
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    # Provider resets at 00:00 CST = 16:00 UTC
+    # If it's already past 16:00 UTC today, the reset already happened; back off
+    # to tomorrow's 16:00 UTC. Otherwise back off to today's 16:00 UTC.
+    reset_today = _dt.datetime.combine(now_utc.date(), _dt.time(16, 0),
+                                       tzinfo=_dt.timezone.utc)
+    if now_utc >= reset_today:
+        until = reset_today + _dt.timedelta(days=1)
+    else:
+        until = reset_today
+    store.cache_set(_RATE_LIMIT_BACKOFF_KEY, until.isoformat())
 
 
 def run_board_scan(scores: list[Score], headlines: list[str],
@@ -146,7 +161,7 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     backoff = _rate_limited_until()
     if backoff:
         try:
-            if _dt.datetime.now() < _dt.datetime.fromisoformat(backoff):
+            if _dt.datetime.now(_dt.timezone.utc) < _dt.datetime.fromisoformat(backoff):
                 return None, f"provider unavailable -- backing off until {backoff[:16]}"
         except ValueError:
             pass    # malformed cached value -- ignore and attempt normally
@@ -195,6 +210,9 @@ def run_board_scan(scores: list[Score], headlines: list[str],
                       else "provider rejected the key (auth/permission error)")
             return None, f"{reason} -- backing off until next reset ({e})"
         raise    # anything else is a real, unexpected failure -- don't swallow it
+    # SUCCESS: clear any active backoff so subsequent scans aren't blocked by a
+    # stale cache entry from a previous transient error.
+    _clear_backoff()
     store.record_call(1)
     try:                                          # cross-project usage visibility only
         import os

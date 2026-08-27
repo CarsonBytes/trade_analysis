@@ -1861,10 +1861,13 @@ def _pending_reason(t: dict, room: float | None, eq: float | None,
     _backoff = board_scan._rate_limited_until()
     if _backoff:
         try:
-            if dt.datetime.now() < dt.datetime.fromisoformat(_backoff):
+            if dt.datetime.now(dt.timezone.utc) < dt.datetime.fromisoformat(_backoff):
+                # Show backoff in CST (UTC+8) since that's the provider's reset schedule
+                _bo_cst = dt.datetime.fromisoformat(_backoff).astimezone(
+                    dt.timezone(dt.timedelta(hours=8)))
                 return (f"The AI board-scan pipeline is currently unavailable (provider "
-                        f"backing off until {_backoff[:16]}) — nothing new can be placed "
-                        "or cancelled until it recovers. This isn't specific to this "
+                        f"backing off until {_bo_cst:%a %H:%M CST}) — nothing new can be "
+                        "placed or cancelled until it recovers. This isn't specific to this "
                         "signal.", "retrying")
         except ValueError:
             pass    # malformed cached value -- ignore and fall through to the normal checks
@@ -3988,5 +3991,14 @@ async def _fleet_route(request):
 
 _webapp.add_route("/status", _status_route, methods=["GET"])
 _webapp.add_route("/fleet", _fleet_route, methods=["GET"])
+
+
+async def _clear_backoff_route(request):
+    from dashboard.web import board_scan
+    board_scan._clear_backoff()
+    return JSONResponse({"ok": True, "msg": "backoff cleared"}, headers=_CORS)
+
+
+_webapp.add_route("/api/clear-backoff", _clear_backoff_route, methods=["POST"])
 
 ui.run(title=f"Quantitative Trading System [{_MODE}]", favicon="📈", port=_DASH_PORT, reload=False, show=False)
