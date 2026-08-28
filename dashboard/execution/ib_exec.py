@@ -1587,13 +1587,6 @@ def sweep_cash() -> dict:
               "ccy": "", "log": ""}
     if not _sweep_on():
         return status
-    # ADDED 2026-08-27: SGOV is a US-listed ETF -- placing MARKET orders when NYSE is
-    # closed just fails/retries every 30s tick for hours. Read-only status (SGOV qty/value)
-    # still updates; only the order placement is skipped.
-    if not within_entry_execution_window():
-        status["ok"] = True          # SGOV holding was read successfully (will read below)
-        status["log"] = "cash-sweep: market closed, rebalance deferred to next US session"
-        return status
     ib = _guard()
     if ib is None:
         return status
@@ -1626,6 +1619,13 @@ def sweep_cash() -> dict:
     status["sgov_value_base"] = sgov_usd * base_per_usd
     if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
         return status                                            # SGOV value, skip rebalancing
+    # ADDED 2026-08-27: SGOV is a US-listed ETF -- placing MARKET orders when NYSE is
+    # closed just fails/retries every 30s tick. The read-only reporting above (SGOV qty,
+    # value, ccy) still runs so the pie chart and stats stay accurate around the clock;
+    # only the order placement below is skipped.
+    if not within_entry_execution_window():
+        status["log"] = "cash-sweep: market closed, rebalance deferred to next US session"
+        return status
     nav_usd = float(summ.get("NetLiquidation", 0.0) or 0.0) / base_per_usd
     if nav_usd < CASH_SWEEP_MIN_NAV_USD:
         status["log"] = (f"cash-sweep: paused until NAV reaches ${CASH_SWEEP_MIN_NAV_USD:,.0f} "
