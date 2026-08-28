@@ -23,6 +23,9 @@ winca.pem
 dashboard.db
 dashboard_live.db
 dashboard_mode.db
+# 2026-08-26: the only sibling not already covered -- live-updating local state that was
+# sitting untracked in dashboard/, one `git add -A` away from being committed.
+dashboard_preview.db
 # exported reports/CSVs
 exports/
 # debug logs

@@ -5,6 +5,129 @@ Last updated 2026-08-26.
 
 ---
 
+### 🐞 FIXED 2026-08-26: five NiceGUI API-drift crashes (three of them hard 500s), plus
+FX pair, flagged-position auto-heal, and fabricated invested/P&L
+
+Same day as the infrastructure entry below, from a parallel session. Two independent
+sessions were editing `dashboard/app.py` and the shared WSL crontab concurrently — see
+"Concurrency hazard" at the end, which cost real uptime.
+
+**A. NiceGUI API drift — the dominant crash class (5 occurrences, 3 of them page-wide 500s).**
+UI code was written against a NEWER NiceGUI API than the 3.12.1 actually pinned in
+`uv.lock`. Each failed only at render time, so each cost a full ~2-minute rebuild cycle
+with the site down:
+- `btn.badge(...)` — `Button` has no `.badge()` method here; a badge is a CHILD element.
+  Fixed: `with btn: ui.badge(...).props("floating")`. Only surfaced once unread events
+  first became non-zero (i.e. once C below started producing real events).
+- `ui.tab("Board", value="board")` — no `value` kwarg; signature is
+  `tab(name, label, icon)`. (Fixed concurrently by the other session.)
+- `ui.input(..., clearable=True)` — no `clearable` kwarg on `ui.input` in 3.12.1
+  (`ui.select`/`ui.toggle` DO have it, which is what makes this easy to get wrong).
+  Fixed via the Quasar prop: `.props("dense outlined clearable")`.
+- `notable_events.recent()` aliased its tier column `AS tier_eff`, so the returned dict
+  had NO `tier` key at all — contradicting the function's own docstring. All six consumers
+  read `ev["tier"]` → `KeyError` → 500. Fixed at the source (alias is now `tier`), with a
+  regression test pinning the contract (`test_recent_exposes_tier_key`).
+- A PERSISTED `alerts_filter="unread"` in `ui_settings` survived a rename of the filter
+  options to `all`/`attention`; `ui.toggle` raises `ValueError` on any value outside its
+  options dict → 500. Fixed by validating the persisted value against `ALERTS_FILTERS`
+  before use, AND correcting the stale `"unread"` default in `_save_settings()` that was
+  re-persisting it.
+
+**Why these keep slipping through:** `app.py` cannot be imported in tests (`ui.run()` at
+module level), so NO test exercises any of this. **Method that actually works:** before
+rebuilding, dump the real installed signatures inside the container and validate the whole
+changed region at once, instead of one crash per rebuild:
+`docker exec quant-dashboard-docker /app/.venv/bin/python -c "from nicegui import ui; import inspect; print(inspect.signature(ui.input))"`
+Same trick applies to any library the UI calls. Two general rules: a persisted UI setting
+must always be validated against its current option set before being handed to a widget
+(renames strand old values in `ui_settings` forever); and a SQL alias must never leak into
+a returned dict's key.
+
+**B. `fx_to_usd()` requested a Forex pair that does not exist.** It asked for
+`Forex(f"{ccy}USD")` unconditionally — but IDEALPRO has no `HKDUSD`; the pair is `USDHKD`
+(and `ib_exec.keep_cash_usd()` already used the correct one for the same currency). This
+failed on EVERY call, continuously, on both stacks, spamming "No security definition"
+and silently falling back to the pegged constant. Fixed: try the CCY-base convention
+first (correct for majors like `EURUSD`), then fall back to the USD-base convention and
+INVERT its close. Two regression tests cover both directions. Note the pegged fallback
+(`1/7.80`) is accurate to <1% given the HKD peg, so this was never a P&L correctness bug.
+Follow-up (still open, non-fatal): `USDHKD` now returns Error 162 "Trading TWS session is
+connected from a different IP address" — an entitlement/session issue, not a bad contract,
+so the pegged fallback is still what's being used.
+
+**C. Flagged positions now auto-heal (`ib_exec.heal_flagged_positions()`).** The inverse of
+the 2026-08-18 naked-position gap: a REAL broker position whose `paper_trades` row already
+resolved (e.g. EXPIRED) without any closing order ever executing. Root cause:
+`close_expired_trades()` only ever looks at `status='OPEN'` rows, so if the broker was
+unreachable on the exact cycle a horizon passed, `resolve_open()` still marked it EXPIRED
+from local price data alone — and once status leaves OPEN, `close_expired_trades()` never
+revisits it. A PERMANENT gap that previously required a human to notice the flagged card
+and run `reopen_trade()` by hand. Now reopens with a fresh horizon automatically, wired
+into `refresh_cheap()` BEFORE `reprotect_naked_positions()`/`close_expired_trades()`.
+Verified live: healed EEM #27 and EFA #29 on its first cycle.
+
+**D. Fabricated "invested"/"P&L" for orders that never filled.** When a trade resolved
+locally while its ENTRY order was still unfilled, `sync_closures()` cancelled the order
+but marked the mirror row `status='CLOSED'` — indistinguishable from a genuinely
+filled-then-closed position. The Recent Closed table and monthly $ attribution then
+computed real-looking dollars from that row's stale order-placement-time `qty`/`risk_money`
+(confirmed live: paper #140 showed "invested $257, P&L +$270" for a position that was
+never funded at all). Fixed: that path now uses the existing `VOID` status — which this
+codebase already defines for exactly this case and already excludes from `executed_ids()` —
+and both display sites now gate on `executed_ids()`, the same broker-truth set the
+neighbouring "funded" column uses. Corrected the 2 affected historical paper rows
+(#137, #140); live had none.
+
+**E. `dashboard/research/llm_veto_replay.py` — does the LLM veto earn its keep?** Replays
+every "LLM vetoed a deterministic BUY/SELL to WAIT" row in `rejected_signals` against real
+subsequent price action: reconstructs the entry/SL/TP it WOULD have used (same
+`compute_facts()`/`compute_sltp()`, fed weekly closes truncated to the veto's own
+timestamp — no look-ahead), then walks forward on daily OHLC with the same
+`resolve()`/`r_multiple()` used for real trades. **Critical detail:** board_scan re-vetoes
+the same still-open setup roughly hourly, so raw row counts massively overstate
+independence — collapses re-detections within 24h per instrument (99 raw rows → 23 real
+episodes). First results: **paper n=19, −0.146R expectancy** (vs +0.047R for
+actually-placed core trades — the veto looks like it IS doing real work); **live n=14,
+−0.012R**, too thin to read. Both well under the n≥30 bar; re-run periodically. Caveat
+baked in: it only replays the deterministic ATR/rr3.0 recipe, so it answers "was the LLM
+right to override THIS signal", not LLM judgment generally.
+
+**F. Concurrency hazard (cost real uptime today).** Two sessions editing the same files and
+the same crontab: `crontab` was REPLACED rather than appended, silently dropping
+`docker-watchdog.sh` — the entry that restarts unhealthy DASHBOARD containers (the mitigation
+for the hang bug). Restored; all three entries must coexist:
+```
+* * * * * /home/cap/docker-watchdog.sh
+* * * * * /home/cap/quant/scripts/gateway-login-watchdog.sh
+0 20 * * 1-5 /home/cap/quant/scripts/gateway-relogin.sh both scheduled >> /home/cap/gateway-restart.log 2>&1
+```
+**Rule: always `crontab -l` first and append; never write a crontab from memory.**
+
+**G. Dropped scratch files (2026-08-26).** Deleted as untracked clutter, recorded here so
+the intent isn't lost: `HANDOFF.txt` (a stale 2026-06-25 copy of this file),
+`DashboardAppLive-recovery.xml` (scheduled-task export for the DECOMMISSIONED native live
+deployment), and `.kiro/specs/trade-performance-optimization/` — a ~1,500-line
+requirements+design spec for a "Trade Performance Optimization" system
+(Trade_Performance_Evaluator, Opportunity_Cost_Analyzer, Trade_Attribution_Engine,
+Alternative_Trade_Scorer, Regret_Matrix over non-taken signals). **Never implemented**
+(`tasks.md` was empty). Note `llm_veto_replay.py` (E above) independently implements the
+core of its regret/opportunity-cost idea for the LLM-veto slice specifically. Also added
+`dashboard_preview.db` to `.gitignore` — the only local SQLite file not already ignored.
+
+**Files changed**: `dashboard/app.py`, `dashboard/core/notable_events.py`,
+`dashboard/data/ib_client.py`, `dashboard/execution/ib_exec.py`,
+`dashboard/execution/broker.py`, `dashboard/web/service.py`,
+`dashboard/research/llm_veto_replay.py` (new), `dashboard/tests/test_ib_exec.py`,
+`dashboard/tests/test_ib_client.py`, `dashboard/tests/test_notable_events.py`.
+
+**Test suite: 195 passing.** During this work 4 `test_notable_events.py` tests were failing
+(the new Alerts-v3 dedupe collapses events those older assertions expected as separate
+rows — verified failing independently of today's changes); they were updated to the new
+intended behaviour before this entry was written and the file is now fully green.
+
+---
+
 ### 🔧 INFRASTRUCTURE 2026-08-26: public-outage chain, native/Docker session fight, and a self-healing gateway-relogin stack deployed
 
 A multi-hour incident chain, root-caused end to end. The durable writeup lives in
