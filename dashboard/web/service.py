@@ -413,6 +413,20 @@ def refresh_cheap() -> None:
             STATE["portfolio_room_usd"] = broker.portfolio_room_usd()
         except Exception as e:
             log.debug("equity/portfolio_room cache error: %s", e)
+        # ADDED 2026-08-28: the REAL account FX rate, cached here for the same reason as
+        # everything else in this block -- portfolio_panel() converts USD position P&L into
+        # the account's base currency on the render path, and must never make a broker call
+        # there. It previously used ib_client._PEG_USD_PER's hardcoded 1/7.80, which is
+        # 0.51% off the actual rate (measured live: 7.8399 HKD/USD) -- small, but it made
+        # displayed P&L disagree with IBKR's own figures for no reason now that the real
+        # rate is reliably available (see ib_client.fx_rate_from_account).
+        try:
+            _ccy = (STATE.get("account") or {}).get("_ccy") or ""
+            if _ccy and _ccy != "USD":
+                from dashboard.data import ib_client as _ibc
+                STATE["fx_usd_per_base"] = _ibc.fx_to_usd(_ccy)
+        except Exception as e:                     # noqa: BLE001 -- panel falls back to the peg
+            log.debug("fx rate cache error: %s", e)
     else:
         STATE["equity_usd"] = None
         STATE["portfolio_room_usd"] = None

@@ -1268,7 +1268,13 @@ def portfolio_panel() -> None:
         ui.label("IBKR account data not loaded yet — connecting to gateway…")\
             .classes("text-sm text-grey")
         return
-    usd_to_base = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)   # USD position vals -> base ccy
+    # USD position vals -> base ccy. Prefer the REAL account rate cached by refresh_cheap()
+    # (2026-08-28); the hardcoded peg is 0.51% off the actual HKD rate and is now only the
+    # fallback for when the broker read hasn't landed yet. Read from STATE, never fetched
+    # here -- this is a render path and must not make a broker call (see the 2026-08-25
+    # faulthandler note on health_banner).
+    _fx = service.STATE.get("fx_usd_per_base")
+    usd_to_base = 1.0 / (_fx or ib_client._PEG_USD_PER.get(ccy, 1.0))
     upnl = sum(p.get("profit", 0.0) for p in positions.values()) * usd_to_base
     hist, _ts = store.cache_get("equity_history")
     hist = paper.with_inception(hist or [])

@@ -344,21 +344,73 @@ _INVERTED_FX = frozenset({"HKD", "CNY", "TWD", "INR", "THB", "PHP", "KRW",
                           "HUF", "CZK", "TRY", "ZAR", "MXN"})
 
 
+def fx_rate_from_account(ib, ccy: str, acct: str | None = None) -> float | None:
+    """USD per 1 unit of `ccy`, derived from the account's OWN ExchangeRate values.
+
+    ADDED 2026-08-28 to fix IBKR error 162 ("Historical Market Data Service error message:
+    Trading TWS session is connected from a different IP address"), which made the
+    historical-bars path below fail on EVERY call whenever the same IBKR login is active
+    elsewhere (phone/web/TWS) -- an extremely common state, and not something this app can
+    control. That path needs a market-data entitlement; this one needs none.
+
+    IBKR reports, in ib.accountValues(), an `ExchangeRate` row per currency = units of the
+    account's BASE currency per 1 unit of that currency. So USD per 1 ccy is simply
+    rate(ccy) / rate(USD) -- e.g. on an HKD-base account: HKD 1.00 / USD 7.8395 = 0.12756
+    USD per HKD. Verified against the live account (U12991898). accountValues() is a LOCAL
+    snapshot ib_async keeps updated from the gateway's own account stream, not a
+    request-and-wait round trip, so this is cheap as well as entitlement-free.
+
+    `acct` MUST be resolved by the caller, never looked up in here: account_id() takes
+    `_LOCK` and marshals onto the IB loop thread, so calling it from inside the lambda below
+    (which already runs ON that thread, under a lock the caller holds) deadlocks until the
+    timeout -- found the hard way, this returned None on every live call until it was
+    hoisted out."""
+    try:
+        avs = call(lambda: ib.accountValues(acct or "") or [], timeout=8)
+        rate_ccy = rate_usd = None
+        for a in avs:
+            if getattr(a, "tag", None) != "ExchangeRate":
+                continue
+            try:
+                val = float(a.value)
+            except (TypeError, ValueError):
+                continue
+            if a.currency == ccy:
+                rate_ccy = val
+            elif a.currency == "USD":
+                rate_usd = val
+        if rate_ccy and rate_usd and rate_usd > 0:
+            return rate_ccy / rate_usd
+    except Exception:                                  # noqa: BLE001 -- never break the caller;
+        pass                                           # fx_to_usd still has 2 more fallbacks
+    return None
+
+
 def fx_to_usd(ccy: str) -> float | None:
     """USD per 1 unit of `ccy` (1.0 for USD). For converting a non-USD account's
-    equity into USD before sizing US ETFs. Uses DELAYED historical FX (works without a
-    real-time sub); falls back to a pegged constant (e.g. HKD). None if all fail.
+    equity into USD before sizing US ETFs. Falls back to a pegged constant (e.g. HKD).
+    None if all routes fail.
 
     FIXED 2026-08-25: was requesting Forex(f"{ccy}USD") (e.g. "HKDUSD") unconditionally
     -- IDEALPRO doesn't list that pair at all for HKD, generating error 200 on every
     call. FIXED 2026-08-27: try the correct convention first for known inverted pairs
-    (HKD, CNY, etc.) so the failing request is never made in the first place."""
+    (HKD, CNY, etc.) so the failing request is never made in the first place.
+    FIXED 2026-08-28: prefer the account's own ExchangeRate (see fx_rate_from_account) --
+    the historical-bars route needs a market-data entitlement and returns error 162
+    whenever the same IBKR login is active from another IP, which was making this fall
+    all the way through to the pegged constant on every single call."""
     ccy = (ccy or "USD").upper()
     if ccy == "USD":
         return 1.0
+    # Resolved BEFORE taking _LOCK: account_id() takes _LOCK itself (not re-entrant) and
+    # marshals onto the IB loop thread -- see fx_rate_from_account's docstring.
+    acct = account_id()
     with _LOCK:
         ib = _ensure_conn()
         if ib is not None:
+            rate = fx_rate_from_account(ib, ccy, acct)
+            if rate:
+                return rate
             ib_async = _mod()
             # Known inverted pairs go first (USDHKD); others try CCYUSD first (EURUSD)
             if ccy in _INVERTED_FX:

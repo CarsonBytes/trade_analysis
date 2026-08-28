@@ -246,6 +246,130 @@ def test_stock_contract_primary_exchange_kwarg():
           captured["args"], ("GLD", "SMART", "USD", {}))
 
 
+class _AV:
+    """Minimal stand-in for ib_async's AccountValue rows."""
+    def __init__(self, tag, value, currency):
+        self.tag, self.value, self.currency = tag, value, currency
+
+
+def test_fx_rate_from_account_derives_usd_per_ccy():
+    print("\nfx_rate_from_account(): ADDED 2026-08-28 -- IBKR's own ExchangeRate rows give "
+          "units of BASE per 1 CCY, so USD per 1 CCY is rate(ccy)/rate(USD). Real values "
+          "from the live HKD-base account (U12991898): HKD 1.00, USD 7.8395142:")
+    from dashboard.data import ib_client
+
+    rows = [_AV("ExchangeRate", "1.00", "BASE"), _AV("ExchangeRate", "1.00", "HKD"),
+            _AV("ExchangeRate", "7.8395142", "USD"), _AV("NetLiquidation", "222692.91", "HKD")]
+
+    with mock.patch.object(ib_client, "call", side_effect=lambda fn, **kw: rows), \
+         mock.patch.object(ib_client, "account_id", return_value="U12991898"):
+        rate = ib_client.fx_rate_from_account(mock.MagicMock(), "HKD")
+
+    check("USD per HKD = rate(HKD)/rate(USD)", round(rate, 7), round(1.0 / 7.8395142, 7))
+    check("differs from the hardcoded 1/7.80 peg", round(rate, 7) == round(1.0 / 7.80, 7), False)
+
+
+def test_fx_rate_from_account_returns_none_when_rate_missing():
+    print("fx_rate_from_account(): no usable ExchangeRate rows -> None, so fx_to_usd falls "
+          "through to its other routes rather than returning a wrong number:")
+    from dashboard.data import ib_client
+
+    with mock.patch.object(ib_client, "call", side_effect=lambda fn, **kw: [
+            _AV("NetLiquidation", "1000", "HKD")]), \
+         mock.patch.object(ib_client, "account_id", return_value="U1"):
+        check("no ExchangeRate rows -> None",
+              ib_client.fx_rate_from_account(mock.MagicMock(), "HKD"), None)
+
+    with mock.patch.object(ib_client, "call", side_effect=RuntimeError("no loop")), \
+         mock.patch.object(ib_client, "account_id", return_value="U1"):
+        check("a raising broker read -> None, never propagates",
+              ib_client.fx_rate_from_account(mock.MagicMock(), "HKD"), None)
+
+
+def test_fx_rate_from_account_never_resolves_account_id_itself():
+    print("fx_rate_from_account(): REGRESSION -- it must NOT call account_id() internally. "
+          "account_id() takes _LOCK (non-re-entrant) and marshals onto the IB loop thread, "
+          "so looking it up inside the lambda -- which already runs ON that thread, under a "
+          "lock fx_to_usd holds -- deadlocked until timeout and returned None on every live "
+          "call, silently falling through to the pegged constant:")
+    from dashboard.data import ib_client
+
+    rows = [_AV("ExchangeRate", "1.00", "HKD"), _AV("ExchangeRate", "7.8395142", "USD")]
+    seen = {"acct_arg": None}
+
+    def _fake_call(fn, **kw):
+        return rows
+
+    with mock.patch.object(ib_client, "call", side_effect=_fake_call), \
+         mock.patch.object(ib_client, "account_id",
+                           side_effect=AssertionError(
+                               "account_id() must be resolved by the CALLER, not in here")):
+        rate = ib_client.fx_rate_from_account(mock.MagicMock(), "HKD", "U12991898")
+    check("computed the rate without ever calling account_id()",
+          round(rate, 7), round(1.0 / 7.8395142, 7))
+
+    # and fx_to_usd must resolve it OUTSIDE the lock, before calling the helper
+    def _capture(ib, ccy, acct=None):
+        seen["acct_arg"] = acct
+        return 1.0 / 7.8395142
+
+    with mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "account_id", return_value="U12991898"), \
+         mock.patch.object(ib_client, "fx_rate_from_account", side_effect=_capture):
+        ib_client.fx_to_usd("HKD")
+    check("fx_to_usd passes the resolved account through", seen["acct_arg"], "U12991898")
+
+
+def test_fx_to_usd_prefers_account_rate_over_historical_bars():
+    print("fx_to_usd(): REGRESSION for the 2026-08-28 error-162 incident -- when the same "
+          "IBKR login is active from another IP, EVERY reqHistoricalData FX call fails with "
+          "'Trading TWS session is connected from a different IP address', so this used to "
+          "fall all the way through to the pegged constant. The account's own ExchangeRate "
+          "needs no market-data entitlement and must be preferred, with NO bar request made:")
+    from dashboard.data import ib_client
+
+    requested = []
+
+    class FakeForex:
+        def __init__(self, symbol):
+            requested.append(symbol)
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Forex = FakeForex
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "fx_rate_from_account", return_value=1.0 / 7.8395142), \
+         mock.patch.object(ib_client, "_run",
+                           side_effect=AssertionError("must NOT request FX bars")):
+        rate = ib_client.fx_to_usd("HKD")
+
+    check("used the account rate", round(rate, 7), round(1.0 / 7.8395142, 7))
+    check("no Forex contract constructed at all", requested, [])
+
+    # and when the account route yields nothing, the bar route still runs (error-162 case
+    # resolved, or a currency with no ExchangeRate row) -- then the peg as the last resort
+    class _Bar:
+        def __init__(self, close):
+            self.close = close
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "fx_rate_from_account", return_value=None), \
+         mock.patch.object(ib_client, "_run", side_effect=lambda *a, **k: [_Bar(7.80)]):
+        rate2 = ib_client.fx_to_usd("HKD")
+    check("falls back to the bar route when the account rate is unavailable",
+          round(rate2, 6), round(1.0 / 7.80, 6))
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "fx_rate_from_account", return_value=None), \
+         mock.patch.object(ib_client, "_run", side_effect=Exception("Error 162")):
+        rate3 = ib_client.fx_to_usd("HKD")
+    check("both broker routes failing -> pegged constant (never None for HKD)",
+          round(rate3, 6), round(1.0 / 7.80, 6))
+
+
 def test_fx_to_usd_uses_usd_base_first_for_hkd():
     print("\nfx_to_usd(): HKD is in _INVERTED_FX -- must try USDHKD first (correct), "
           "not HKDUSD (which doesn't exist on IBKR and generated error 200 on every "
