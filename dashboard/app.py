@@ -17,6 +17,7 @@ from dashboard.core import net  # noqa: F401  -- TLS bootstrap first
 
 import asyncio
 import datetime as dt
+import math
 import os
 import signal
 import faulthandler
@@ -251,12 +252,38 @@ def _freshness_label(ts: dt.datetime | None, warn_min: int = 90, bad_min: int = 
 
 # Coarse asset-class grouping for the exposure-by-class bar: instruments.py's fine-grained
 # classes rolled up to the buckets the README's universe description actually uses.
+# COMPLETED 2026-08-31: this covered only 14 of the 48 asset_class values actually present
+# in instruments.py, and _asset_class_for() falls back to `.title()` for anything unmapped --
+# so two thirds of the universe rendered its raw enum as a bucket name ("Muni_Hy",
+# "Us_Sector", "Ig_Credit", "Commodity2", "Factor_Eq2"...), each sitting in its own
+# one-instrument slice instead of being grouped. Confirmed live on paper: HYD showed as a
+# "Muni_Hy" bucket at 76% of exposure. Every value in the universe is now mapped; keep this
+# in sync when a new asset_class is introduced (the .title() fallback stays as the honest
+# last resort rather than silently bucketing an unknown into something wrong).
 _COARSE_CLASS = {
-    "metal": "Metals", "index": "Equity", "intl_eq": "Equity", "china_eq": "Equity",
-    "rate": "Rates",
-    "credit": "Credit", "convertible": "Credit", "preferred": "Credit", "em_bond": "Credit",
-    "commodity": "Commodities", "mlp": "Commodities", "energy": "Commodities",
-    "reit": "REITs", "intl_reit": "REITs", "inflation": "Inflation",
+    # equity, incl. sector/factor/thematic sleeves and equity-like miners & infrastructure
+    "index": "Equity", "intl_eq": "Equity", "intl_eq2": "Equity", "china_eq": "Equity",
+    "us_sector": "Equity", "factor_eq": "Equity", "factor_eq2": "Equity",
+    "frontier_eq": "Equity", "thematic_eq": "Equity", "covered_call": "Equity",
+    "bdc": "Equity", "miner2": "Equity", "uranium": "Equity", "timber": "Equity",
+    "infra": "Equity",
+    # precious/industrial metals held as the metal itself
+    "metal": "Metals", "metal2": "Metals", "metal3": "Metals",
+    # broad commodity, energy and ags
+    "commodity": "Commodities", "commodity2": "Commodities", "energy": "Commodities",
+    "energy2": "Commodities", "grain": "Commodities", "soft": "Commodities",
+    "mlp": "Commodities",
+    # government / securitised duration
+    "rate": "Rates", "intl_rate": "Rates", "floating_rate": "Rates", "mbs": "Rates",
+    "muni": "Rates",
+    # spread product
+    "credit": "Credit", "ig_credit": "Credit", "ig_floating": "Credit",
+    "intl_credit": "Credit", "convertible": "Credit", "preferred": "Credit",
+    "bank_loan": "Credit", "muni_hy": "Credit", "em_bond": "Credit",
+    "em_local_debt": "Credit",
+    "reit": "REITs", "intl_reit": "REITs", "mortgage_reit": "REITs",
+    "inflation": "Inflation", "intl_inflation": "Inflation",
+    "fx": "FX", "merger_arb": "Alternatives",
 }
 
 
@@ -1503,14 +1530,21 @@ def portfolio_panel() -> None:
                     if _tk in _seen_tk:
                         continue
                     _seen_tk.add(_tk)
-                _mv_usd = _p["volume"] * _p["open"] + _p.get("profit", 0.0)
-                if _mv_usd <= 0:
+                # FIXED 2026-08-31: live_positions()' `volume` is abs(position), so a SHORT
+                # used to be added as POSITIVE exposure -- confirmed live on paper, where a
+                # -6,402-share HYD short displayed as +$319,562, i.e. 76% of the book, in the
+                # wrong direction. `direction` was already available and simply ignored.
+                # Signed here so a short reduces its class the way real exposure does; the
+                # gross figure below sums absolute values, which is what the cap is about.
+                _sign = -1.0 if _p.get("direction") == "short" else 1.0
+                _mv_usd = _sign * (_p["volume"] * _p["open"]) + _p.get("profit", 0.0)
+                if _mv_usd == 0:
                     continue
                 _sym = _sym_of_id.get(_pid) or _p.get("symbol")
                 _cls = _asset_class_for(_sym) or "Other"
                 _cls_sum[_cls] = _cls_sum.get(_cls, 0.0) + _mv_usd * usd_to_base
             if _cls_sum:
-                _gross_pct = sum(_cls_sum.values()) / nl * 100.0
+                _gross_pct = sum(abs(v) for v in _cls_sum.values()) / nl * 100.0
                 try:
                     _cap_pct = float(os.environ.get("PORTFOLIO_CAP", "1.0")) * 100.0
                 except Exception:                          # noqa: BLE001
@@ -1532,18 +1566,28 @@ def portfolio_panel() -> None:
                 _classes_sorted = sorted(_cls_sum.items(), key=lambda kv: -kv[1])
                 _palette = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
                             "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc"]
+                # FIXED 2026-08-31: the axis was hard-coded to max=100 with an implicit min
+                # of 0, so a negative (short) class rendered entirely off-chart -- invisible
+                # rather than wrong-looking -- and a class above 100% of NAV was clipped.
+                # Both bounds now follow the real data, rounded out to a 10% step.
+                _pcts = [v / nl * 100.0 for _, v in _classes_sorted] or [0.0]
+                _xmax = max(100.0, math.ceil(max(_pcts) / 10.0) * 10.0)
+                _xmin = min(0.0, math.floor(min(_pcts) / 10.0) * 10.0)
                 ui.echart({
                     "tooltip": {"trigger": "axis",
                                 "formatter": "{b}: {c}%"},
                     "grid": {"left": 90, "right": 40, "top": 5, "bottom": 25},
-                    "xAxis": {"type": "value", "max": 100,
+                    "xAxis": {"type": "value", "max": _xmax, "min": _xmin,
                               "axisLabel": {"formatter": "{value}%"}},
                     "yAxis": {"type": "category",
                               "data": [f"{k} ({v / nl * 100:.1f}%)"
                                        for k, v in reversed(_classes_sorted)]},
                     "series": [{"type": "bar", "barWidth": 14,
                                 "data": [{"value": round(v / nl * 100, 2),
-                                          "itemStyle": {"color": _palette[i % len(_palette)]}}
+                                          # a negative class is a NET SHORT -- colour it so it
+                                          # reads as one instead of as just another slice
+                                          "itemStyle": {"color": ("#c0392b" if v < 0 else
+                                                                  _palette[i % len(_palette)])}}
                                          for i, (_, v) in enumerate(reversed(_classes_sorted))]}],
                 }).classes("w-full").style(
                     f"height: {min(44 + 28 * len(_classes_sorted), 260)}px")

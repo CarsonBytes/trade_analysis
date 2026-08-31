@@ -838,10 +838,25 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
     con_id, qty, _ = row
 
     def _do():
-        contract = next((p.contract for p in ib_client.filter_by_account(ib.positions() or [], acct)
-                         if p.contract.conId == con_id), None)
-        if contract is None:
+        held = next((p for p in ib_client.filter_by_account(ib.positions() or [], acct)
+                     if p.contract.conId == con_id), None)
+        if held is None or not held.position:
             return None                                  # already flat; sync_closures handles it
+        contract = held.contract
+        # SAFETY GUARD, ADDED 2026-08-31 after a runaway-loop incident: take BOTH the side
+        # and the size from the REAL broker position, never from the ib_mirror qty alone.
+        # This used to always send SELL abs(qty), so when the mirror said "+66 long" while
+        # the broker was actually SHORT, every call sold another 66 and drove the position
+        # FURTHER short instead of flattening it -- HYD reached -6,336 shares against a local
+        # record of +66. An order from here must only ever REDUCE exposure: close in the
+        # direction opposite the real position, and never for more than is really held (also
+        # capped at the mirror qty, so one trade can't flatten another's shares when several
+        # share a conId). See HANDOFF 2026-08-31.
+        real = float(held.position)
+        close_qty = min(abs(float(qty)), abs(real))
+        if close_qty <= 0:
+            return None
+        side = "SELL" if real > 0 else "BUY"
         # ib.reqAllOpenOrders() is a SYNC wrapper that internally calls
         # util.run() -> loop.run_until_complete() -- illegal from inside a callback
         # already executing ON that same running loop (which is exactly where _do()
@@ -855,7 +870,7 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
             if o.contract.conId == con_id:
                 ib.cancelOrder(o.order)
         import ib_async
-        market = ib_async.MarketOrder("SELL", abs(qty))
+        market = ib_async.MarketOrder(side, close_qty)
         # FIXED 2026-08-18: found live -- an ib_async MarketOrder with tif left unset gets
         # outright CANCELLED by this account's order presets ("Error 10349: Order TIF was set
         # to DAY based on order preset", terminal status Cancelled, filled=0) rather than
@@ -1278,6 +1293,10 @@ def live_positions() -> dict | None:
     return out
 
 
+HEAL_LOG_KEY = "heal_flagged_last"   # {paper_id: unix_ts} of the last heal, for the cooldown
+HEAL_COOLDOWN_H = 6                  # GUARD 3: at most one heal per trade per this many hours
+
+
 def heal_flagged_positions() -> list[str]:
     """Structural fix (2026-08-25): the OTHER direction of the same root-cause class as
     reprotect_naked_positions() (paper_trades resolving independently of real broker
@@ -1295,20 +1314,68 @@ def heal_flagged_positions() -> list[str]:
     Auto-heals it the same way a human already had to: reopen_trade() resets the row to
     OPEN with a FRESH horizon (not the stale original), so close_expired_trades() (or an
     ordinary SL/TP/dynamic exit) can act on it for real next cycle -- same primitive,
-    just no longer requiring someone to notice the flagged card first."""
+    just no longer requiring someone to notice the flagged card first.
+
+    DISABLED at the call site since 2026-08-31 -- see service.py. Reopening a trade whose
+    price is ALREADY past its own SL/TP created a runaway order loop: reprotect_naked_
+    positions() saw a freshly-OPEN funded position with no bracket, fired a market order,
+    resolve_open() re-resolved it, and the next tick flagged it again (~96 iterations, HYD
+    to -6,336 shares). The guards below close that cycle -- but do NOT re-enable this until
+    an account's existing flagged positions have been reconciled, or it will immediately
+    start healing whatever is already broken there.
+
+    GUARD 1 -- never reopen a trade that is already past its own SL/TP: it would just be
+    re-resolved on the same cycle, which is precisely the loop. Such a position needs a real
+    close (or human review), not a fresh horizon.
+    GUARD 2 -- never reopen when the real broker position CONTRADICTS the trade's direction
+    (a "long" trade sitting on a short position is corrupt state, not a healable orphan).
+    GUARD 3 -- heal each paper_id at most once per HEAL_COOLDOWN_H, so any residual cycle
+    is bounded to a trickle instead of one order per tick."""
     positions = live_positions()
     if not positions:
         return []
     with paper._LOCK, _conn() as c:
         open_ids = {r[0] for r in c.execute(
             "SELECT id FROM paper_trades WHERE status='OPEN'").fetchall()}
+    journal = {t["id"]: t for t in paper.all_trades()}
+    import time as _time
+    from dashboard.core import store
+    healed, _hts = store.cache_get(HEAL_LOG_KEY)
+    healed = dict(healed or {})
+    now_s = int(_time.time())
     logs: list[str] = []
     from dashboard.core import notable_events
-    for paper_id in positions:
+    for paper_id, pos in positions.items():
         if paper_id in open_ids:
             continue
+        t = journal.get(paper_id)
+        if t is None:
+            continue
+        last = healed.get(str(paper_id))
+        if last and (now_s - int(last)) < HEAL_COOLDOWN_H * 3600:
+            continue                                       # GUARD 3: cooldown
+        px = pos.get("current_price")
+        long = (t.get("direction") == "long")
+        if px:                                             # GUARD 1: already past SL/TP
+            past_tp = (px >= float(t["tp"])) if long else (px <= float(t["tp"]))
+            past_sl = (px <= float(t["sl"])) if long else (px >= float(t["sl"]))
+            if past_tp or past_sl:
+                log.warning("ib_exec: NOT healing #%s %s -- price %.4f is already past its "
+                            "own %s; reopening would just re-resolve it (the 2026-08-31 "
+                            "loop). Needs a real close or review.",
+                            paper_id, t["instrument"], px, "TP" if past_tp else "SL")
+                continue
+        real_qty = pos.get("volume") or 0.0
+        real_dir = pos.get("direction")
+        if real_qty and real_dir and (real_dir == "long") != long:
+            log.warning("ib_exec: NOT healing #%s %s -- trade is %s but the broker position "
+                        "is %s; corrupt state, not a healable orphan.",
+                        paper_id, t["instrument"], t.get("direction"), real_dir)
+            continue                                       # GUARD 2: direction mismatch
         msg = paper.reopen_trade(paper_id)
         if msg:
+            healed[str(paper_id)] = now_s
+            store.cache_set(HEAL_LOG_KEY, healed)
             logs.append(msg)
             log.warning("ib_exec: %s", msg)
             notable_events.record(f"Flagged position auto-healed: {msg}", level="warning")

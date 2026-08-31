@@ -458,6 +458,34 @@ cost of real operational overhead to keep it running correctly.
   read — cached account data reports high `acct_age_sec` / `ok:false`, so a stuck login
   can't masquerade as healthy.
 
+### Order-placing safety rules (added 2026-08-31, after a runaway-order incident)
+
+A loop between two independently-correct repair functions placed a market order every
+refresh tick until a paper position reached **−6,336 shares short against a local record of
++66 long**, pushing GrossPositionValue to 4.7× the account's own NAV. Nothing about it was
+specific to paper; the same code was live. The rules that came out of it:
+
+1. **An order that repairs state must only ever REDUCE exposure.** `manual_close_position()`
+   now takes both side and size from the *real* broker position, never from the `ib_mirror`
+   qty — it used to always send `SELL abs(qty)`, which kept selling into an existing short.
+   Pinned by `test_manual_close_position_only_ever_reduces_exposure`.
+2. **Never "repair" a trade whose price is already past its own SL/TP.** Reopening one just
+   invites the next stage of the pipeline to close it and `resolve_open()` to re-resolve it
+   — that *is* the loop. Such a position needs a real close or human review.
+3. **Rate-limit any self-healing action per trade** (`HEAL_COOLDOWN_H`), so a residual cycle
+   is a trickle rather than one order per tick.
+4. **Repair functions must be tested against each other, not just in isolation.** The unit
+   test for the new function passed throughout — it mocked the broker away, so it could not
+   see that the function *upstream* re-armed the very condition the function *downstream*
+   acted on. Wiring a new step into `refresh_cheap()` means reasoning about every later step
+   in the same cycle.
+5. **A wrong number is often a symptom, not the bug.** This surfaced as Total P&L reading
+   −4,751,290 HKD (−82%). The P&L maths was correct; the loop had fabricated cash/GPV deltas,
+   which `detect_external_cash_flow()` faithfully booked as 40 phantom ~103k "deposits".
+   `heal_flagged_positions()` stays **disabled** at its call site in `web/service.py` until an
+   account's existing flagged positions are reconciled — re-enabling it against broken state
+   would simply start healing the breakage.
+
 ---
 
 ## Setup (uv)

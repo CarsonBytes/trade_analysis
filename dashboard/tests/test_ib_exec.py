@@ -1885,6 +1885,86 @@ def test_within_entry_execution_window_lse_vs_nyse():
           ib_exec.within_entry_execution_window(ny_midday, instrument="CSPX"), False)
 
 
+def _manual_close_order(real_position, mirror_qty, direction="long"):
+    """Run manual_close_position() against a fake broker holding `real_position` shares and
+    return the (side, qty) of the order it sent, or None if it sent nothing."""
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    class _C:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _P:
+        def __init__(self, qty):
+            self.contract = _C(555)
+            self.position = qty
+
+    sent = {}
+
+    class _FakeIB:
+        def positions(self):
+            return [_P(real_position)] if real_position else []
+        def openTrades(self):
+            return []
+        def cancelOrder(self, o):
+            pass
+        def placeOrder(self, contract, order):
+            sent["order"] = (order.action, order.totalQuantity)
+            return object()
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     f"(1,'2026-08-01T00:00:00','HYD','{direction}','ATR rr3.0',"
+                     "50.0,48.0,56.0,3.0,66,'OPEN')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     f"(1,0,555,'HYD',{mirror_qty},100.0,'','2026-08-01T00:00:00','OPEN','etf')")
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="DU1"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, a: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            ib_exec.manual_close_position({"id": 1, "instrument": "HYD",
+                                           "direction": direction}, "test")
+        return sent.get("order")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_manual_close_position_only_ever_reduces_exposure():
+    print("\nmanual_close_position(): REGRESSION for the 2026-08-31 runaway-loop incident. It "
+          "used to send SELL abs(mirror_qty) unconditionally, so when the mirror said '+66 "
+          "long' while the broker was actually SHORT, every call sold ANOTHER 66 and drove "
+          "the position further short (HYD hit -6,336 against a local record of +66). An "
+          "order from this function must only ever REDUCE |position|:")
+
+    check("real +100 long, mirror 66 -> SELL 66 (normal flatten, capped at mirror qty)",
+          _manual_close_order(100, 66), ("SELL", 66.0))
+    check("real +40 long, mirror 66 -> SELL 40 (never sells more than is really held)",
+          _manual_close_order(40, 66), ("SELL", 40.0))
+    check("real -6336 SHORT, mirror 66 -> BUY 66 (reduces the short; the old code SOLD here)",
+          _manual_close_order(-6336, 66), ("BUY", 66.0))
+    check("real -20 short, mirror 66 -> BUY 20 (never buys more than the real short)",
+          _manual_close_order(-20, 66), ("BUY", 20.0))
+    check("broker flat -> no order at all", _manual_close_order(0, 66), None)
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

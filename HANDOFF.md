@@ -1,7 +1,78 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-26.
+Last updated 2026-08-31.
+
+---
+
+### 🔥 INCIDENT 2026-08-31: `heal_flagged_positions()` caused a RUNAWAY ORDER LOOP --
+disabled; order-safety guard added; phantom cash flows purged; asset-class panel fixed
+
+**Surfaced as** the paper dashboard showing `Total P&L: HKD -4,751,290 (-82.21%)`. The P&L
+arithmetic was correct -- its INPUTS had been fabricated by a loop.
+
+**The loop** (paper, every ~75s, ~96 iterations):
+1. `heal_flagged_positions()` (added 2026-08-25, same session) reopened #150 HYD -- whose
+   price was ALREADY past its stop -- giving it a fresh horizon and `status='OPEN'`.
+2. `reprotect_naked_positions()`, running later in the SAME `refresh_cheap()` cycle, then saw
+   an OPEN funded position with no resting bracket and price past its SL, and fired a
+   **market order** ("flatten order sent").
+3. `resolve_open()` re-resolved it to LOSS -> next tick it was "flagged" again -> goto 1.
+
+**Damage (paper only):** HYD driven to **-6,336 shares SHORT** against a local record of +66
+LONG; AMLP 652 vs mirror 37; CPER 746 vs 293; `GrossPositionValue` inflated to 4,849,992 HKD
+= **4.7x the account's own NAV**. The resulting per-tick cash/GPV deltas then fooled
+`detect_external_cash_flow()` (whose signature is `d_cash + d_gpv`) into logging **41 phantom
+"deposits" averaging ~103k HKD, 4.9M total** -- which is what produced the -82%.
+
+**LIVE was never in the loop** (verified in its logs: zero reopens, zero flatten orders). Its
+two healed positions, EEM #27 and EFA #29, were not past their stops so never re-triggered.
+But live runs the same code and was one badly-placed flagged position away from doing this
+with real money.
+
+**Fixes shipped:**
+- `web/service.py`: `heal_flagged_positions()` call **DISABLED** behind
+  `HEAL_FLAGGED_ENABLED = False`. Provably breaks the cycle -- without `status='OPEN'`,
+  `reprotect_naked_positions()` skips the trade entirely. Verified: 4 refresh ticks per stack,
+  zero reopens, zero orders; cash went flat (was climbing ~20k/tick).
+- `ib_exec.manual_close_position()`: **order-safety guard** -- side AND size now come from the
+  REAL broker position, never the `ib_mirror` qty. It used to always send `SELL abs(qty)`, so
+  with the mirror saying "+66 long" and the broker actually SHORT, each call sold another 66
+  and drove the position FURTHER short. Now: close in the direction opposite the real
+  position, never more than is really held, nothing at all when flat. This protects
+  `reprotect_naked_positions()` too, which is still ENABLED -- it was a latent live risk
+  independent of the heal function. Test:
+  `test_manual_close_position_only_ever_reduces_exposure`.
+- `ib_exec.heal_flagged_positions()`: three guards for any future re-enable -- (1) never
+  reopen a trade already past its SL/TP, (2) never reopen when the real broker position
+  contradicts the trade's direction, (3) `HEAL_COOLDOWN_H = 6` per paper_id.
+- Paper's 41 phantom cash flows purged (backed up to cache key
+  `cash_flows_phantom_backup_20260831`, nothing destroyed). Total P&L returned to
+  **+1,929.77 HKD (+0.19%)**. Zero legitimate flows existed to preserve -- the paper account
+  has never had a real deposit.
+
+**Also fixed the same session -- "Exposure by asset class" was wrong on both stacks:**
+- `_COARSE_CLASS` mapped only **14 of the 48** `asset_class` values in `instruments.py`;
+  `_asset_class_for()` falls back to `.title()`, so two thirds of the universe rendered its
+  raw enum as its own one-instrument bucket ("Muni_Hy", "Us_Sector", "Ig_Credit",
+  "Commodity2"...). All 48 now mapped, with `test_asset_classes.py` failing the build if a
+  new `asset_class` is ever added unmapped (it AST-parses the map out of `app.py`, which
+  cannot be imported in a test).
+- SHORT positions were counted as POSITIVE exposure: `live_positions()`'s `volume` is
+  `abs(position)` and `direction` was simply ignored. HYD's short displayed as **+$319,562,
+  76% of the book, in the wrong direction**. Now signed (gross % sums absolute values, which
+  is what the cap means), the bar chart's axis follows the real range instead of a hardcoded
+  `max=100` with an implicit 0 floor (a negative bar was previously invisible), and a net
+  short is coloured red.
+
+**STILL OPEN -- needs a decision:** the paper account's POSITIONS are still corrupt (the
+-6,336 HYD short, oversized AMLP/CPER). Cleaning up means placing real orders to unwind, and
+at the time of writing US markets were closed and buying back the short (~$316k) exceeds the
+account's cash. Options: unwind gradually during market hours, or reset the IBKR paper account
+(Client Portal -- wipes the forward track record). Paper's Total P&L will read plausibly in
+the meantime, but its NAV still reflects the damage. **Do not re-enable
+`HEAL_FLAGGED_ENABLED` until this is reconciled** -- it would immediately start "healing" the
+broken positions.
 
 ---
 
