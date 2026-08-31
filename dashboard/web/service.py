@@ -616,12 +616,26 @@ def refresh_cheap() -> None:
     # gets a second chance once status leaves 'OPEN' (see heal_flagged_positions()'s
     # docstring; confirmed live: EEM #27, orphaned during the 2026-08-21..25 dashboard-hang
     # incident). Reopens it with a fresh horizon so the checks below can act on it for real.
-    try:
-        heal_logs = broker.heal_flagged_positions()
-        if heal_logs:
-            log.info("flagged-position heal: %d action(s) this refresh", len(heal_logs))
-    except Exception as e:
-        log.exception("heal_flagged_positions error: %s", e)
+    # DISABLED 2026-08-31 -- this call created a RUNAWAY ORDER LOOP. Confirmed live on paper:
+    # every ~75s it reopened #150 HYD (whose price was already past its stop), which made
+    # reprotect_naked_positions() below immediately fire a MARKET SELL ("flatten order sent"),
+    # after which resolve_open() re-resolved it to LOSS -- so the next tick flagged it again.
+    # ~96 iterations drove HYD to -6,336 shares SHORT against a local record of +66 LONG and
+    # pushed GrossPositionValue to 4.7x the account's own NAV. The fabricated cash/GPV deltas
+    # that produced also fooled detect_external_cash_flow() into logging 40 phantom ~103k HKD
+    # "deposits", which is how this surfaced: Total P&L read -4,751,290 HKD (-82%).
+    # Re-enable ONLY with the three guards described in heal_flagged_positions()'s docstring
+    # (skip already-past-SL/TP trades, rate-limit per paper_id, and make the flatten path
+    # verify the REAL broker position before selling). Left wired-but-disabled rather than
+    # deleted so the intent and the incident stay visible at the call site.
+    HEAL_FLAGGED_ENABLED = False
+    if HEAL_FLAGGED_ENABLED:
+        try:
+            heal_logs = broker.heal_flagged_positions()
+            if heal_logs:
+                log.info("flagged-position heal: %d action(s) this refresh", len(heal_logs))
+        except Exception as e:
+            log.exception("heal_flagged_positions error: %s", e)
     # ADDED 2026-08-18: MUST run before close_expired_trades()/resolve_open() below -- a
     # resting TP/SL bracket can vanish at the broker independent of anything this app does
     # (confirmed live: a paper-gateway session drop lost a sleeve trade's bracket, leaving a
