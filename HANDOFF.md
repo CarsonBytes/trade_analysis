@@ -65,6 +65,32 @@ with real money.
   `max=100` with an implicit 0 floor (a negative bar was previously invisible), and a net
   short is coloured red.
 
+**FOLLOW-UP 2026-09-01 -- the damage was ONGOING, via a second mechanism.** Disabling the
+heal loop did not stop it: `cash_flows` refilled (0 -> 72,042.94 HKD) and CWB flipped from
+**+54 long to -50 short** overnight. Cause: `reprotect_naked_positions()` had stacked
+DUPLICATE brackets in a SEPARATE OCA group from each position's original `quant#N` bracket.
+OCA only cancels within a group, so at a stop one order from EACH group fills and ~2x the
+held shares get sold -- flipping a long into a short. Root cause: `all_orders or []` treated
+an EMPTY `reqAllOpenOrdersAsync()` result (normal in the unsynced window right after a
+reconnect) as "nothing is protected", so every funded position looked naked. Same function,
+same shape as its 2026-08-18 bug -- that fix changed the SOURCE, never the empty case.
+Fixed (`89f8946`) + regression test `test_reprotect_skips_when_broker_reports_zero_orders`.
+
+Cleanup performed on PAPER (cancel-only, no positions touched): 28 resting orders -> 0.
+Note `ib.cancelOrder()` only works for the client that PLACED the order (Error 10147
+otherwise) -- 8 were cancelled by stopping the dashboard and reconnecting as its own
+clientId 31; the remaining 12 (older ghosts/orphans from previous sessions: EEM/EFA/IWM
+brackets on positions no longer held, which would have OPENED shorts, plus stale AMLP 615 /
+CPER 453) needed `ib.reqGlobalCancel()`. Phantom flows purged again; Total P&L back to
+**+13,589 HKD (+1.32%)**. The fixed reprotect will now re-arm ONE correct bracket per held
+position on its next cycle.
+
+**LIVE has the SAME duplicate brackets and has NOT been cleaned** -- CPER/IWM/QQQ each carry
+a `reprotect#N` group alongside their `quant#N` group, and EFA #29 has an orphaned bracket on
+a position the account no longer holds (it would OPEN a short). Real money; awaiting the
+user's go-ahead. The dry-run tooling is `cancel_orders.py` (scratchpad) -- cancel-only, keeps
+one correct bracket per held position.
+
 **STILL OPEN -- needs a decision:** the paper account's POSITIONS are still corrupt (the
 -6,336 HYD short, oversized AMLP/CPER). Cleaning up means placing real orders to unwind, and
 at the time of writing US markets were closed and buying back the short (~$316k) exceeds the
