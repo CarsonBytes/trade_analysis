@@ -1885,6 +1885,70 @@ def test_within_entry_execution_window_lse_vs_nyse():
           ib_exec.within_entry_execution_window(ny_midday, instrument="CSPX"), False)
 
 
+def test_reprotect_skips_when_broker_reports_zero_orders():
+    print("\nreprotect_naked_positions(): REGRESSION for the 2026-09-01 duplicate-bracket "
+          "incident -- reqAllOpenOrdersAsync() returns an EMPTY list right after a reconnect, "
+          "before the order snapshot syncs. `all_orders or []` then made open_con_ids empty, "
+          "so every funded position looked naked and got ANOTHER bracket stacked on it, in a "
+          "SEPARATE OCA group from the original -- a stop would fill BOTH and sell ~2x the "
+          "shares held, flipping a long into a real short (found live on CPER/IWM/QQQ). An "
+          "empty order list while positions are held must mean UNKNOWN, not 'all naked':")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper
+
+    class _C:
+        def __init__(self, con_id):
+            self.conId = con_id
+
+    class _PF:
+        def __init__(self, con_id, px):
+            self.contract = _C(con_id)
+            self.marketPrice = px
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        with paper._LOCK, paper._conn() as _pc:
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, horizon_end, confidence, rationale, "
+                     "status, exit_ts, exit_price, realized_r) VALUES "
+                     "(12,'2026-08-01T00:00:00+00:00','CPER','long','ATR rr3.0',"
+                     "39.28,36.68,41.91,3.0,84,'2099-01-01T00:00:00',0.6,'t','OPEN','',0,0)")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(12,0,97462781,'CPER',84.0,300.0,'','2026-08-01T00:00:00','OPEN','etf')")
+
+        class _FakeIB:
+            def portfolio(self):
+                return [_PF(97462781, 40.05)]          # in-play, between sl and tp
+            def placeOrder(self, contract, order):
+                raise AssertionError("must NOT place a bracket on an empty/unsynced order list")
+
+        with mock.patch.object(ib_exec, "_guard", return_value=_FakeIB()), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U1"), \
+             mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                              side_effect=lambda items, a: items), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+             mock.patch.object(ib_exec, "manual_close_position",
+                              side_effect=AssertionError("must NOT close either")):
+            logs = ib_exec.reprotect_naked_positions()
+        check("no action taken on an empty order list while a position is held", logs, [])
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def _manual_close_order(real_position, mirror_qty, direction="long"):
     """Run manual_close_position() against a fake broker holding `real_position` shares and
     return the (side, qty) of the order it sent, or None if it sent nothing."""

@@ -1437,6 +1437,23 @@ def reprotect_naked_positions() -> list[str]:
             {i.contract.conId: i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)}))
     except Exception:                                  # noqa: BLE001 -- read failed, retry next cycle
         return []
+    # FIXED 2026-09-01: "the broker reports ZERO open orders" is NOT the same as "nothing is
+    # protected" -- reqAllOpenOrdersAsync() legitimately returns an empty list right after a
+    # reconnect, before the order snapshot has synced (the same unsynced-snapshot window
+    # reconcile_with_broker() already retries around for positions). `all_orders or []` then
+    # made open_con_ids EMPTY, so EVERY funded position was misdiagnosed as naked and got
+    # ANOTHER bracket stacked on it. Confirmed live on U12991898: CPER/IWM/QQQ each ended up
+    # with duplicate brackets in a SEPARATE OCA group from their original, so a stop would
+    # have filled BOTH groups and sold ~2x the shares actually held -- flipping a long into a
+    # real short. This is the same failure this function already had on 2026-08-18; that fix
+    # changed the SOURCE (openTrades -> reqAllOpenOrders) but never handled the empty result,
+    # which is exactly what the unsynced window returns. Treat empty-with-positions-held as
+    # UNKNOWN and retry next cycle rather than acting on it.
+    if rows and not open_con_ids:
+        log.warning("ib_exec: reprotect skipped -- broker reported ZERO open orders while %d "
+                    "funded position(s) are held; treating as an unsynced snapshot, not as "
+                    "'all naked' (see the 2026-09-01 duplicate-bracket incident)", len(rows))
+        return []
     logs: list[str] = []
     from dashboard.core import notable_events
     for paper_id, con_id, qty, instrument, direction, sl, tp in rows:
