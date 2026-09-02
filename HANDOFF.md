@@ -106,7 +106,32 @@ The SHORTS THEMSELVES STILL EXIST at the broker (HYD -6,402, CWB -50) and are un
 they are simply no longer misrepresented as strategy positions. `dashboard/ops/
 unwind_shorts.py` flattens them -- dry-run verified, not yet run with APPLY.
 
-**LIVE has the SAME duplicate brackets and has NOT been cleaned** -- CPER/IWM/QQQ each carry
+**LIVE CLEANED 2026-09-02 (cancel-only, US market closed at the time).** 38 resting orders ->
+16; `reconcile` now `{'only_local': [], 'only_broker': []}`; flagged positions 0; every held
+position protected by exactly ONE bracket sized to what is actually held. Cancelled: 8 CPER
++ 6 IWM + 6 QQQ duplicate `reprotect#N` brackets, and the orphaned `quant#29` EFA pair.
+
+Three things worth carrying forward from doing it:
+1. **A near-miss in my own tooling.** The first cut of the cancel script keyed "duplicate" on
+   the CONTRACT, so it planned to cancel AMLP `quant#16` -- but AMLP's 78 shares are TWO
+   legitimate trades sharing one conId (#16 = 21, #54 = 57), and that would have left 21 real
+   shares unprotected. Duplicates must be keyed on **paper_id**, never on conId. Caught in the
+   dry run; the dry run is the reason it was caught.
+2. **`ib.cancelOrder()` only works for the client that PLACED the order** (`Error 10147`
+   otherwise), and `order.clientId` on the open order tells you which. The `reprotect#N`
+   orders belonged to the live dashboard (clientId 41 -- stop the container to free it); the
+   EFA pair belonged to **clientId 21, the DECOMMISSIONED native Windows live deployment**.
+   Do NOT reach for `reqGlobalCancel()` on live: it would strip protection from every real
+   position. (It was fine on paper, where the book was already corrupt.)
+3. **The orphaned bracket had been masking a ghost for ~43 days.** EFA #29's leftover SELL
+   pair put EFA in `broker_open_order_symbols()`, so reconcile excluded it from `only_local`
+   as a "pending entry" AND `sync_closures()` skipped its ghost-entry check
+   (`con_id in working_conids`). Cancelling the orphan unblocked both: on the very next cycle
+   sync_closures resolved it by itself -- *"EFA: auto-cancelled -- entry never filled at the
+   broker after 62604min"*. Lesson: a resting order is not evidence of a pending entry, and
+   a stale one can silently disable the self-healing that would have cleaned it up.
+
+**LIVE previously had the SAME duplicate brackets (now fixed, above)** -- CPER/IWM/QQQ each carry
 a `reprotect#N` group alongside their `quant#N` group, and EFA #29 has an orphaned bracket on
 a position the account no longer holds (it would OPEN a short). Real money; awaiting the
 user's go-ahead. The dry-run tooling is `cancel_orders.py` (scratchpad) -- cancel-only, keeps
