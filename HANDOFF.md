@@ -85,6 +85,27 @@ CPER 453) needed `ib.reqGlobalCancel()`. Phantom flows purged again; Total P&L b
 **+13,589 HKD (+1.32%)**. The fixed reprotect will now re-arm ONE correct bracket per held
 position on its next cycle.
 
+**PAPER records reconciled to broker truth 2026-09-02 (user request: "trust broker side
+data").** #149 CWB and #150 HYD had `paper_trades` correctly resolved (LOSS, "stop-loss hit")
+but their `ib_mirror` rows still claimed OPEN -- which is what made `live_positions()` return
+them, the dashboard render them under "Flagged positions", and the HYD short dominate the
+strategy's asset-class exposure. Those two mirror rows are now CLOSED with an explanatory
+note. **Nothing is hidden by this**: `reconcile_with_broker()` now reports them as
+`only_broker(untracked)`, which is the accurate label for a broker position this long-only
+strategy does not own, and it already surfaces in System Health + notable events. Results:
+
+| | before | after |
+|---|---|---|
+| Flagged positions | 2 (#149, #150) | **0** |
+| Credit bucket | -229.7% of NAV | **+7.0%** |
+| Gross exposure | 294% of NAV (cap 100%) | **70.7%** |
+| Total P&L | -58,454 HKD (-5.32%) | **+16,682 HKD (+1.63%)** |
+| Resting broker orders | 28 | **0** |
+
+The SHORTS THEMSELVES STILL EXIST at the broker (HYD -6,402, CWB -50) and are unprotected;
+they are simply no longer misrepresented as strategy positions. `dashboard/ops/
+unwind_shorts.py` flattens them -- dry-run verified, not yet run with APPLY.
+
 **LIVE has the SAME duplicate brackets and has NOT been cleaned** -- CPER/IWM/QQQ each carry
 a `reprotect#N` group alongside their `quant#N` group, and EFA #29 has an orphaned bracket on
 a position the account no longer holds (it would OPEN a short). Real money; awaiting the
