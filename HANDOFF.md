@@ -1,7 +1,62 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-08-31.
+Last updated 2026-09-03.
+
+---
+
+### 🔥 FIXED 2026-09-03: the signal pipeline had been SILENTLY DEAD for 5 days --
+`MAX_INSTRUMENTS=40` overflowed the model's output cap, killing every board scan
+
+**How it surfaced:** the user noticed "no pending positions on BOTH accounts, which is quite
+rare" and asked whether the system was actually working. It was not. Everything normally
+monitored looked fine -- containers healthy, `/status` ok:true, ticks running, `cheap refresh:
+23 scored` every cycle -- but nothing had been *decided* since 2026-08-28:
+
+    last board scan          2026-08-28 18:11   (5 days earlier)
+    last rejected_signals    2026-08-28 18:11   (the funnel had not run since)
+    newest trade             2026-08-19         (2 weeks)
+
+**Root cause.** `MAX_INSTRUMENTS` was raised to 40 on the stated assumption that the model has
+"a large context window". False for the tier this key runs on: chatanywhere's free tier caps
+the PROMPT at 4096 tokens and the COMPLETION at 2000. 40 meant "send the whole universe in one
+call", so the model ran out of OUTPUT tokens partway through the structured JSON and raised
+`openai.LengthFinishReasonError` (completion_tokens=2000, prompt_tokens=3982). That is neither
+a 4xx nor a rate limit, so `is_chatanywhere_unavailable()` returned False and it propagated --
+killing the scan on every single tick.
+
+**Why it stayed invisible for 5 days.** The log line was `LLM board scan: provider unavailable
+-- backing off until ...`, which reads like a vendor outage and is *also* the message emitted
+by the early-return when a backoff is already cached. So the visible symptom pointed at the
+provider, not at our own request being too big. Proof it was never the vendor: a direct call
+on the same key succeeded immediately (`LLM CALL OK -> ok`) while the dashboards still said
+"provider unavailable". Worse, the backoff is self-perpetuating -- once set, `run_board_scan()`
+returns early WITHOUT attempting a call, so a healthy provider cannot be noticed until the
+deadline passes; it then re-failed and re-armed, daily.
+
+**Measured, not guessed** (against the live key, headlines included): **n=21 fails, n=14
+succeeds**. Shipped `MAX_INSTRUMENTS = 12` rather than 14, to leave headroom for prompt drift
+(headline count, per-instrument facts). Coverage is barely affected in practice: `scores`
+arrives ranked by obviousness, so a strength-5 BUY -- the only kind that can clear the entry
+gate -- always sorts into the top handful.
+
+**Resilience fix (the part that matters most).** `run_board_scan()` now catches
+`LengthFinishReasonError`, halves the batch and retries once. A too-long response is a
+request-shaping problem, not a dead provider, and the correct response is to ask for LESS
+rather than abandon the scan. If it still truncates below the floor it propagates, so it
+cannot loop. Three regression tests pin this: the size ceiling, shrink-and-retry, and the
+still-propagates case.
+
+**Verified after deploy:** `LLM board scan: ok` on BOTH stacks (first success since 08-28),
+new journal scan id=102 with 12 signals, `rejected_signals` 1151 -> 1161 with fresh rows, and
+gates firing normally again (trend-strength, tech-pause, LLM vetoes, re-entry gate). No trades
+placed yet, correctly -- every candidate was legitimately gated, and US markets were closed.
+
+**Lesson worth keeping:** "healthy" here meant *the process is up*, not *the system is deciding
+anything*. Ticks ran, containers were green, `/status` was ok:true -- and the strategy had been
+brain-dead for five days. A liveness check on the DECISION path (alert if no board scan has
+succeeded in N hours, or if `rejected_signals` stops growing) would have caught this the same
+day. Nothing watches that today; worth adding.
 
 ---
 

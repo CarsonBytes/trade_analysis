@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from analyst.llm import invoke_with_key_fallback, is_chatanywhere_unavailable  # from quant/analyst
 from dashboard.core import store
+from dashboard.core.log import log
 from dashboard.core.scoring import Score
 
 
@@ -91,7 +92,21 @@ def _facts_block(scores: list[Score]) -> str:
 # scan, not just the most "obvious" 10. Cost is still bounded by store.can_call()'s daily
 # call-COUNT budget (unaffected by per-call size) -- this doesn't add calls, just completeness
 # within the one call already being made.
-MAX_INSTRUMENTS = 40
+# FIXED 2026-09-03: the paragraph above assumed "a large context window" -- NOT true of the
+# tier this key actually runs on. chatanywhere's free tier caps the PROMPT at 4096 tokens and
+# the COMPLETION at 2000, and 40 meant "send the whole universe in one call". The model then
+# ran out of OUTPUT tokens partway through the structured JSON and raised
+# openai.LengthFinishReasonError (completion_tokens=2000, prompt_tokens=3982). That killed
+# every scan, so NO new signals were evaluated from 2026-08-28 to 2026-09-03: no board scans,
+# no new rejected_signals rows, no new trades, and "0 pending positions" on BOTH accounts --
+# which is what surfaced it (the dashboards looked healthy throughout). Measured directly
+# against the live key: n=21 fails, n=14 succeeds with headlines included. 12 ships rather
+# than 14 to leave headroom, since prompt size drifts with headline count and each
+# instrument's facts block. Coverage is barely reduced in practice: `scores` arrives ranked by
+# obviousness, so a strength-5 BUY (the only kind that can clear the entry gate) always sorts
+# into the top handful. run_board_scan() now also halves the batch and retries when the
+# response truncates, so exceeding this degrades output instead of causing an outage.
+MAX_INSTRUMENTS = 12
 MAX_NEWS = 10
 
 
@@ -172,11 +187,15 @@ def run_board_scan(scores: list[Score], headlines: list[str],
     top = scores[:MAX_INSTRUMENTS]
     news = headlines[:MAX_NEWS]
     news_block = "\n".join(f"- {h}" for h in news) or "(no headlines available)"
-    human = (
-        f"INSTRUMENT FACTS (top {len(top)} by signal strength):\n{_facts_block(top)}\n\n"
-        f"RECENT HEADLINES (may be irrelevant; filter yourself):\n{news_block}\n\n"
-        "Return a signal for EVERY instrument above, plus a macro_note."
-    )
+
+    def _human_for(batch) -> str:
+        return (
+            f"INSTRUMENT FACTS (top {len(batch)} by signal strength):\n{_facts_block(batch)}\n\n"
+            f"RECENT HEADLINES (may be irrelevant; filter yourself):\n{news_block}\n\n"
+            "Return a signal for EVERY instrument above, plus a macro_note."
+        )
+
+    human = _human_for(top)
     import time
     _start = time.perf_counter()
     try:
@@ -192,13 +211,33 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         # return SHAPE on a *successful* call (adds .raw/.parsed/.parsing_error) -- it does
         # NOT change how invocation-level errors (429, auth failures) propagate, so the
         # except block below (is_chatanywhere_unavailable(e) etc.) is unaffected either way.
-        raw_result = invoke_with_key_fallback(
-            lambda llm: llm.with_structured_output(BoardScan, include_raw=True),
-            [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": human},
-            ],
-        )
+        def _invoke(prompt: str):
+            return invoke_with_key_fallback(
+                lambda llm: llm.with_structured_output(BoardScan, include_raw=True),
+                [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+
+        try:
+            raw_result = _invoke(human)
+        except Exception as _len_err:           # noqa: BLE001
+            # ADDED 2026-09-03: a TRUNCATED RESPONSE is not a dead provider. When the model
+            # runs out of output tokens partway through the structured JSON, openai raises
+            # LengthFinishReasonError -- which is neither a 4xx nor a rate limit, so it fell
+            # straight through to `raise` and killed the whole scan on EVERY tick. That is
+            # exactly how this pipeline went silently dead for five days (see MAX_INSTRUMENTS).
+            # The right response is to ask for LESS, not to give up: halve the batch and try
+            # once more. Degraded coverage for that scan beats no scan at all, and `top` is
+            # ranked, so the half retained is the half that actually matters.
+            if type(_len_err).__name__ != "LengthFinishReasonError" or len(top) <= 4:
+                raise
+            smaller = top[: max(4, len(top) // 2)]
+            log.warning("board scan: response truncated at %d instruments -- retrying with "
+                        "%d (see MAX_INSTRUMENTS' 2026-09-03 note)", len(top), len(smaller))
+            top = smaller
+            raw_result = _invoke(_human_for(top))
         result = raw_result["parsed"]
     except Exception as e:                      # noqa: BLE001
         # WIDENED 2026-07-25: this used to only special-case 429/RateLimitError -- the

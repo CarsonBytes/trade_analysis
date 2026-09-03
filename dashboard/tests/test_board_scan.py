@@ -176,6 +176,96 @@ def test_non_rate_limit_exception_still_propagates():
         _restore_db(old, path)
 
 
+class _FakeScore:
+    """Minimal stand-in for scoring.Score -- only what _facts_block() touches."""
+    def __init__(self, key):
+        self.key = key
+        self.signal = "BUY"
+        self.strength = 5
+        self.direction = "long"
+        self.note = "3/3 timeframes long"
+        self.facts_text = f"Symbol: {key}\nLast price: 100.0\n"
+        self.facts = {"last_price": 100.0}
+
+
+def test_max_instruments_is_small_enough_for_the_provider_tier():
+    print("\nMAX_INSTRUMENTS: REGRESSION for the 2026-08-28..09-03 silent outage. It was 40 "
+          "('send the whole universe'), which overflows this key's 2000-token COMPLETION cap "
+          "-- the model truncated mid-JSON, every scan raised LengthFinishReasonError, and "
+          "the pipeline produced no signals for 5 days while the dashboards looked healthy. "
+          "Measured on the live key: 21 fails, 14 works. Keep this comfortably under 14:")
+    from dashboard.web import board_scan
+    check("MAX_INSTRUMENTS <= 14 (the measured working size)",
+          board_scan.MAX_INSTRUMENTS <= 14, True)
+    check("MAX_INSTRUMENTS still big enough to cover the strong candidates",
+          board_scan.MAX_INSTRUMENTS >= 8, True)
+
+
+def test_truncated_response_retries_with_a_smaller_batch_instead_of_dying():
+    print("run_board_scan(): a truncated response (LengthFinishReasonError) is NOT a dead "
+          "provider -- it means we asked for too much output. It must halve the batch and "
+          "retry rather than propagate, which is what killed every scan for 5 days:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.web import board_scan
+
+        class LengthFinishReasonError(Exception):
+            pass
+
+        sizes = []
+
+        def _fake_invoke(build_chain, messages, temperature=0.2, model=None):
+            human = messages[-1]["content"]
+            n = int(human.split("top ", 1)[1].split(" ", 1)[0])
+            sizes.append(n)
+            if len(sizes) == 1:
+                raise LengthFinishReasonError("Could not parse response content as the "
+                                              "length limit was reached")
+            return {"parsed": board_scan.BoardScan(macro_note="ok", signals=[])}
+
+        scores = [_FakeScore(f"S{i}") for i in range(12)]
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback",
+                                       side_effect=_fake_invoke):
+            result, status = board_scan.run_board_scan(scores, [])
+
+        check("two attempts were made", len(sizes), 2)
+        check("first attempt used the full batch", sizes[0], 12)
+        check("retry used a SMALLER batch", sizes[1] < sizes[0], True)
+        check("returned a usable result rather than raising", result is not None, True)
+        check("no backoff was set -- the provider is fine",
+              board_scan._rate_limited_until(), None)
+    finally:
+        _restore_db(old, path)
+
+
+def test_truncation_that_cannot_shrink_further_still_propagates():
+    print("run_board_scan(): if the batch is already tiny and STILL truncates, that is a "
+          "real failure -- it must propagate, not loop forever shrinking:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.web import board_scan
+
+        class LengthFinishReasonError(Exception):
+            pass
+
+        def _always_truncate(build_chain, messages, temperature=0.2, model=None):
+            raise LengthFinishReasonError("length limit was reached")
+
+        raised = False
+        scores = [_FakeScore(f"S{i}") for i in range(3)]     # below the shrink floor
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback",
+                                       side_effect=_always_truncate):
+            try:
+                board_scan.run_board_scan(scores, [])
+            except Exception as e:
+                raised = type(e).__name__ == "LengthFinishReasonError"
+        check("propagated instead of silently swallowing", raised, True)
+    finally:
+        _restore_db(old, path)
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
