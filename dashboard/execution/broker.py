@@ -83,6 +83,16 @@ def live_positions() -> dict:
     return _backend().live_positions()
 
 
+def heal_mirror_quantities() -> list[str]:
+    """True ib_mirror.qty up to the broker's real position size (IB only; see ib_exec.
+    heal_mirror_quantities()'s docstring). Bookkeeping only -- never sends an order.
+    No-op on backends that don't support it (e.g. MT5)."""
+    b = _backend()
+    if hasattr(b, "heal_mirror_quantities"):
+        return b.heal_mirror_quantities()
+    return []
+
+
 def heal_flagged_positions() -> list[str]:
     """Reopen (fresh horizon) any real broker position whose paper_trades row resolved
     locally without a real closing order ever executing (IB only; see ib_exec.

@@ -12,9 +12,13 @@ from __future__ import annotations
 from dashboard.core.log import log
 
 
+QTY_TOLERANCE = 0.5        # sub-share float noise, not a real divergence
+
+
 def compare_positions(broker_positions: dict[str, float], local_open_symbols: set[str],
                       broker_pending_symbols: set[str] | None = None,
-                      excluded_symbols: set[str] | None = None) -> dict:
+                      excluded_symbols: set[str] | None = None,
+                      local_open_qty: dict[str, float] | None = None) -> dict:
     """PURE function (no I/O -- unit-testable in isolation): compare broker's actual non-zero
     positions against the set of instrument symbols this dashboard locally thinks are OPEN.
 
@@ -44,10 +48,25 @@ def compare_positions(broker_positions: dict[str, float], local_open_symbols: se
     broker_symbols = {sym for sym, qty in broker_positions.items() if qty != 0}
     pending = broker_pending_symbols or set()
     excluded = excluded_symbols or set()
-    return {
+    out = {
         "only_local": sorted(local_open_symbols - broker_symbols - pending),
         "only_broker": sorted(broker_symbols - local_open_symbols - excluded),
+        "qty_mismatch": [],
     }
+    # `local_open_qty` (ADDED 2026-09-05): the set comparison above answers "does this symbol
+    # exist on both sides", which says nothing about HOW MUCH. Measured on DUK968178: broker
+    # 652 AMLP vs 37 mirrored, broker 453 CPER vs 293 mirrored -- both symbols present on both
+    # sides, so the two lists above were empty and reconcile logged a clean match while ~775
+    # real shares were untracked and unprotected. Compared only for symbols present on BOTH
+    # sides; a symbol missing from one side is already reported by only_local/only_broker and
+    # would just double-report here.
+    if local_open_qty is not None:
+        for sym in sorted(broker_symbols & set(local_open_qty) - excluded):
+            b, l = float(broker_positions.get(sym, 0.0)), float(local_open_qty.get(sym, 0.0))
+            if abs(b - l) > QTY_TOLERANCE:
+                out["qty_mismatch"].append({"symbol": sym, "broker": b, "local": l,
+                                            "delta": b - l})
+    return out
 
 
 def reconcile_with_broker() -> dict:
@@ -89,14 +108,19 @@ def reconcile_with_broker() -> dict:
     # too before concluding a real desync.
     broker_pending = ib_client.broker_open_order_symbols()
     result = compare_positions(broker_pos, local_open, broker_pending,
-                               excluded_symbols={ib_exec.SGOV_SYMBOL})
+                               excluded_symbols={ib_exec.SGOV_SYMBOL},
+                               local_open_qty=ib_exec.mirrored_open_qty())
     from dashboard.core import store
     had_mismatch, _ts = store.cache_get("reconcile_had_mismatch")
-    is_mismatch = bool(result["only_local"] or result["only_broker"])
+    is_mismatch = bool(result["only_local"] or result["only_broker"]
+                       or result["qty_mismatch"])
     if is_mismatch:
+        qty_txt = ", ".join(f"{m['symbol']} broker={m['broker']:.0f} local={m['local']:.0f}"
+                            for m in result["qty_mismatch"])
         msg = (f"reconcile: broker/local position MISMATCH -- "
               f"only_local(ghost)={result['only_local']} "
-              f"only_broker(untracked)={result['only_broker']}")
+              f"only_broker(untracked)={result['only_broker']}"
+              + (f" qty_mismatch=[{qty_txt}]" if qty_txt else ""))
         log.warning(msg)
         from dashboard.core import notable_events
         notable_events.record(msg, level="warning")

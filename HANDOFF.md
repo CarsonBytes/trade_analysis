@@ -1,7 +1,108 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-03.
+Last updated 2026-09-05.
+
+---
+
+### 🔥 FIXED 2026-09-05: broker data is now the source of truth for positions --
+double-counted exposure, quantity-blind reconcile, and permanently-unprotected positions
+
+User ask: *"fix the Flagged positions, also make sure broker data should be the original
+source of reference, even if the local strategy record shows them already resolved, it should
+be auto heal to use broker data. Verify P&L and all relevant data."*
+
+Four distinct defects, all in the same seam (local records drifting from broker truth):
+
+**1. `live_positions()` double-counted a shared con_id.** Two OPEN `ib_mirror` rows can
+legitimately share one con_id (same instrument entered twice, each its own trade), but the
+broker reports ONE aggregate position -- and the loop handed that whole position to EVERY
+matching row. Confirmed on LIVE U12991898: AMLP rows #16 (21sh) and #54 (57sh) against a real
+78-share position, both given `volume=78` and `profit=+79.16`. 156 shares and double the
+unrealized P&L flowed into the allocation pie, the asset-class exposure bars, active_panel()'s
+cards and `pnl_crosscheck()`'s unrealized leg. Measured: attributed +147.31 vs the broker's
+real +68.15 across strategy positions -- the entire gap was this one bug. Fixed by grouping on
+con_id and splitting broker truth pro-rata (`allocate_broker_qty()`), so the attributed total
+always equals the real position exactly.
+
+**2. Reconcile was quantity-blind.** `compare_positions()` compared symbol SETS, so it could
+only ever answer "is this symbol on both sides", never "how much". Measured on paper: the
+broker held 652 AMLP against 37 mirrored, and 453 CPER against 293 -- both symbols present on
+both sides, so reconcile logged a clean match while ~775 real shares sat untracked and
+unprotected. Added `local_open_qty` + a `qty_mismatch` list; the very first cycle after deploy
+reported both divergences.
+
+**3. `ib_mirror.qty` was never trued up.** It records what we ASKED for at order time. A close
+marked CLOSED locally that never actually executed leaves its shares with no local row
+claiming them. This matters beyond display: `reprotect_naked_positions()` sizes its
+replacement bracket off that column, so even correctly-armed protection under-covered the real
+position. New `heal_mirror_quantities()` corrects it from broker truth -- bookkeeping only,
+never sends an order -- and refuses where attribution is ambiguous (2+ OPEN rows on one
+con_id) or the broker's direction contradicts the trade (paper HYD: +66 recorded, -6,402 held).
+
+**4. Auto-heal re-enabled, with the preconditions the 2026-08-31 note demanded.**
+`heal_flagged_positions()` had been disabled at the call site since the runaway-order loop.
+All four guards are now in place (past-SL/TP refusal, direction refusal, 6h per-trade
+cooldown, and a new `HEAL_MAX_PER_CYCLE` ceiling -- the 2026-08-31 damage came from ~96
+ITERATIONS, not one bad heal), the flatten path re-reads the real broker position before
+selling, and existing flagged positions were reconciled first: live had 0, paper had exactly 1
+(#147 CPER, price 39.89 between its 38.17 SL and 42.61 TP, direction matching a real 453-share
+long) -- precisely the healable shape.
+
+**5. (found while verifying) The zero-orders guard had become a guarantee of NO protection.**
+The 2026-09-01 fix made "broker reports zero open orders" mean UNKNOWN, so a transient
+post-reconnect empty could not stack duplicate brackets. But it returned unconditionally, so
+empty meant unknown FOREVER -- and after the 2026-09-02 bracket cleanup, paper genuinely had
+zero resting orders while holding VNQ/HYG/AMLP/CPER. All four sat completely unprotected and
+`reprotect_naked_positions()` could never re-arm them. What separates the two cases is
+PERSISTENCE (the unsynced window is seconds): `zero_order_streak_action()` now requires
+REPROTECT_ZERO_CONFIRM consecutive empty snapshots, and any non-empty result resets the
+streak, so a transient empty can never accumulate.
+
+**Verified live on paper** (deploy 12:18 HKT): reconcile reported the qty divergences; both
+mirror quantities corrected from broker truth; #147 CPER auto-healed (REOPENED from EXPIRED);
+the streak guard skipped at 1/3 and 2/3 then re-armed at 3/3; all four positions now carry
+exactly one OCA bracket each at the corrected sizes (CPER 453, AMLP 652, VNQ 203, HYG 118) --
+no duplicates. Attributed shares now match the broker exactly on every strategy symbol, the
+Flagged panel is empty, and `pnl_crosscheck()` reports agreement. 225 tests pass.
+
+**LIVE deployed but NOT yet broker-verified** -- its gateway went to a 2FA prompt during the
+deploy window and the new weekend gate (below) correctly suppresses relogin until Tuesday's
+open. Live's expected behaviour is no-op on every heal (0 flagged; AMLP's two rows sum to the
+broker's 78, so `mirror_qty_action()` returns "ok"); the only change it gets is the
+double-count correction. Re-verify once the gateway is back.
+
+---
+
+### 🔥 FIXED 2026-09-05: the gateway login watchdog 2FA-spammed the phone all weekend
+
+User report: *"even at weekends, 2fa still prompt"*. Correct, and measurable.
+`scripts/gateway-login-watchdog.sh` runs every minute, 24/7, with no calendar gate at all --
+while the scheduled relogin cron beside it is weekday-only (`0 20 * * 1-5`). IBKR's weekly
+server reset means a gateway cannot hold a login through much of the weekend, so the API port
+stays closed, so the watchdog cycled a relogin -- each one a "APPROVE THE SECOND-FACTOR
+PROMPT" push -- three times an hour, around the clock. From `gateway-restart.log`:
+
+    2026-08-29 Sat   21 relogin cycles
+    2026-08-30 Sun   52 relogin cycles
+    2026-08-31 Mon   31 relogin cycles
+    weekdays          4-11 cycles
+
+~104 phone pushes across one weekend, none of them actionable.
+
+Fix: `dashboard/ops/gateway_window.py` asks `market_calendar.market_status()` whether a
+session is within LEAD_HOURS (4h), and the watchdog stays quiet otherwise. Deliberately NOT a
+day-of-week rule -- 2026-09-07 is Labor Day, a Monday the market is shut, and a weekday rule
+would have spammed straight through it. Fails ACTIVE: a broken calendar must not silently
+disable the watchdog, since a gateway logged out with nobody watching is the exact
+silent-outage class this project keeps hitting. Verified against the real NYSE calendar the
+same day (Sat 2026-09-05 -> next open Tue 2026-09-08 13:30 UTC -> QUIET), and the watchdog
+logged its quiet line on the next cron fire.
+
+Same file, second bug: `.escalated` was never cleared on recovery, only the stall/attempt
+files -- and the MANUAL-ACTION-NEEDED push is gated on that file NOT existing. The single
+escalation on 2026-08-26 had permanently disabled that alarm; ten days later the file was
+still there. Recovery now resets the whole ladder.
 
 ---
 

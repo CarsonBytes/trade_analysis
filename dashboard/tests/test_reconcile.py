@@ -26,38 +26,38 @@ def check(name, got, want):
 def test_compare_positions_clean_match():
     print("compare_positions: broker and local agree -> no mismatch:")
     out = compare_positions({"AAPL": 10.0, "MSFT": -5.0}, {"AAPL", "MSFT"})
-    check("clean match", out, {"only_local": [], "only_broker": []})
+    check("clean match", out, {"only_local": [], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_ghost_trade():
     print("compare_positions: local thinks OPEN, broker reports nothing (ghost):")
     out = compare_positions({}, {"AMLP", "ASHR"})
-    check("ghost trades flagged", out, {"only_local": ["AMLP", "ASHR"], "only_broker": []})
+    check("ghost trades flagged", out, {"only_local": ["AMLP", "ASHR"], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_untracked_broker_position():
     print("compare_positions: broker holds a position with no local OPEN record:")
     out = compare_positions({"SPY": 3.0}, set())
-    check("untracked position flagged", out, {"only_local": [], "only_broker": ["SPY"]})
+    check("untracked position flagged", out, {"only_local": [], "only_broker": ["SPY"], "qty_mismatch": []})
 
 
 def test_compare_positions_zero_qty_excluded():
     print("compare_positions: a broker row with qty==0 is NOT a real position:")
     out = compare_positions({"AAPL": 0.0, "MSFT": 5.0}, {"AAPL", "MSFT"})
     # AAPL has a local record but broker qty is 0 -> broker doesn't actually hold it -> ghost
-    check("zero-qty broker row treated as flat", out, {"only_local": ["AAPL"], "only_broker": []})
+    check("zero-qty broker row treated as flat", out, {"only_local": ["AAPL"], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_mixed():
     print("compare_positions: both directions mismatched at once:")
     out = compare_positions({"SPY": 3.0, "QQQ": 2.0}, {"QQQ", "EEM"})
-    check("mixed mismatch", out, {"only_local": ["EEM"], "only_broker": ["SPY"]})
+    check("mixed mismatch", out, {"only_local": ["EEM"], "only_broker": ["SPY"], "qty_mismatch": []})
 
 
 def test_compare_positions_empty_both():
     print("compare_positions: genuinely flat everywhere:")
     out = compare_positions({}, set())
-    check("both empty -> no mismatch", out, {"only_local": [], "only_broker": []})
+    check("both empty -> no mismatch", out, {"only_local": [], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_pending_order_not_a_ghost():
@@ -65,21 +65,21 @@ def test_compare_positions_pending_order_not_a_ghost():
           "-- must NOT be a ghost (2026-07-13 fix: 6 real GTC MKT orders placed before "
           "market open sat correctly unfilled for hours and were falsely flagged before this):")
     out = compare_positions({}, {"CPER", "EEM"}, broker_pending_symbols={"CPER", "EEM"})
-    check("pending orders excluded from only_local", out, {"only_local": [], "only_broker": []})
+    check("pending orders excluded from only_local", out, {"only_local": [], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_pending_order_mixed_with_real_ghost():
     print("compare_positions: one symbol has a pending order (fine), another has "
           "NEITHER a position NOR a pending order (a real ghost):")
     out = compare_positions({}, {"CPER", "AMLP"}, broker_pending_symbols={"CPER"})
-    check("only the true ghost survives", out, {"only_local": ["AMLP"], "only_broker": []})
+    check("only the true ghost survives", out, {"only_local": ["AMLP"], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_no_pending_arg_unchanged():
     print("compare_positions: omitting broker_pending_symbols entirely -- old behavior intact:")
     out = compare_positions({}, {"AMLP", "ASHR"})
     check("still flags as ghosts (backward compatible)", out,
-          {"only_local": ["AMLP", "ASHR"], "only_broker": []})
+          {"only_local": ["AMLP", "ASHR"], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_excludes_cash_sweep_holding():
@@ -90,21 +90,21 @@ def test_compare_positions_excludes_cash_sweep_holding():
           "desync, a missing exclusion for an intentional non-strategy holding:")
     out = compare_positions({"SGOV": 500.0, "CPER": 30.0}, {"CPER"},
                             excluded_symbols={"SGOV"})
-    check("SGOV excluded, real position unaffected", out, {"only_local": [], "only_broker": []})
+    check("SGOV excluded, real position unaffected", out, {"only_local": [], "only_broker": [], "qty_mismatch": []})
 
 
 def test_compare_positions_excluded_does_not_hide_a_real_ghost():
     print("\ncompare_positions: excluded_symbols only suppresses the excluded symbol -- "
           "a genuine untracked position elsewhere still gets flagged:")
     out = compare_positions({"SGOV": 500.0, "SPY": 3.0}, set(), excluded_symbols={"SGOV"})
-    check("SPY still flagged, SGOV still excluded", out, {"only_local": [], "only_broker": ["SPY"]})
+    check("SPY still flagged, SGOV still excluded", out, {"only_local": [], "only_broker": ["SPY"], "qty_mismatch": []})
 
 
 def test_compare_positions_no_excluded_arg_unchanged():
     print("\ncompare_positions: omitting excluded_symbols entirely -- old behavior intact "
           "(back-compat for any other caller):")
     out = compare_positions({"SGOV": 500.0}, set())
-    check("SGOV flagged when no exclusion given", out, {"only_local": [], "only_broker": ["SGOV"]})
+    check("SGOV flagged when no exclusion given", out, {"only_local": [], "only_broker": ["SGOV"], "qty_mismatch": []})
 
 
 def test_mirrored_open_symbols_isolated_db():
@@ -157,6 +157,7 @@ def test_reconcile_with_broker_records_cleared_after_previous_mismatch():
     try:
         recorded = []
         with mock.patch.object(ib_exec, "mirrored_open_symbols", return_value=set()), \
+             mock.patch.object(ib_exec, "mirrored_open_qty", return_value={}), \
              mock.patch("dashboard.data.ib_client.broker_positions", return_value={}), \
              mock.patch("dashboard.data.ib_client.broker_open_order_symbols", return_value=set()), \
              mock.patch("dashboard.core.notable_events.record",
@@ -164,7 +165,7 @@ def test_reconcile_with_broker_records_cleared_after_previous_mismatch():
             store.cache_set("reconcile_had_mismatch", True)   # simulate a PRIOR mismatch
             result = reconcile.reconcile_with_broker()
 
-        check("current check itself is clean", result, {"only_local": [], "only_broker": []})
+        check("current check itself is clean", result, {"only_local": [], "only_broker": [], "qty_mismatch": []})
         check("exactly one event recorded (the follow-up)", len(recorded), 1)
         check("follow-up message says CLEARED", "CLEARED" in recorded[0][0], True)
         check("follow-up pushed at warning level (reaches Telegram)", recorded[0][1], "warning")
@@ -195,13 +196,14 @@ def test_reconcile_with_broker_no_followup_when_already_clean():
     try:
         recorded = []
         with mock.patch.object(ib_exec, "mirrored_open_symbols", return_value=set()), \
+             mock.patch.object(ib_exec, "mirrored_open_qty", return_value={}), \
              mock.patch("dashboard.data.ib_client.broker_positions", return_value={}), \
              mock.patch("dashboard.data.ib_client.broker_open_order_symbols", return_value=set()), \
              mock.patch("dashboard.core.notable_events.record",
                         side_effect=lambda msg, level="info": recorded.append((msg, level))):
             result = reconcile.reconcile_with_broker()   # no prior cache entry -> defaults clean
 
-        check("clean result", result, {"only_local": [], "only_broker": []})
+        check("clean result", result, {"only_local": [], "only_broker": [], "qty_mismatch": []})
         check("no event recorded", len(recorded), 0)
     finally:
         if old is None:
@@ -212,6 +214,41 @@ def test_reconcile_with_broker_no_followup_when_already_clean():
             os.remove(path)
         except OSError:
             pass
+
+
+def test_compare_positions_detects_quantity_divergence():
+    print("\ncompare_positions: REGRESSION for the 2026-09-05 blind spot. The symbol-SET "
+          "comparison above answers 'is this symbol on both sides', never 'how much'. Measured "
+          "on DUK968178: broker 652 AMLP vs 37 mirrored and 453 CPER vs 293 -- both symbols "
+          "present on both sides, so reconcile logged a clean match while ~775 real shares "
+          "sat untracked and unprotected:")
+    out = compare_positions({"AMLP": 652.0, "CPER": 453.0}, {"AMLP", "CPER"},
+                            local_open_qty={"AMLP": 37.0, "CPER": 293.0})
+    check("the set comparison still sees nothing wrong", (out["only_local"], out["only_broker"]),
+          ([], []))
+    check("both quantity divergences are reported",
+          [m["symbol"] for m in out["qty_mismatch"]], ["AMLP", "CPER"])
+    check("the delta says how many shares are unaccounted for",
+          out["qty_mismatch"][0]["delta"], 615.0)
+
+
+def test_compare_positions_quantity_check_is_opt_in_and_quiet_when_matched():
+    print("\ncompare_positions: no false alarms -- matched quantities, sub-share float "
+          "noise, and callers that pass no quantities at all must all stay silent:")
+    check("matching quantities -> no mismatch",
+          compare_positions({"AMLP": 78.0}, {"AMLP"},
+                            local_open_qty={"AMLP": 78.0})["qty_mismatch"], [])
+    check("sub-share float noise is tolerated, not reported",
+          compare_positions({"AMLP": 78.0}, {"AMLP"},
+                            local_open_qty={"AMLP": 77.9})["qty_mismatch"], [])
+    check("omitting local_open_qty keeps the old behaviour exactly",
+          compare_positions({"AMLP": 652.0}, {"AMLP"})["qty_mismatch"], [])
+    check("an EXCLUDED symbol (the SGOV cash shield) is never quantity-checked",
+          compare_positions({"SGOV": 2227.0}, {"SGOV"}, excluded_symbols={"SGOV"},
+                            local_open_qty={"SGOV": 0.0})["qty_mismatch"], [])
+    check("a short recorded against a long broker position is reported, not netted",
+          compare_positions({"HYD": -6402.0}, {"HYD"},
+                            local_open_qty={"HYD": 66.0})["qty_mismatch"][0]["delta"], -6468.0)
 
 
 if __name__ == "__main__":

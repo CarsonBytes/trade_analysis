@@ -624,18 +624,37 @@ def refresh_cheap() -> None:
     # pushed GrossPositionValue to 4.7x the account's own NAV. The fabricated cash/GPV deltas
     # that produced also fooled detect_external_cash_flow() into logging 40 phantom ~103k HKD
     # "deposits", which is how this surfaced: Total P&L read -4,751,290 HKD (-82%).
-    # Re-enable ONLY with the three guards described in heal_flagged_positions()'s docstring
-    # (skip already-past-SL/TP trades, rate-limit per paper_id, and make the flatten path
-    # verify the REAL broker position before selling). Left wired-but-disabled rather than
-    # deleted so the intent and the incident stay visible at the call site.
-    HEAL_FLAGGED_ENABLED = False
-    if HEAL_FLAGGED_ENABLED:
-        try:
-            heal_logs = broker.heal_flagged_positions()
-            if heal_logs:
-                log.info("flagged-position heal: %d action(s) this refresh", len(heal_logs))
-        except Exception as e:
-            log.exception("heal_flagged_positions error: %s", e)
+    # RE-ENABLED 2026-09-05 (user-directed: broker data is the source of reference, and a
+    # position the broker really holds must self-heal even when the local record calls it
+    # resolved). Every precondition the 2026-08-31 note demanded is now met:
+    #   GUARD 1 -- never reopens a trade whose price is already past its own SL/TP. This was
+    #             THE loop: reopen -> reprotect flattens -> resolve re-resolves -> reopen.
+    #   GUARD 2 -- never reopens when the broker's direction contradicts the trade's, so
+    #             corrupt state (paper's HYD: +66 recorded vs -6,402 held) is refused.
+    #   GUARD 3 -- one heal per paper_id per HEAL_COOLDOWN_H (6h).
+    #   GUARD 4 -- HEAL_MAX_PER_CYCLE ceiling per refresh, bounding any hole not yet known;
+    #             the 2026-08-31 damage came from ~96 iterations, not one bad heal.
+    #   flatten path -- manual_close_position() now re-reads the REAL broker position and
+    #             sizes/sides off it, so it cannot sell shares that aren't held.
+    # The note also required existing flagged positions be reconciled BEFORE re-enabling:
+    # verified on both accounts the same day -- live U12991898 had 0 flagged, paper DUK968178
+    # had exactly 1 (#147 CPER, price 39.89 between its 38.17 SL and 42.61 TP, direction
+    # matching a real 453-share long) which is precisely the healable shape this is for.
+    try:
+        # bookkeeping first: reprotect_naked_positions() below sizes its replacement bracket
+        # off ib_mirror.qty, so a stale qty means even a correctly-armed bracket under-covers
+        # the real position. Never sends an order itself.
+        qty_logs = broker.heal_mirror_quantities()
+        if qty_logs:
+            log.info("mirror-qty heal: %d correction(s) this refresh", len(qty_logs))
+    except Exception as e:
+        log.exception("heal_mirror_quantities error: %s", e)
+    try:
+        heal_logs = broker.heal_flagged_positions()
+        if heal_logs:
+            log.info("flagged-position heal: %d action(s) this refresh", len(heal_logs))
+    except Exception as e:
+        log.exception("heal_flagged_positions error: %s", e)
     # ADDED 2026-08-18: MUST run before close_expired_trades()/resolve_open() below -- a
     # resting TP/SL bracket can vanish at the broker independent of anything this app does
     # (confirmed live: a paper-gateway session drop lost a sleeve trade's bracket, leaving a

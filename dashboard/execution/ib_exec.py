@@ -250,6 +250,28 @@ def mirrored_open_symbols() -> set[str]:
             "SELECT local_symbol FROM ib_mirror WHERE status='OPEN'").fetchall()}
 
 
+def mirrored_open_qty() -> dict[str, float]:
+    """Signed per-symbol quantity this dashboard believes is open at the broker, summed
+    across every OPEN mirror row for that symbol.
+
+    ADDED 2026-09-05: reconcile_with_broker() compared SYMBOL SETS only, so it was blind to
+    every quantity divergence. Measured on DUK968178 the day this was written: the broker
+    held 652 AMLP against 37 mirrored, and 453 CPER against 293 -- both symbols were present
+    on each side, so reconcile reported a clean match while ~615 AMLP and 160 CPER shares
+    sat completely untracked and unprotected. A partial-close failure, or a close that was
+    marked CLOSED locally but never actually executed, is invisible to a set comparison by
+    construction; it needs the numbers."""
+    with paper._LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT m.local_symbol, m.qty, t.direction FROM ib_mirror m "
+            "LEFT JOIN paper_trades t ON t.id = m.paper_id WHERE m.status='OPEN'").fetchall()
+    out: dict[str, float] = {}
+    for sym, qty, direction in rows:
+        sign = -1.0 if (direction or "long") == "short" else 1.0
+        out[sym] = out.get(sym, 0.0) + sign * float(qty or 0.0)
+    return out
+
+
 # ---- actions ----------------------------------------------------------------
 
 def within_entry_execution_window(now: dt.datetime | None = None,
@@ -1239,6 +1261,31 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
 
 # ---- read-only views (UI / analysis) ---------------------------------------
 
+def allocate_broker_qty(real_abs: float, recorded: list[float]) -> list[float]:
+    """Split the broker's REAL position size across the N local mirror rows that share one
+    con_id. Broker truth is the invariant: the returned list always sums to `real_abs`,
+    whatever the local rows happen to claim.
+
+    - ONE row  -> it takes the whole real position. Deliberate, and the reason a stale local
+      qty can never UNDER-state real exposure: paper's CPER mirror row said 293 shares while
+      the broker held 453, and the dashboard must show (and protect) all 453.
+    - N rows   -> pro-rata by each row's own recorded qty, with the last row absorbing the
+      rounding remainder so the sum stays exact rather than drifting by a fraction of a share.
+    - all recorded quantities zero/missing -> split evenly. A missing local qty must never
+      make a real broker position disappear from the dashboard entirely.
+    """
+    n = len(recorded)
+    if n == 1:
+        return [real_abs]
+    rec = [max(0.0, float(r or 0.0)) for r in recorded]
+    tot = sum(rec)
+    if tot <= 0:
+        rec, tot = [1.0] * n, float(n)
+    shares = [real_abs * r / tot for r in rec[:-1]]
+    shares.append(real_abs - sum(shares))
+    return shares
+
+
 def live_positions() -> dict | None:
     """Map paper_id -> live IB position for OUR trades (matched via the ib_mirror
     table's con_id). Returns None on a CONNECTION failure (so callers keep last-good)
@@ -1258,8 +1305,22 @@ def live_positions() -> dict | None:
             {i.contract.conId: i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)}))
     except Exception:                                  # noqa: BLE001 -- read failed, keep last-good
         return None
-    out: dict[int, dict] = {}
+    # FIXED 2026-09-05: group by con_id FIRST. Two OPEN mirror rows can legitimately share
+    # one con_id (the same instrument entered twice, each its own strategy trade), but the
+    # broker reports ONE aggregate position for the pair -- and this loop used to hand that
+    # whole position to EVERY row that matched it. Confirmed live on U12991898: AMLP had
+    # mirror rows #16 (21 sh) and #54 (57 sh) against a real 78-share broker position, and
+    # BOTH were given volume=78 and profit=+79.16. 156 shares and double the unrealized P&L
+    # then flowed into the allocation pie, the asset-class exposure bars, active_panel()'s
+    # cards and pnl_crosscheck()'s unrealized leg (measured: attributed +147.31 vs the
+    # broker's real +68.15 across strategy positions -- the entire 79.16 gap was this).
+    # Broker truth is now split ACROSS the group, so the attributed total always equals the
+    # real position exactly.
+    by_con: dict[int, list[tuple[int, float, str]]] = {}
     for paper_id, con_id, qty, local_symbol in rows:
+        by_con.setdefault(con_id, []).append((paper_id, float(qty or 0.0), local_symbol))
+    out: dict[int, dict] = {}
+    for con_id, group in by_con.items():
         p = positions.get(con_id)
         if p is None or p.position == 0:
             continue
@@ -1273,28 +1334,126 @@ def live_positions() -> dict | None:
         # close) while the real price was 664.37, a $11/1.65% gap, silently feeding a wrong
         # unrealized-R figure too. The broker already reports a fresh mark on every open
         # position; this was simply never read.
-        out[paper_id] = {
-            "ticket": con_id, "open": float(p.avgCost or 0),
-            "profit": float(pf.unrealizedPNL) if pf else 0.0,
-            "current_price": float(pf.marketPrice) if pf and pf.marketPrice else None,
-            "volume": float(abs(p.position)),
-            "direction": "long" if p.position > 0 else "short",
-            # ADDED 2026-08-17: found live -- app.py's allocation pie looks up each slice's
-            # LABEL via paper.open_trades() (paper_trades status='OPEN'), completely separate
-            # from this dict's own con_id-matched VALUE. A real position whose paper_trades
-            # row resolved (e.g. horizon-expiry marked it EXPIRED) without the broker-side
-            # close actually executing -- confirmed live: 5 real LIVE positions (AMLP/CPER/
-            # DBC/IWM/VNQ) sat with a real dollar value correctly included in every portfolio
-            # total, but rendered as a bare unlabeled paper_id number on the pie chart, because
-            # the label lookup had nothing to find. ib_mirror's own local_symbol is always
-            # correct regardless of paper_trades' status, so give callers a reliable fallback
-            # instead of them falling back to str(paper_id).
-            "symbol": local_symbol}
+        real_abs = abs(float(p.position))
+        total_pnl = float(pf.unrealizedPNL) if pf and pf.unrealizedPNL is not None else 0.0
+        alloc = allocate_broker_qty(real_abs, [q for _pid, q, _s in group])
+        for (paper_id, _qty, local_symbol), sh in zip(group, alloc):
+            if sh <= 0:
+                continue
+            out[paper_id] = {
+                "ticket": con_id, "open": float(p.avgCost or 0),
+                "profit": total_pnl * (sh / real_abs) if real_abs else 0.0,
+                "current_price": float(pf.marketPrice) if pf and pf.marketPrice else None,
+                "volume": sh,
+                "direction": "long" if p.position > 0 else "short",
+                # ADDED 2026-08-17: found live -- app.py's allocation pie looks up each slice's
+                # LABEL via paper.open_trades() (paper_trades status='OPEN'), completely separate
+                # from this dict's own con_id-matched VALUE. A real position whose paper_trades
+                # row resolved (e.g. horizon-expiry marked it EXPIRED) without the broker-side
+                # close actually executing -- confirmed live: 5 real LIVE positions (AMLP/CPER/
+                # DBC/IWM/VNQ) sat with a real dollar value correctly included in every portfolio
+                # total, but rendered as a bare unlabeled paper_id number on the pie chart, because
+                # the label lookup had nothing to find. ib_mirror's own local_symbol is always
+                # correct regardless of paper_trades' status, so give callers a reliable fallback
+                # instead of them falling back to str(paper_id).
+                "symbol": local_symbol}
     return out
 
 
 HEAL_LOG_KEY = "heal_flagged_last"   # {paper_id: unix_ts} of the last heal, for the cooldown
 HEAL_COOLDOWN_H = 6                  # GUARD 3: at most one heal per trade per this many hours
+HEAL_MAX_PER_CYCLE = 2               # GUARD 4: hard ceiling on heals per refresh
+
+
+def mirror_qty_action(real: float, group: list[tuple]) -> tuple[str, float]:
+    """PURE decision behind heal_mirror_quantities() -- unit-testable without a broker or a
+    database. `group` is the OPEN mirror rows sharing one con_id, each
+    (paper_id, con_id, qty, local_symbol, direction); `real` is the broker's SIGNED position.
+    Returns (action, value): "update" with the corrected quantity, or one of "ok" /
+    "ambiguous" / "direction" / "flat" with the real size, meaning leave it alone."""
+    real_abs = abs(float(real))
+    if not real_abs:
+        return ("flat", 0.0)
+    recorded = sum(float(g[2] or 0.0) for g in group)
+    if len(group) > 1:
+        return ("ok" if abs(recorded - real_abs) <= 0.5 else "ambiguous", real_abs)
+    direction = group[0][4]
+    if abs(recorded - real_abs) <= 0.5:
+        return ("ok", real_abs)
+    if direction and ((float(real) > 0) != (direction == "long")):
+        return ("direction", real_abs)
+    return ("update", real_abs)
+
+
+def heal_mirror_quantities() -> list[str]:
+    """Make ib_mirror.qty agree with what the broker ACTUALLY holds -- bookkeeping only, this
+    function never sends an order.
+
+    ADDED 2026-09-05, user-directed ("broker data should be the original source of reference,
+    even if the local strategy record shows them already resolved"). ib_mirror.qty records
+    what we ASKED for at order time; nothing ever trued it up afterwards, so a close that was
+    marked CLOSED locally but never actually executed at the broker leaves its shares behind
+    with no local row claiming them. Measured on DUK968178: the broker held 652 AMLP against
+    a single OPEN mirror row of 37 (the other 615 belonged to row #132, marked CLOSED), and
+    453 CPER against 293. Those ~775 shares were real, and invisible to both the symbol-set
+    reconcile and to reprotect_naked_positions(), which sizes its replacement bracket off
+    this very column -- so even the protection it did arm covered only part of the position.
+
+    Deliberately conservative -- it only rewrites a quantity when the attribution is
+    unambiguous:
+    - exactly ONE OPEN mirror row for that con_id. With two or more, there is no way to know
+      which trade the extra shares belong to; log it and leave it for a human.
+    - the broker's DIRECTION must agree with the trade's. A "long" trade sitting on a short
+      broker position is corrupt state (paper's HYD: +66 recorded, -6,402 held), not a stale
+      quantity -- same reasoning as heal_flagged_positions()' GUARD 2.
+    """
+    ib = _guard()
+    if ib is None:
+        return []
+    acct = ib_client.account_id()
+    try:
+        positions = ib_client.call(lambda: {
+            p.contract.conId: p for p in ib_client.filter_by_account(ib.positions() or [], acct)})
+    except Exception:                                  # noqa: BLE001 -- read failed, do nothing
+        return []
+    with paper._LOCK, _conn() as c:
+        rows = c.execute(
+            "SELECT m.paper_id, m.con_id, m.qty, m.local_symbol, t.direction "
+            "FROM ib_mirror m LEFT JOIN paper_trades t ON t.id = m.paper_id "
+            "WHERE m.status='OPEN'").fetchall()
+    by_con: dict[int, list[tuple]] = {}
+    for r in rows:
+        by_con.setdefault(r[1], []).append(r)
+    logs: list[str] = []
+    for con_id, group in by_con.items():
+        p = positions.get(con_id)
+        if p is None or not p.position:
+            continue
+        real = float(p.position)
+        action, real_abs = mirror_qty_action(real, group)
+        paper_id, _con, qty, local_symbol, direction = group[0]
+        if action == "ambiguous":
+            log.warning("ib_exec: mirror qty for con %s (%s) sums to %.0f but the broker holds "
+                        "%.0f across %d OPEN rows -- ambiguous attribution, not auto-corrected; "
+                        "needs review.", con_id, local_symbol,
+                        sum(float(g[2] or 0.0) for g in group), real_abs, len(group))
+            continue
+        if action == "direction":
+            log.warning("ib_exec: NOT correcting mirror qty for #%s %s -- trade is %s but the "
+                        "broker position is %s; corrupt state, not a stale quantity.",
+                        paper_id, local_symbol, direction, "long" if real > 0 else "short")
+            continue
+        if action != "update":
+            continue
+        with paper._LOCK, _conn() as c:
+            c.execute("UPDATE ib_mirror SET qty=? WHERE paper_id=?", (real_abs, paper_id))
+        msg = (f"#{paper_id} {local_symbol}: mirror qty corrected {float(qty or 0):.0f} -> "
+               f"{real_abs:.0f} from broker truth")
+        logs.append(msg)
+        log.warning("ib_exec: %s", msg)
+        from dashboard.core import notable_events
+        notable_events.record(msg, level="warning")
+    return logs
 
 
 def heal_flagged_positions() -> list[str]:
@@ -1379,7 +1538,37 @@ def heal_flagged_positions() -> list[str]:
             logs.append(msg)
             log.warning("ib_exec: %s", msg)
             notable_events.record(f"Flagged position auto-healed: {msg}", level="warning")
+            # GUARD 4 (2026-09-05): hard ceiling per refresh. GUARDS 1-3 each close a
+            # specific hole; this one bounds the blast radius of any hole not yet known,
+            # because the 2026-08-31 incident's damage came from ITERATION COUNT (~96 in one
+            # session), not from any single heal being wrong. Anything genuinely healable is
+            # still healed, just over several cycles instead of all at once.
+            if len(logs) >= HEAL_MAX_PER_CYCLE:
+                log.info("ib_exec: heal cap (%d/refresh) reached -- remaining flagged "
+                         "positions will be picked up next cycle.", HEAL_MAX_PER_CYCLE)
+                break
     return logs
+
+
+def zero_order_streak_action(prev_streak, has_positions: bool,
+                             any_open_orders: bool) -> tuple[str, int]:
+    """PURE: should reprotect_naked_positions() believe an EMPTY open-order snapshot?
+
+    -> ("proceed"|"skip", new_streak). See the call site for the full history; in short,
+    2026-09-01 made an empty snapshot mean "unknown" so a transient post-reconnect empty
+    could not stack duplicate brackets, and 2026-09-05 found that this made it mean unknown
+    FOREVER -- paper held four real, genuinely unprotected positions that could never be
+    re-armed. Persistence separates the two: any non-empty snapshot resets the streak to 0,
+    so a transient empty never accumulates, while a book that is really flat on orders
+    proves it over REPROTECT_ZERO_CONFIRM consecutive cycles."""
+    if not has_positions or any_open_orders:
+        return ("proceed", 0)
+    n = int(prev_streak or 0) + 1
+    return (("proceed" if n >= REPROTECT_ZERO_CONFIRM else "skip"), n)
+
+
+REPROTECT_ZERO_KEY = "reprotect_zero_orders_streak"
+REPROTECT_ZERO_CONFIRM = 3   # consecutive empty order snapshots before believing them
 
 
 def reprotect_naked_positions() -> list[str]:
@@ -1406,6 +1595,7 @@ def reprotect_naked_positions() -> list[str]:
     ib = _guard()
     if ib is None:
         return []
+    from dashboard.core import store
     acct = ib_client.account_id()
     with paper._LOCK, _conn() as c:
         rows = c.execute(
@@ -1449,11 +1639,30 @@ def reprotect_naked_positions() -> list[str]:
     # changed the SOURCE (openTrades -> reqAllOpenOrders) but never handled the empty result,
     # which is exactly what the unsynced window returns. Treat empty-with-positions-held as
     # UNKNOWN and retry next cycle rather than acting on it.
-    if rows and not open_con_ids:
+    # REFINED 2026-09-05: the 2026-09-01 guard above returned unconditionally, which made
+    # "zero orders" mean UNKNOWN *forever* -- and an account can genuinely reach zero orders
+    # and stay there. Confirmed live the day this was written: after the 2026-09-02 duplicate-
+    # bracket cleanup, DUK968178 held VNQ/HYG/AMLP/CPER with reqAllOpenOrders() returning an
+    # empty set on every cycle, so all four real positions sat completely unprotected and this
+    # function could never re-arm them -- the guard against over-protecting had become a
+    # guarantee of under-protecting. What actually distinguishes the two cases is PERSISTENCE:
+    # the unsynced-snapshot window is seconds long, so an empty result that survives several
+    # consecutive cycles is real. Confirm it across REPROTECT_ZERO_CONFIRM cycles (~4 min at
+    # the current cadence, far outside any sync window) before acting; any non-empty result
+    # resets the counter, so a single transient empty can never accumulate toward acting.
+    _prev, _ts = store.cache_get(REPROTECT_ZERO_KEY)
+    _action, _streak = zero_order_streak_action(_prev, bool(rows), bool(open_con_ids))
+    store.cache_set(REPROTECT_ZERO_KEY, _streak)
+    if _action == "skip":
         log.warning("ib_exec: reprotect skipped -- broker reported ZERO open orders while %d "
-                    "funded position(s) are held; treating as an unsynced snapshot, not as "
-                    "'all naked' (see the 2026-09-01 duplicate-bracket incident)", len(rows))
+                    "funded position(s) are held (%d/%d consecutive); treating as an unsynced "
+                    "snapshot for now (see the 2026-09-01 duplicate-bracket incident)",
+                    len(rows), _streak, REPROTECT_ZERO_CONFIRM)
         return []
+    if _streak:
+        log.warning("ib_exec: broker has reported ZERO open orders for %d consecutive cycles "
+                    "while holding %d funded position(s) -- this is a real unprotected book, "
+                    "not an unsynced snapshot; re-arming brackets.", _streak, len(rows))
     logs: list[str] = []
     from dashboard.core import notable_events
     for paper_id, con_id, qty, instrument, direction, sl, tp in rows:

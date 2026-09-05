@@ -482,9 +482,35 @@ specific to paper; the same code was live. The rules that came out of it:
 5. **A wrong number is often a symptom, not the bug.** This surfaced as Total P&L reading
    −4,751,290 HKD (−82%). The P&L maths was correct; the loop had fabricated cash/GPV deltas,
    which `detect_external_cash_flow()` faithfully booked as 40 phantom ~103k "deposits".
-   `heal_flagged_positions()` stays **disabled** at its call site in `web/service.py` until an
-   account's existing flagged positions are reconciled — re-enabling it against broken state
-   would simply start healing the breakage.
+   `heal_flagged_positions()` stayed **disabled** at its call site in `web/service.py` until an
+   account's existing flagged positions were reconciled — re-enabling it against broken state
+   would simply start healing the breakage. **Re-enabled 2026-09-05**, after live was
+   confirmed at 0 flagged and paper's single flagged trade was confirmed healable, and with a
+   fourth guard added: `HEAL_MAX_PER_CYCLE` caps heals per refresh, because the damage came
+   from ~96 *iterations*, not from any one heal being wrong.
+
+### Broker data is the source of truth (added 2026-09-05)
+
+Local records — `paper_trades.status`, `ib_mirror.status`, `ib_mirror.qty` — describe what
+this system *intended*. Only the broker knows what is actually held. Wherever the two
+disagree, the broker wins, and the disagreement is repaired rather than hidden:
+
+- **Attribution must sum to the real position.** When several local rows map to one broker
+  position, broker truth is split across them (`allocate_broker_qty()`), never handed to each
+  in full. The previous behaviour double-counted a live position's shares *and* its P&L.
+- **Reconcile compares quantities, not just symbols.** A symbol-set check cannot see a
+  partial close or a close that was recorded but never executed — 775 real shares were
+  untracked and unprotected behind a "clean match".
+- **`ib_mirror.qty` is trued up from the broker** (`heal_mirror_quantities()`), because
+  protection is sized off that column; a stale quantity means a correctly-armed bracket that
+  still under-covers the position. Bookkeeping only — it never sends an order — and it refuses
+  to guess when attribution is ambiguous or the broker's direction contradicts the record.
+- **A resolved local record does not close a real position.** If the broker still holds it,
+  the trade is reopened with a fresh horizon so the normal exits can act on it for real.
+- **"Zero open orders" is only believed once it persists.** Treating a single empty snapshot
+  as truth stacks duplicate brackets; treating it as permanently unknown leaves real positions
+  permanently unprotected. Both happened. It now takes several consecutive empty snapshots,
+  and any non-empty one resets the count.
 
 ---
 

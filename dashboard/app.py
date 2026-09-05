@@ -2395,8 +2395,11 @@ def active_panel() -> None:
     flagged = {pid: p for pid, p in positions.items() if pid not in {t["id"] for t in open_t}}
     if flagged:
         ui.label(f"⚠️ Flagged positions ({len(flagged)}) — broker holds these for real, but "
-                 "the local strategy record shows them already resolved. Read-only; needs "
-                 "manual review (see HANDOFF.md 2026-08-17).").classes(
+                 "the local strategy record shows them already resolved. Auto-heal runs every "
+                 "refresh and reopens whatever it safely can; anything still listed here was "
+                 "REFUSED by a guard (price already past its own SL/TP, or the broker's "
+                 "direction contradicts the trade) and needs a human. Read-only "
+                 "(see HANDOFF.md 2026-08-17, 2026-09-05).").classes(
             "text-sm font-bold text-orange-9 mt-2")
         with ui.row().classes("w-full flex-wrap gap-3"):
             for pid, p in sorted(flagged.items(), key=lambda kv: kv[1].get("symbol") or str(kv[0])):

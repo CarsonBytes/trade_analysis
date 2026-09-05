@@ -2029,6 +2029,128 @@ def test_manual_close_position_only_ever_reduces_exposure():
     check("broker flat -> no order at all", _manual_close_order(0, 66), None)
 
 
+def test_allocate_broker_qty_always_sums_to_broker_truth():
+    print("\nallocate_broker_qty: REGRESSION for the 2026-09-05 double-count. Two OPEN mirror "
+          "rows sharing one con_id each received the WHOLE broker position (live AMLP: rows "
+          "#16=21sh and #54=57sh both got volume=78 against a real 78-share position), so 156 "
+          "shares and 2x the unrealized P&L reached the pie chart, the exposure bars and "
+          "pnl_crosscheck(). The invariant: whatever the local rows claim, the split sums to "
+          "exactly what the broker holds:")
+    from dashboard.execution.ib_exec import allocate_broker_qty as alloc
+    check("the real live case: 78 broker shares across rows of 21 and 57",
+          alloc(78.0, [21.0, 57.0]), [21.0, 57.0])
+    check("sums to broker truth even when the local rows disagree with it",
+          sum(alloc(100.0, [21.0, 57.0])), 100.0)
+    check("single row takes the whole position (stale local qty must not UNDER-state "
+          "real exposure -- paper CPER: mirror 293, broker 453)",
+          alloc(453.0, [293.0]), [453.0])
+    check("three rows still sum exactly (no rounding drift)",
+          sum(alloc(10.0, [1.0, 1.0, 1.0])), 10.0)
+    check("all-zero local quantities split evenly rather than dropping the position",
+          alloc(10.0, [0.0, 0.0]), [5.0, 5.0])
+    check("a zero-qty row alongside a real one never hides broker shares",
+          sum(alloc(50.0, [0.0, 50.0])), 50.0)
+
+
+def test_live_positions_never_double_counts_a_shared_con_id():
+    print("\nlive_positions(): the same regression at the real call site -- one broker "
+          "position, two mirror rows, and the attributed total must equal the broker's:")
+    from dashboard.execution import ib_exec
+
+    class _C:
+        def __init__(self, con_id): self.conId = con_id
+
+    class _P:
+        def __init__(self, con_id, pos): self.contract, self.position, self.avgCost = _C(con_id), pos, 54.68
+
+    class _PF:
+        def __init__(self, con_id):
+            self.contract, self.unrealizedPNL, self.marketPrice = _C(con_id), 79.16, 55.70
+
+    rows = [(16, 419585780, 21.0, "AMLP"), (54, 419585780, 57.0, "AMLP")]
+    with mock.patch.object(ib_exec.ib_client, "is_available", return_value=True),          mock.patch.object(ib_exec.ib_client, "_ensure_conn", return_value=object()),          mock.patch.object(ib_exec.ib_client, "account_id", return_value="U1"),          mock.patch.object(ib_exec.ib_client, "call",
+                           return_value=({419585780: _P(419585780, 78.0)},
+                                         {419585780: _PF(419585780)})),          mock.patch.object(ib_exec, "_conn"), mock.patch.object(ib_exec.paper, "_LOCK"):
+        ib_exec._conn.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = rows
+        out = ib_exec.live_positions()
+    check("both trades still appear", sorted(out), [16, 54])
+    check("attributed shares sum to the broker's real 78, not 156",
+          sum(p["volume"] for p in out.values()), 78.0)
+    check("unrealized P&L sums to the broker's real +79.16, not double",
+          round(sum(p["profit"] for p in out.values()), 2), 79.16)
+    check("split follows each row's own recorded qty", out[16]["volume"], 21.0)
+
+
+def test_mirrored_open_qty_is_signed_and_summed_per_symbol():
+    print("\nmirrored_open_qty(): reconcile compared symbol SETS only, so 652 broker AMLP vs "
+          "37 mirrored read as a clean match. This is the quantity it was missing:")
+    from dashboard.execution import ib_exec
+    rows = [("AMLP", 21.0, "long"), ("AMLP", 57.0, "long"), ("HYD", 66.0, "short"),
+            ("CPER", 293.0, None)]
+    with mock.patch.object(ib_exec, "_conn"), mock.patch.object(ib_exec.paper, "_LOCK"):
+        ib_exec._conn.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = rows
+        out = ib_exec.mirrored_open_qty()
+    check("multiple rows for one symbol are summed", out["AMLP"], 78.0)
+    check("a short trade contributes a NEGATIVE quantity", out["HYD"], -66.0)
+    check("a missing direction defaults to long rather than vanishing", out["CPER"], 293.0)
+
+
+def test_mirror_qty_action_trusts_the_broker_but_refuses_ambiguity():
+    print("\nmirror_qty_action: ib_mirror.qty records what we ASKED for at order time and was "
+          "never trued up, so a close marked CLOSED locally that never executed leaves its "
+          "shares with no local row claiming them (paper: 652 AMLP held vs 37 mirrored, 453 "
+          "CPER vs 293). reprotect_naked_positions() sizes its replacement bracket off this "
+          "column, so a stale qty means even correct protection under-covers the position. "
+          "Corrects it from broker truth -- but only where attribution is unambiguous:")
+    from dashboard.execution.ib_exec import mirror_qty_action as act
+
+    def row(pid, qty, sym="AMLP", direction="long"):
+        return (pid, 419585780, qty, sym, direction)
+
+    check("the real paper case: 652 held vs one row of 37 -> corrected to broker truth",
+          act(652.0, [row(151, 37.0)]), ("update", 652.0))
+    check("a close that only PARTIALLY filled shrinks the row too (broker is truth both ways)",
+          act(10.0, [row(151, 37.0)]), ("update", 10.0))
+    check("already matching -> no write",
+          act(78.0, [row(151, 78.0)]), ("ok", 78.0))
+    check("sub-share float noise is not a correction",
+          act(78.0, [row(151, 77.8)]), ("ok", 78.0))
+    check("TWO rows summing to the broker total -> nothing to fix (live AMLP #16+#54)",
+          act(78.0, [row(16, 21.0), row(54, 57.0)]), ("ok", 78.0))
+    check("TWO rows NOT summing to it -> ambiguous, never auto-attributed to one trade",
+          act(100.0, [row(16, 21.0), row(54, 57.0)]), ("ambiguous", 100.0))
+    check("broker SHORT against a long trade -> refused (paper HYD: +66 recorded, -6402 held)",
+          act(-6402.0, [row(150, 66.0, "HYD", "long")]), ("direction", 6402.0))
+    check("a genuine short trade IS corrected against a short broker position",
+          act(-50.0, [row(149, 10.0, "CWB", "short")]), ("update", 50.0))
+    check("broker flat -> nothing to do", act(0.0, [row(151, 37.0)]), ("flat", 0.0))
+
+
+def test_zero_order_snapshot_must_persist_before_it_is_believed():
+    print("\nzero_order_streak_action: the 2026-09-01 guard made an EMPTY open-order "
+          "snapshot mean UNKNOWN so a transient post-reconnect empty could not stack duplicate "
+          "brackets (live CPER/IWM/QQQ each got a second bracket in a separate OCA group -- a "
+          "stop would have sold ~2x the shares held). But it returned unconditionally, so "
+          "empty meant unknown FOREVER: measured 2026-09-05, paper held VNQ/HYG/AMLP/CPER with "
+          "zero resting orders on every cycle, so all four sat unprotected and could never be "
+          "re-armed. Persistence is what separates the two cases:")
+    from dashboard.execution.ib_exec import zero_order_streak_action as act, REPROTECT_ZERO_CONFIRM
+
+    check("first empty snapshot -> skip (this is the transient reconnect case)",
+          act(0, has_positions=True, any_open_orders=False), ("skip", 1))
+    check("second consecutive empty -> still skip",
+          act(1, has_positions=True, any_open_orders=False), ("skip", 2))
+    check("confirmed across enough cycles -> proceed, the book really is unprotected",
+          act(REPROTECT_ZERO_CONFIRM - 1, has_positions=True, any_open_orders=False),
+          ("proceed", REPROTECT_ZERO_CONFIRM))
+    check("ANY open order resets the streak -- a transient empty can never accumulate",
+          act(2, has_positions=True, any_open_orders=True), ("proceed", 0))
+    check("no positions held -> nothing to protect, no streak",
+          act(2, has_positions=False, any_open_orders=False), ("proceed", 0))
+    check("a missing/None cached streak starts from zero rather than raising",
+          act(None, has_positions=True, any_open_orders=False), ("skip", 1))
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
