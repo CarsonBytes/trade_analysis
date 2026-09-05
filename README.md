@@ -512,6 +512,22 @@ disagree, the broker wins, and the disagreement is repaired rather than hidden:
   permanently unprotected. Both happened. It now takes several consecutive empty snapshots,
   and any non-empty one resets the count.
 
+### Reading the two accounts' performance (as of 2026-09-05)
+
+**Paper's headline P&L is not comparable to live's right now.** Over the same 24 days paper
+shows +2.96% and live −0.28%, but on *realized* trades both are flat and live is marginally
+ahead (−$7.49 vs +$24.60). ~80% of paper's figure is unrealized mark-to-market on the
+−6,402-share HYD short left behind by the 2026-08-31 runaway-order loop — an accident, not a
+strategy result, and the sole reason paper's GPV/NAV reads 4.71×. Strip it and paper is
++0.66%. Until that short is unwound, judge the strategy on realized trades and on the
+strategy-attributed unrealized line, not on the account headline.
+
+**Live's own number is also an unclean read:** 74% of its funded entries (49 of 66) never
+filled, each cancelled by broker error 202 and re-attempted next cycle, so live is running a
+heavily-sampled subset of the strategy rather than the strategy. Cause unconfirmed — see
+HANDOFF's 2026-09-05 retro. Fixing that fill rate matters more than any strategy question
+currently open on live.
+
 ---
 
 ## Setup (uv)

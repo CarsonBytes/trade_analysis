@@ -74,6 +74,50 @@ double-count correction. Re-verify once the gateway is back.
 
 ---
 
+### 📊 RETRO 2026-09-05: paper does NOT outperform live -- the gap is an accident
+
+User ask: *"retro why paper account has better performance than live one"*. It doesn't, once
+the numbers are decomposed. Same 24-day window (2026-08-12 -> 2026-09-05), deposit-adjusted:
+
+    PAPER   +30,385 HKD  (+2.96%)   GPV/NAV 4.71x
+    LIVE       -542 HKD  (-0.28%)   GPV/NAV 0.86x
+
+**On realized trading both are flat, and live is marginally AHEAD**: paper -$7.49 across 20
+funded closes (40% win, totalR +0.28), live +$24.60 across its 10 real closes. The entire
+headline gap is unrealized, and paper's unrealized decomposes as:
+
+    HYD accidental short   +3,101.56 USD  = +24,318 HKD   <-- 80% of the total
+    strategy positions     +1,367.13 USD  = +10,719 HKD
+    SGOV                     -547.77 USD  =  -4,295 HKD
+    CWB accidental short      -83.47 USD  =    -654 HKD
+
+**Paper's outperformance IS the -6,402-share HYD short created by the 2026-08-31 runaway-order
+loop**, which happens to be profitable right now. Strip it and paper is +0.66% against live's
+-0.28% -- a 0.94pp gap, not 3.24pp. Strategy exposure is near-identical (paper 62.4% of NAV,
+live 64.9%), so this is not a leverage difference either; the 4.71x GPV/NAV is that same
+short. HYD has moved only -0.97% from its average cost, so this is luck, not edge: a 5%
+adverse move is roughly -$16k. It is also currently blocking new paper entries (100% of
+PORTFOLIO_CAP shows committed). Unwinding it is now a measurement issue as well as a risk one
+-- until it is gone, paper's P&L is not a usable comparison baseline.
+
+**The one real live-specific problem: 49 of 66 funded live rows never filled (74%)**, against
+1 of 24 on paper -- concentrated in CWB (21), DBC (12), EFA (9), each cancelled by broker
+**error 202** and re-attempted on the next signal cycle. NOT a funding rejection: live's
+BuyingPower is HKD 1,317,955 against a HKD 221,805 NAV, and QQQ #79 filled on 2026-09-04 while
+others were cancelled the same day. Live is therefore running a heavily-sampled SUBSET of the
+strategy, which makes its results an unclean read in both directions.
+
+**Cause not yet confirmed** -- deliberately left open rather than guessed. The leading
+candidate is the entry bracket setting `tif="GTC"` on a MKT parent (`_place_etf_bracket`,
+ib_exec.py ~line 588) while this account's order presets are already documented to cancel
+outright on a TIF conflict (see the 2026-08-18 note at ib_exec.py ~line 896: "Error 10349:
+Order TIF was set to DAY based on order preset", terminal status Cancelled, filled=0). No
+10349 appears in live's changelog, so this is a hypothesis, not a finding. Confirming it needs
+a real order placement, which needs the gateway back (Tuesday's open at the earliest). **This
+is the highest-value open item on live** -- a 74% miss rate dominates any strategy question.
+
+---
+
 ### 🔥 FIXED 2026-09-05: the gateway login watchdog 2FA-spammed the phone all weekend
 
 User report: *"even at weekends, 2fa still prompt"*. Correct, and measurable.

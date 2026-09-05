@@ -54,11 +54,44 @@ port_open() {
         "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i \":${container_hex}\" | grep -qi ' 0A '"
 }
 
+# --- weekend / holiday gate (ADDED 2026-09-05) --------------------------------
+# This script had NO calendar gate at all while the scheduled relogin cron beside it is
+# weekday-only (`0 20 * * 1-5`). IBKR's weekly server reset means the gateway cannot hold a
+# login through much of the weekend, so the API port stays closed and this watchdog cycled a
+# relogin -- each one a "APPROVE THE SECOND-FACTOR PROMPT" push to the phone -- three times
+# an hour, around the clock. Measured 2026-08-29..31: 21 cycles Sat, 52 Sun, 31 Mon vs 4-11
+# on a weekday. See dashboard/ops/gateway_window.py for why this asks the NYSE calendar
+# rather than testing day-of-week (2026-09-07 is a Labor Day Monday).
+# Fails ACTIVE: if the container is down or the calendar errors, behave exactly as before.
+market_quiet() {
+    docker exec -w /app -e PYTHONPATH=/app quant-dashboard-docker         /app/.venv/bin/python -m dashboard.ops.gateway_window >/dev/null 2>&1
+}
+QUIET=0
+if market_quiet; then QUIET=1; fi
+
 for t in paper live; do
     if port_open "$t"; then
-        rm -f "$ST/$t.since" "$ST/$t.attempts"      # healthy: clear stall tracking
+        # FIXED 2026-09-05: `.escalated` was never cleared on recovery, only the stall/attempt
+        # files. Since the MANUAL-ACTION-NEEDED push is gated on that file NOT existing, the
+        # single escalation on 2026-08-26 permanently disabled that alarm -- ten days later
+        # the file was still there, so no exhausted-retries notification could ever fire
+        # again on this machine. Recovery must reset the whole ladder, not part of it.
+        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet"               "$ST/$t.escalated" "$ST/$t.escalated.notified"
         continue
     fi
+
+    # No session worth waking anyone for: clear the stall state exactly as the healthy
+    # branch does, so the 5-minute clock starts FRESH when the window reopens and fires one
+    # cycle then -- rather than a stale multi-day clock instantly burning all MAX_ATTEMPTS.
+    if [ "$QUIET" -eq 1 ]; then
+        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.escalated" "$ST/$t.escalated.notified"
+        if [ ! -f "$ST/$t.quiet" ]; then
+            touch "$ST/$t.quiet"
+            log "$t: API port closed, but no US session within reach (weekend/holiday) -- "                "watchdog quiet, no relogin and no phone push until the window reopens"
+        fi
+        continue
+    fi
+    rm -f "$ST/$t.quiet"
 
     # --- track how long the port has been closed (consecutive-minute state) ------
     if [ ! -f "$ST/$t.since" ]; then
