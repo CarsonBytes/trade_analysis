@@ -1673,9 +1673,18 @@ def reprotect_naked_positions() -> list[str]:
     acct = ib_client.account_id()
     with paper._LOCK, _conn() as c:
         rows = c.execute(
-            "SELECT m.paper_id, m.con_id, m.qty, t.instrument, t.direction, t.sl, t.tp "
+            # FIXED 2026-09-11: this required t.status='OPEN', which left a real hole.
+            # A position whose journal row has already RESOLVED but whose broker position is
+            # still held (the "flagged" class) was invisible here -- and
+            # heal_flagged_positions() will not reopen it either when price is past its own
+            # SL/TP, because reopening a past-stop trade is exactly the 2026-08-31 runaway
+            # loop. So a flagged position that ALSO lost its bracket was unprotected and
+            # unreachable by BOTH repair paths, with nothing to close it. Select resolved
+            # rows too and branch on the journal status below.
+            "SELECT m.paper_id, m.con_id, m.qty, t.instrument, t.direction, t.sl, t.tp, "
+            "t.status "
             "FROM ib_mirror m JOIN paper_trades t ON t.id = m.paper_id "
-            "WHERE m.status='OPEN' AND t.status='OPEN'").fetchall()
+            "WHERE m.status='OPEN'").fetchall()
     if not rows:
         return []
     try:
@@ -1739,7 +1748,7 @@ def reprotect_naked_positions() -> list[str]:
                     "not an unsynced snapshot; re-arming brackets.", _streak, len(rows))
     logs: list[str] = []
     from dashboard.core import notable_events
-    for paper_id, con_id, qty, instrument, direction, sl, tp in rows:
+    for paper_id, con_id, qty, instrument, direction, sl, tp, jstatus in rows:
         if con_id in open_con_ids:
             continue                                   # already protected, nothing to do
         pf = portfolio.get(con_id)
@@ -1750,6 +1759,28 @@ def reprotect_naked_positions() -> list[str]:
         past_tp = (price >= float(tp)) if long else (price <= float(tp))
         past_sl = (price <= float(sl)) if long else (price >= float(sl))
         trade = {"id": paper_id, "instrument": instrument}
+        journal_open = (jstatus == "OPEN")
+        if not journal_open:
+            # The flagged class (ADDED 2026-09-11). The journal already decided this trade
+            # exited; the broker never executed it, and now there is no resting order either.
+            # Only ONE action is ever right here: finish the exit for real. Never re-arm a
+            # bracket for a trade the journal considers closed -- that would leave live
+            # protection attached to a record nothing is tracking.
+            if not (past_tp or past_sl):
+                # Price came back INSIDE the band, so the exit is no longer justified. This is
+                # heal_flagged_positions()' case, and its GUARD 1 now passes -- it will reopen
+                # the trade on a coming cycle and the normal path re-arms the bracket. Leaving
+                # it alone here is what keeps the two repair paths from fighting each other.
+                continue
+            reason = ("flagged position (journal already resolved as %s) is past its own %s "
+                      "with NO resting broker order -- finishing the exit that never executed"
+                      % (jstatus, "TP" if past_tp else "SL"))
+            msg = manual_close_position(trade, reason)
+            if msg:
+                logs.append(msg)
+                log.warning("ib_exec: %s", msg)
+                notable_events.record(f"Unexecuted exit completed: {msg}", level="warning")
+            continue
         if past_tp or past_sl:
             reason = ("naked position already past its own take-profit (missing bracket), "
                      "closing now") if past_tp else \

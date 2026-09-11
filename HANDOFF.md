@@ -5,6 +5,78 @@ Last updated 2026-09-11.
 
 ---
 
+### 📝 RETRO 2026-09-11: the repair functions had a hole BETWEEN them
+
+Asked while reviewing the auto-heal fix: *"would autoheal fix the flagged position in future
+for the previous bugs?"* Checking properly turned up a gap neither function was wrong about
+individually.
+
+**The two guards, each correct on its own:**
+
+- `heal_flagged_positions()` GUARD 1 refuses to reopen a trade whose price is already past its
+  own SL/TP. That guard is load-bearing -- reopening a past-stop trade is *exactly* what
+  produced the 2026-08-31 runaway loop (reopen -> reprotect flattens -> resolve re-resolves ->
+  reopen, ~96 iterations, HYD driven to -6,336 shares short).
+- `reprotect_naked_positions()` only ever selected rows where `paper_trades.status='OPEN'`.
+  Its whole mental model is "a live trade lost its protection", and a flagged row is by
+  definition not live.
+
+**The intersection belonged to nobody.** A position that is (a) still held at the broker,
+(b) already resolved in the journal, (c) past its own stop, and (d) missing its bracket is
+unreachable by both: heal refuses to reopen it, reprotect never selects it. It would sit
+unprotected and un-exited indefinitely, its only trace a flagged card reading *"not healed:
+price is already past its own SL"*.
+
+**Why it had not bitten yet.** Paper's flagged #128 VNQ is in states (a)(b)(c) but NOT (d) --
+its bracket is resting (`VNQ SELL STP 203 @ 94.67, PreSubmitted`), armed by reprotect back on
+2026-09-05 while the journal row was still OPEN. It only needed the bracket to vanish once --
+which has happened on this account before, and is the entire reason `reprotect` exists -- to
+become a silent, unprotected position.
+
+**The shape of the mistake, and it is the second time.** On 2026-08-31 two independently-
+correct repair functions *fought* each other into a loop. Here two independently-correct
+repair functions *avoid* each other into a gap. Same root cause both times: each function was
+designed against its own slice of state, and nobody owned the whole matrix. The state space
+for a held broker position is
+`journal status x resting order x price-vs-level`, and it is small enough to enumerate:
+
+    journal    resting order   price       owner                 action
+    ---------------------------------------------------------------------------------------
+    OPEN       yes             any         (nobody needed)       protected, nothing to do
+    OPEN       no              inside      reprotect             re-arm the bracket
+    OPEN       no              past        reprotect             close for real
+    resolved   yes             any         the broker's order    it will fill; stand aside
+    resolved   no              inside      heal_flagged          reopen (GUARD 1 passes)
+    resolved   no              past        *** WAS NOBODY ***    finish the unexecuted exit
+
+The last row is the fix. `reprotect_naked_positions()` now selects resolved rows too and
+branches on journal status: for a resolved row it will ONLY ever close, never re-arm -- arming
+a bracket for a trade the journal considers closed would leave live broker protection attached
+to a record nothing tracks. When price has come back *inside* the band it deliberately stands
+aside, because that is heal's case (GUARD 1 passes again) and the two paths must not fight.
+That "stand aside" line is the direct lesson of 2026-08-31.
+
+It inherits reprotect's existing safety for free, which is why the fix went there rather than
+into a new function: the zero-open-orders streak guard (2026-09-05) means a transient empty
+order snapshot can never be read as "nothing is protected" and mass-close the book -- the
+single most dangerous thing this change could otherwise have done.
+
+**Paper's flagged position resolves itself either way.** #128 VNQ: journal LOSS, broker holds
+203, real stop resting at 94.67, price 94.60. Stops only trigger in RTH, so nothing has fired
+yet. At the next open, either price is at/below 94.67 and the resting stop fills (sync_closures
+marks the mirror CLOSED, flag clears), or price has recovered above 94.67, GUARD 1 stops
+refusing, and heal reopens the trade normally. No intervention is correct here, and forcing a
+close would have cancelled a valid resting order to re-place the same trade worse.
+
+**What genuinely still needs a human: HYD -6,402 and CWB -50.** These are NOT flagged and never
+will be -- their mirror rows are CLOSED, so `live_positions()` cannot see them and heal is
+blind to them by construction; they surface only as `only_broker(untracked)` in reconcile. Even
+if they were visible, GUARD 2 refuses them (journal says HYD long +66, broker holds 6,402
+short). Auto-heal is the wrong tool for corrupt state, deliberately. They need
+`dashboard/ops/unwind_shorts.py APPLY=1` during US market hours.
+
+---
+
 ### 🔥 FIXED 2026-09-11: auto-heal never ran -- a dead clientId fallback left the
 paper dashboard broker-blind for ~10 hours, silently
 

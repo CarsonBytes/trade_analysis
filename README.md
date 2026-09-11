@@ -512,6 +512,32 @@ disagree, the broker wins, and the disagreement is repaired rather than hidden:
   permanently unprotected. Both happened. It now takes several consecutive empty snapshots,
   and any non-empty one resets the count.
 
+### Repair functions own cells in a matrix, not "cases" (added 2026-09-11)
+
+Twice now, two individually-correct repair functions have produced a bug at their boundary:
+on 2026-08-31 they fought each other into a runaway order loop, and on 2026-09-11 they avoided
+each other into a gap where a real, unprotected position was reachable by neither. Both came
+from designing each function against its own slice of state.
+
+For a position the broker actually holds, the state space is
+`journal status x resting order x price-vs-level`, and every cell needs a named owner:
+
+| journal | resting order | price | owner | action |
+|---|---|---|---|---|
+| OPEN | yes | any | — | protected |
+| OPEN | no | inside band | `reprotect_naked_positions` | re-arm bracket |
+| OPEN | no | past level | `reprotect_naked_positions` | close for real |
+| resolved | yes | any | the broker's own order | stand aside, it will fill |
+| resolved | no | inside band | `heal_flagged_positions` | reopen (GUARD 1 passes) |
+| resolved | no | past level | `reprotect_naked_positions` | finish the unexecuted exit |
+
+Two rules fall out of it, and both are load-bearing:
+
+1. **A resolved trade is only ever CLOSED, never re-armed.** Arming a bracket for a record
+   nothing tracks leaves live broker protection with no owner.
+2. **When price returns inside the band, reprotect stands aside** so heal can reopen the trade.
+   Two repair paths acting on the same row in one cycle is the 2026-08-31 loop.
+
 ### Self-healing only works while the broker is reachable (added 2026-09-11)
 
 Every repair function here -- flagged-position heal, mirror-quantity heal, naked-position

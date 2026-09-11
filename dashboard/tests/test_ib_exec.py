@@ -2151,6 +2151,96 @@ def test_zero_order_snapshot_must_persist_before_it_is_believed():
           act(None, has_positions=True, any_open_orders=False), ("skip", 1))
 
 
+def _reprotect_decision(journal_status, price, sl, tp, direction="long", has_order=False):
+    """Drive reprotect_naked_positions()' decision for ONE row and report which branch it
+    takes: "skip" | "close" | "rearm". Everything else is mocked out."""
+    from dashboard.execution import ib_exec
+
+    class _C:
+        def __init__(self, cid): self.conId = cid
+
+    class _PF:
+        def __init__(self, cid, px): self.contract, self.marketPrice = _C(cid), px
+
+    con_id = 555
+    rows = [(9, con_id, 100.0, "VNQ", direction, sl, tp, journal_status)]
+    calls = {"close": 0, "rearm": 0}
+
+    def _fake_close(trade, reason):
+        calls["close"] += 1
+        return "closed %s: %s" % (trade["instrument"], reason)
+
+    def _fake_rearm(ib, trade, con_id_, qty, d, sl_, tp_, acct):
+        calls["rearm"] += 1
+        return "rearmed"
+
+    open_ids = {con_id} if has_order else {2}   # non-empty either way: streak guard satisfied
+    with mock.patch.object(ib_exec, "_guard", return_value=object()), \
+         mock.patch.object(ib_exec.ib_client, "account_id", return_value="DU1"), \
+         mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
+         mock.patch.object(ib_exec.ib_client, "call",
+                           return_value=(open_ids, {con_id: _PF(con_id, price)})), \
+         mock.patch.object(ib_exec, "manual_close_position", side_effect=_fake_close), \
+         mock.patch.object(ib_exec, "_reprotect_bracket", side_effect=_fake_rearm), \
+         mock.patch.object(ib_exec, "_conn"), mock.patch.object(ib_exec.paper, "_LOCK"), \
+         mock.patch("dashboard.core.store.cache_get", return_value=(0, 0)), \
+         mock.patch("dashboard.core.store.cache_set"), \
+         mock.patch("dashboard.core.notable_events.record"):
+        ib_exec._conn.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = rows
+        ib_exec.reprotect_naked_positions()
+    if calls["close"]:
+        return "close"
+    if calls["rearm"]:
+        return "rearm"
+    return "skip"
+
+
+def test_reprotect_finishes_an_exit_that_never_executed():
+    print("\nreprotect_naked_positions(): REGRESSION for the 2026-09-11 gap. It required "
+          "t.status='OPEN', so a FLAGGED position (journal already resolved, broker still "
+          "holding) was invisible to it -- while heal_flagged_positions() also refuses to "
+          "reopen a past-stop trade, because that is the 2026-08-31 runaway loop. A flagged "
+          "position that ALSO lost its bracket was therefore unprotected and unreachable by "
+          "BOTH repair paths, with nothing able to close it:")
+    check("journal RESOLVED + past its stop + no resting order -> finish the exit for real",
+          _reprotect_decision("LOSS", price=94.60, sl=94.67, tp=107.4), "close")
+    check("journal RESOLVED + past its TP + no resting order -> also closes",
+          _reprotect_decision("WIN", price=108.0, sl=94.67, tp=107.4), "close")
+    check("a resolved SHORT past its stop closes too (direction respected: for a short, "
+          "past-stop means price ABOVE the stop)",
+          _reprotect_decision("LOSS", price=52.0, sl=51.0, tp=40.0, direction="short"),
+          "close")
+    check("a resolved SHORT still inside its band stands aside",
+          _reprotect_decision("LOSS", price=45.0, sl=51.0, tp=40.0, direction="short"),
+          "skip")
+
+
+def test_reprotect_never_rearms_a_bracket_for_a_resolved_trade():
+    print("\nreprotect_naked_positions(): a resolved journal row must NEVER get a fresh "
+          "bracket -- that would leave live broker protection attached to a record nothing is "
+          "tracking. If price came back inside the band the exit is no longer justified, and "
+          "that is heal_flagged_positions()' case (its GUARD 1 passes once price is back "
+          "inside), so this must stand aside rather than fight it:")
+    check("resolved + price back INSIDE the band -> stand aside, let heal reopen it",
+          _reprotect_decision("LOSS", price=100.0, sl=94.67, tp=107.4), "skip")
+    check("resolved + already has a resting order -> nothing to do",
+          _reprotect_decision("LOSS", price=94.60, sl=94.67, tp=107.4, has_order=True),
+          "skip")
+
+
+def test_reprotect_open_journal_behaviour_is_unchanged():
+    print("\nreprotect_naked_positions(): the original OPEN-journal paths must behave exactly "
+          "as before -- this fix widened the query, and widening a query that places orders "
+          "must not change what it already did:")
+    check("OPEN + inside the band + no order -> re-arm the bracket (unchanged)",
+          _reprotect_decision("OPEN", price=100.0, sl=94.67, tp=107.4), "rearm")
+    check("OPEN + past the stop + no order -> close (unchanged)",
+          _reprotect_decision("OPEN", price=94.60, sl=94.67, tp=107.4), "close")
+    check("OPEN + already protected -> nothing (unchanged)",
+          _reprotect_decision("OPEN", price=100.0, sl=94.67, tp=107.4, has_order=True),
+          "skip")
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
