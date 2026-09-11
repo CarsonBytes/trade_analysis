@@ -512,6 +512,28 @@ disagree, the broker wins, and the disagreement is repaired rather than hidden:
   permanently unprotected. Both happened. It now takes several consecutive empty snapshots,
   and any non-empty one resets the count.
 
+### Self-healing only works while the broker is reachable (added 2026-09-11)
+
+Every repair function here -- flagged-position heal, mirror-quantity heal, naked-position
+reprotect -- reads the broker first and no-ops if it cannot. That is correct, but it used to be
+*indistinguishable from having nothing to do*: the healer returned the same empty result either
+way, so a dead connection looked exactly like a clean bill of health while the dashboard kept
+rendering positions from its last-good cache. Paper ran that way for ~10 hours.
+
+Two rules came out of it:
+
+1. **"No action taken" must always carry a reason.** `heal_status()` records whether the healer
+   ran, when, and why each flagged position was refused; the flagged panel shows a red "auto-heal
+   is NOT running" banner when the last run is stale, and otherwise prints each card's actual
+   guard reason. If a repair function can decline, it has to say which of the two it is.
+2. **An exception with no message must never be logged as `%s`.** The whole outage hid behind
+   `connect to ib-gateway:4004 failed () -- falling back` -- a bare `TimeoutError()`
+   stringifying to nothing. Log the type name and `%r`.
+
+Operationally: a clientId collision (gateway leaked an id) is survivable and the connect path
+now falls through to the next id automatically. A *wedged* gateway -- `remove Client N` repeating
+in the gateway log, every id timing out -- is not, and needs `scripts/gateway-relogin.sh`.
+
 ### Reading the two accounts' performance (as of 2026-09-05)
 
 **Paper's headline P&L is not comparable to live's right now.** Over the same 24 days paper

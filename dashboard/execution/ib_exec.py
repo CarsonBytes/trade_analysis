@@ -1365,6 +1365,48 @@ HEAL_COOLDOWN_H = 6                  # GUARD 3: at most one heal per trade per t
 HEAL_MAX_PER_CYCLE = 2               # GUARD 4: hard ceiling on heals per refresh
 
 
+HEAL_STATE_KEY = "heal_last_run"     # {"ts", "state", "refusals": {paper_id: why}}
+
+
+def _set_heal_state(state: str) -> None:
+    """Record that the healer actually RAN, and how it went, so the UI can tell "nothing
+    needed healing" apart from "the healer never got to look". ADDED 2026-09-11 -- without
+    this the two were indistinguishable; see heal_flagged_positions()'s note."""
+    import time as _time
+    from dashboard.core import store
+    prev, _ts = store.cache_get(HEAL_STATE_KEY)
+    prev = dict(prev or {})
+    store.cache_set(HEAL_STATE_KEY, {"ts": int(_time.time()), "state": state,
+                                     "refusals": prev.get("refusals") or {}})
+
+
+def _note_refusal(paper_id, why: str) -> None:
+    """Record WHY one flagged trade was not healed, so its card can say so rather than
+    sitting on screen with no explanation."""
+    import time as _time
+    from dashboard.core import store
+    cur, _ts = store.cache_get(HEAL_STATE_KEY)
+    cur = dict(cur or {})
+    refusals = dict(cur.get("refusals") or {})
+    refusals[str(paper_id)] = why
+    cur.update({"ts": int(_time.time()), "refusals": refusals})
+    cur.setdefault("state", "ok")
+    store.cache_set(HEAL_STATE_KEY, cur)
+
+
+def heal_status() -> dict:
+    """{"ts", "state", "refusals", "age_sec"} -- what the healer last did. age_sec is None
+    if it has never run against this database."""
+    import time as _time
+    from dashboard.core import store
+    cur, _ts = store.cache_get(HEAL_STATE_KEY)
+    cur = dict(cur or {})
+    ts = cur.get("ts")
+    return {"ts": ts, "state": cur.get("state") or "never run",
+            "refusals": cur.get("refusals") or {},
+            "age_sec": (int(_time.time()) - int(ts)) if ts else None}
+
+
 def mirror_qty_action(real: float, group: list[tuple]) -> tuple[str, float]:
     """PURE decision behind heal_mirror_quantities() -- unit-testable without a broker or a
     database. `group` is the OPEN mirror rows sharing one con_id, each
@@ -1409,12 +1451,14 @@ def heal_mirror_quantities() -> list[str]:
     """
     ib = _guard()
     if ib is None:
+        log.warning("ib_exec: mirror-qty heal SKIPPED -- broker unreachable.")
         return []
     acct = ib_client.account_id()
     try:
         positions = ib_client.call(lambda: {
             p.contract.conId: p for p in ib_client.filter_by_account(ib.positions() or [], acct)})
     except Exception:                                  # noqa: BLE001 -- read failed, do nothing
+        log.warning("ib_exec: mirror-qty heal SKIPPED -- position read failed.")
         return []
     with paper._LOCK, _conn() as c:
         rows = c.execute(
@@ -1490,8 +1534,23 @@ def heal_flagged_positions() -> list[str]:
     (a "long" trade sitting on a short position is corrupt state, not a healable orphan).
     GUARD 3 -- heal each paper_id at most once per HEAL_COOLDOWN_H, so any residual cycle
     is bounded to a trickle instead of one order per tick."""
+    # FIXED 2026-09-11: live_positions() returns None on a CONNECTION failure and {} when
+    # genuinely flat, and `if not positions` collapsed both into the same silent `return []`
+    # as "nothing to heal". So when the broker was unreachable this function did nothing,
+    # said nothing, and the dashboard went on rendering flagged cards from the last-good
+    # cache -- the question "why don't flagged positions get auto healed" had no answer
+    # anywhere in the UI or the log. Confirmed live: paper sat disconnected ~10h (see
+    # ib_client._ensure_conn()'s 2026-09-11 note) with a flagged position on screen the whole
+    # time. Record the reason so the UI can say so out loud.
     positions = live_positions()
+    if positions is None:
+        _set_heal_state("broker unreachable -- auto-heal cannot run")
+        log.warning("ib_exec: flagged-position heal SKIPPED -- broker unreachable. Any "
+                    "flagged position on the dashboard is frozen until the connection is "
+                    "restored; it is NOT being evaluated.")
+        return []
     if not positions:
+        _set_heal_state("ok (no broker positions)")
         return []
     with paper._LOCK, _conn() as c:
         open_ids = {r[0] for r in c.execute(
@@ -1512,6 +1571,10 @@ def heal_flagged_positions() -> list[str]:
             continue
         last = healed.get(str(paper_id))
         if last and (now_s - int(last)) < HEAL_COOLDOWN_H * 3600:
+            _mins = int((HEAL_COOLDOWN_H * 3600 - (now_s - int(last))) / 60)
+            _note_refusal(paper_id,
+                          "healed recently -- in cooldown for another %d min (at most one "
+                          "heal per trade per %dh)." % (_mins, HEAL_COOLDOWN_H))
             continue                                       # GUARD 3: cooldown
         px = pos.get("current_price")
         long = (t.get("direction") == "long")
@@ -1519,14 +1582,23 @@ def heal_flagged_positions() -> list[str]:
             past_tp = (px >= float(t["tp"])) if long else (px <= float(t["tp"]))
             past_sl = (px <= float(t["sl"])) if long else (px >= float(t["sl"]))
             if past_tp or past_sl:
+                _hit = "TP" if past_tp else "SL"
+                _note_refusal(paper_id,
+                              "price %.4f is already past its own %s -- reopening would just "
+                              "re-resolve it (the 2026-08-31 loop). Needs a real close or "
+                              "human review." % (px, _hit))
                 log.warning("ib_exec: NOT healing #%s %s -- price %.4f is already past its "
                             "own %s; reopening would just re-resolve it (the 2026-08-31 "
                             "loop). Needs a real close or review.",
-                            paper_id, t["instrument"], px, "TP" if past_tp else "SL")
+                            paper_id, t["instrument"], px, _hit)
                 continue
         real_qty = pos.get("volume") or 0.0
         real_dir = pos.get("direction")
         if real_qty and real_dir and (real_dir == "long") != long:
+            _note_refusal(paper_id,
+                          "the trade is %s but the broker holds a %s position -- corrupt "
+                          "state, not a healable orphan. Needs human review."
+                          % (t.get("direction"), real_dir))
             log.warning("ib_exec: NOT healing #%s %s -- trade is %s but the broker position "
                         "is %s; corrupt state, not a healable orphan.",
                         paper_id, t["instrument"], t.get("direction"), real_dir)
@@ -1546,7 +1618,9 @@ def heal_flagged_positions() -> list[str]:
             if len(logs) >= HEAL_MAX_PER_CYCLE:
                 log.info("ib_exec: heal cap (%d/refresh) reached -- remaining flagged "
                          "positions will be picked up next cycle.", HEAL_MAX_PER_CYCLE)
-                break
+                _set_heal_state("ran; capped at %d this cycle" % HEAL_MAX_PER_CYCLE)
+                return logs
+    _set_heal_state("ok")
     return logs
 
 

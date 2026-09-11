@@ -83,6 +83,15 @@ def live_positions() -> dict:
     return _backend().live_positions()
 
 
+def heal_status() -> dict:
+    """What the flagged-position healer last did (IB only; see ib_exec.heal_status()).
+    Returns {} on backends without a healer, which the UI renders as "never run"."""
+    b = _backend()
+    if hasattr(b, "heal_status"):
+        return b.heal_status()
+    return {}
+
+
 def heal_mirror_quantities() -> list[str]:
     """True ib_mirror.qty up to the broker's real position size (IB only; see ib_exec.
     heal_mirror_quantities()'s docstring). Bookkeeping only -- never sends an order.

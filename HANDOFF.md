@@ -1,7 +1,81 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-05.
+Last updated 2026-09-11.
+
+---
+
+### 🔥 FIXED 2026-09-11: auto-heal never ran -- a dead clientId fallback left the
+paper dashboard broker-blind for ~10 hours, silently
+
+User ask: *"debug and fix why flagged positions don't get auto healed"*. Two independent
+defects, and the second is why the first was invisible.
+
+**1. The clientId-collision fallback in `ib_client._ensure_conn()` was DEAD CODE in the exact
+case it was written for.** IB Gateway reports a clientId collision as API error 326, which
+ib_async delivers through `errorEvent` and then closes the socket -- so `connectAsync` does
+NOT raise anything carrying that text. What it actually raises is a bare `TimeoutError()`,
+whose `str()` is the EMPTY STRING. The guard was:
+
+    msg = str(e).lower()
+    if "client id" in msg or "326" in msg:
+        continue
+    break
+
+so `msg` was `""`, neither substring matched, and the loop hit `break` on the FIRST attempt --
+`base_id+1..+3` were never tried. Measured on DUK968178: the gateway had leaked clientId 31
+internally (no TCP session held it -- every attempt was torn down cleanly, and two snapshots
+12s apart showed only the parent socat listener persisting), the paper dashboard sat
+disconnected for ~10 HOURS with 124 failed connects in 3h, and the only log line was:
+
+    ib_client: connect to ib-gateway:4004 failed () -- falling back
+
+The empty parentheses were the whole tell -- `%s` of a `TimeoutError()`. Fixed by watching the
+error CODE on `errorEvent` instead of parsing the message, and by logging `type(err).__name__`
+and `%r` so a bare exception can never again render as nothing.
+
+**2. `heal_flagged_positions()` could not tell "broker unreachable" from "nothing to heal".**
+`live_positions()` returns `None` on a connection failure and `{}` when genuinely flat, and
+`if not positions: return []` collapsed both into the same silent no-op. So for those 10 hours
+the healer did nothing, said nothing, and `active_panel()` went on rendering the flagged card
+from the last-good cache. There was no way to answer "why isn't this healing" from the screen
+or the log -- which is exactly the question that got asked.
+
+Fixed: `None` now records `"broker unreachable -- auto-heal cannot run"` via a new
+`heal_status()` (state + age + per-trade refusal reasons, cached in the store), logs a warning,
+and the flagged panel renders one of three things per card:
+
+    broker down      -> "not evaluated -- auto-heal is not running" + a red banner with the age
+    guard refused    -> "not healed: <the actual guard reason>"
+    otherwise        -> "queued -- auto-heal will reopen this on a coming refresh"
+
+**What the healer actually found once it could run.** Paper's one flagged position is #128
+VNQ, and GUARD 1 legitimately refuses it: price 94.1424 is already past its own 94.6745 stop,
+so reopening it would just be re-resolved -- the 2026-08-31 runaway loop. It needs a real close
+or human review, and the card now says so instead of sitting there unexplained.
+
+**Also found while deploying: WSL's `eth0` was at MTU 1500.** The project's MTU-1380 fix had
+been applied to `docker0` and the compose networks but never to WSL's own interface, so the
+Docker DAEMON could not TLS-handshake with any registry (`docker build` failed on
+`ghcr.io ... TLS handshake timeout`) while containers were fine. Confirmed by probe: DNS
+resolved, TCP 443 connected, and packets above ~1228 bytes were dropped -- path MTU measured
+at exactly 1380. `wsl -u root ip link set dev eth0 mtu 1380` fixed it (ghcr.io 000 -> 401 in
+0.86s). **This does not survive a WSL restart** -- make it permanent in `.wslconfig` or a
+boot hook, or the next `docker build` on this machine fails the same way.
+
+**LIVE is currently DISCONNECTED and needs a decision.** Live was healthy before this deploy
+(`acct_age_sec: 41`); recreating its dashboard container dropped the connection and its gateway
+then wedged exactly as paper's had -- `remove Client 41` on repeat, all of 41-44 timing out.
+Paper recovered with a gateway restart (LOGIN OK in 15s, no 2FA needed). Live needs the same,
+but that is a real-money gateway and the relogin pushes a 2FA prompt, so it was left for the
+account owner:
+
+    wsl bash /home/cap/quant/scripts/gateway-relogin.sh live manual
+
+**Watch for:** a wedged gateway that accepts a client and immediately drops it (`remove Client
+N` repeating in the gateway log, every clientId timing out) is NOT a collision and the
+fallback cannot save it -- only a gateway restart clears it. The two look identical from the
+dashboard side; the gateway log is what separates them.
 
 ---
 

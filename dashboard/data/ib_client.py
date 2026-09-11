@@ -136,8 +136,31 @@ def _ensure_conn():
     base_id = int(os.environ.get("IB_CLIENT_ID", "7"))
     last_err = None
     for client_id in range(base_id, base_id + 4):     # clientId collisions (Error 326)
+        ib = ib_async.IB()
+        # FIXED 2026-09-11: this fallback loop was DEAD CODE in the exact situation it was
+        # written for. IB Gateway reports a clientId collision as API error 326, which
+        # ib_async delivers through errorEvent and then closes the socket -- so connectAsync
+        # does NOT raise anything carrying that text. What it actually raises is a bare
+        # `TimeoutError()`, whose str() is the EMPTY STRING, so `"client id" in msg or "326"
+        # in msg` was False and the loop hit `break` on the first attempt, never trying
+        # base_id+1..+3. Confirmed live on DUK968178: the gateway leaked clientId 31
+        # internally (no TCP session held it -- every attempt was torn down cleanly), and the
+        # paper dashboard sat disconnected for ~10 HOURS, 124 failed connects in 3h, with the
+        # log reading `connect to ib-gateway:4004 failed () -- falling back` -- the empty
+        # parentheses being the whole tell. Everything downstream degraded silently:
+        # live_positions() returned None every cycle, so heal_flagged_positions() and
+        # reprotect_naked_positions() no-opped while the dashboard kept rendering the last
+        # good cache. Watch the error CODE on errorEvent instead of parsing the message.
+        _collision = {"seen": False}
+
+        def _probe_err(reqId, errorCode, errorString, contract, _f=_collision):
+            try:
+                if int(errorCode) == 326:
+                    _f["seen"] = True
+            except Exception:                          # noqa: BLE001
+                pass
+        ib.errorEvent += _probe_err
         try:
-            ib = ib_async.IB()
             # connect ON the loop thread; readonly=False so ib_exec can place PAPER
             # orders (the DU-paper + paper-port guard in ib_exec is the real safety).
             _run(ib.connectAsync(host, port, clientId=client_id, timeout=8,
@@ -145,9 +168,18 @@ def _ensure_conn():
         except Exception as e:                         # noqa: BLE001
             last_err = e
             msg = str(e).lower()
-            if "client id" in msg or "326" in msg:
+            if _collision["seen"] or "client id" in msg or "326" in msg:
+                log.warning("ib_client: clientId %s is already in use at %s:%s -- trying %s. "
+                            "(A gateway can leak a clientId internally with no TCP session "
+                            "holding it; only a different id or a gateway restart recovers.)",
+                            client_id, host, port, client_id + 1)
                 continue
             break
+        finally:
+            try:
+                ib.errorEvent -= _probe_err
+            except Exception:                          # noqa: BLE001
+                pass
         _S["ib"], _S["connected"] = ib, True
         _S["needs_reconcile"] = True    # a FRESH connect (not a reuse) -- flag for the next
                                          # refresh_cheap() cycle to run a broker reconciliation
@@ -190,7 +222,11 @@ def _ensure_conn():
             log.info("ib_client: reqMarketDataType(3) failed: %s", e)
         log.info("ib_client: connected %s:%s clientId=%s", host, port, client_id)
         return ib
-    log.info("ib_client: connect to %s:%s failed (%s) -- falling back", host, port, last_err)
+    # `%r` + type name, NOT str(): a bare TimeoutError stringifies to "" and produced the
+    # uninformative "failed () -- falling back" line that hid the 2026-09-11 outage for 10h.
+    log.info("ib_client: connect to %s:%s failed after trying clientIds %s-%s (%s: %r) "
+             "-- falling back", host, port, base_id, base_id + 3,
+             type(last_err).__name__ if last_err else "no-error", last_err)
     _S["ib"], _S["connected"] = None, False
     return None
 

@@ -2394,13 +2394,29 @@ def active_panel() -> None:
     # Does NOT touch paper_trades or submit any order -- purely a visibility fix.
     flagged = {pid: p for pid, p in positions.items() if pid not in {t["id"] for t in open_t}}
     if flagged:
-        ui.label(f"⚠️ Flagged positions ({len(flagged)}) — broker holds these for real, but "
-                 "the local strategy record shows them already resolved. Auto-heal runs every "
-                 "refresh and reopens whatever it safely can; anything still listed here was "
-                 "REFUSED by a guard (price already past its own SL/TP, or the broker's "
-                 "direction contradicts the trade) and needs a human. Read-only "
+        # ADDED 2026-09-11: say WHY these are still here. Auto-heal was re-enabled on
+        # 2026-09-05, but a flagged card gave no hint whether the healer had looked at it and
+        # refused, or had never run at all -- and when the broker connection dropped (paper,
+        # ~10h) the healer silently no-opped while these cards kept rendering from the
+        # last-good cache. "It isn't healing" was unanswerable from the screen.
+        _heal = _bk.heal_status() if hasattr(_bk, "heal_status") else {}
+        _hstate, _hage = _heal.get("state", "never run"), _heal.get("age_sec")
+        _refusals = _heal.get("refusals") or {}
+        _stale = _hage is None or _hage > 900
+        ui.label(f"⚠️ Flagged positions ({len(flagged)}) — the broker holds these for real, "
+                 "but the local strategy record shows them already resolved. Read-only "
                  "(see HANDOFF.md 2026-08-17, 2026-09-05).").classes(
             "text-sm font-bold text-orange-9 mt-2")
+        if _stale:
+            _ago = "never" if _hage is None else f"{_hage // 60} min ago"
+            ui.label(f"⛔ Auto-heal is NOT running (last ran: {_ago} — {_hstate}). These "
+                     "cards are frozen from the last good broker snapshot and are not being "
+                     "evaluated. Restore the broker connection first.").classes(
+                "text-xs font-bold text-red-9")
+        else:
+            ui.label(f"Auto-heal ran {_hage // 60} min ago ({_hstate}). Anything still listed "
+                     "was refused by a guard — each card says why.").classes(
+                "text-xs text-grey-7")
         with ui.row().classes("w-full flex-wrap gap-3"):
             for pid, p in sorted(flagged.items(), key=lambda kv: kv[1].get("symbol") or str(kv[0])):
                 sym = p.get("symbol") or f"id {pid}"
@@ -2414,6 +2430,15 @@ def active_panel() -> None:
                     profit = p.get("profit", 0.0)
                     ui.label(f"unrealized: USD {profit:+,.2f}").classes(
                         "text-sm font-bold " + ("text-green" if profit >= 0 else "text-red"))
+                    _why = _refusals.get(str(pid))
+                    if _stale:
+                        ui.label("not evaluated — auto-heal is not running").classes(
+                            "text-xs text-red-9")
+                    elif _why:
+                        ui.label(f"not healed: {_why}").classes("text-xs text-orange-9")
+                    else:
+                        ui.label("queued — auto-heal will reopen this on a coming refresh")\
+                            .classes("text-xs text-grey-6")
     if pending:
         # GROUPED BY REASON CATEGORY (2026-07-13, replacing one flat "Pending" list):
         # user feedback was that lumping "a real order is genuinely waiting to fill" together
