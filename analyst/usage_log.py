@@ -57,7 +57,7 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
         # `environment` is filled from DASH_FIXED_MODE when the launch script pins one
         # (dashboard.ps1='paper', run_dashboard_live.ps1='live'); falls back to whatever
         # store.get_mode() would resolve to isn't worth the import here, so unset -> None.
-        httpx.post(
+        resp = httpx.post(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers={
                 "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -79,7 +79,7 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
             },
             timeout=5,
         )
-        supabase_meter.record("POST", "llm_calls")
+        supabase_meter.record("POST", "llm_calls", supabase_meter.response_bytes(resp))
     except Exception:
         pass  # telemetry only -- never let this affect the trading pipeline
 
@@ -149,7 +149,7 @@ def fetch_shared_usage_today() -> dict:
             params={"select": "total_calls,total_cost_usd,calls_by_project", "day": f"eq.{today}"},
             timeout=10,
         )
-        supabase_meter.record("GET", "llm_daily_summary")
+        supabase_meter.record("GET", "llm_daily_summary", supabase_meter.response_bytes(resp))
         if getattr(resp, "status_code", 200) == 404:
             return _fetch_shared_usage_today_from_raw_rows(headers, now)
         resp.raise_for_status()
@@ -187,7 +187,7 @@ def _fetch_shared_usage_today_from_raw_rows(headers: dict, now: float) -> dict:
             params={"select": "purpose,cost_usd,created_at", "created_at": f"gte.{today_start}"},
             timeout=10,
         )
-        supabase_meter.record("GET", "llm_calls")
+        supabase_meter.record("GET", "llm_calls", supabase_meter.response_bytes(resp))
         resp.raise_for_status()
         rows = resp.json()
     except Exception:
