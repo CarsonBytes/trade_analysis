@@ -19,11 +19,13 @@ def check(name, got, want):
 
 
 class _FakeResp:
-    def __init__(self, rows):
+    def __init__(self, rows, status_code=200):
         self._rows = rows
+        self.status_code = status_code
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise Exception(f"HTTP {self.status_code}")
 
     def json(self):
         return self._rows
@@ -57,15 +59,18 @@ def test_hkt_boundary_is_16_00_utc_and_within_the_last_24h():
     check("boundary is within the last 24h", now - boundary < dt.timedelta(hours=24), True)
 
 
-def test_fetch_uses_hkt_boundary():
-    print("\nfetch_shared_usage_today(): queries the ledger using the HKT day boundary, "
-          "not a UTC one (this is the 2026-07-24 fix -- was drifted stale vs event-radar's "
-          "own already-HKT-fixed implementation):")
+def test_fetch_queries_summary_table_with_hkt_calendar_date():
+    print("\nfetch_shared_usage_today(): reads the one-row llm_daily_summary for the "
+          "HKT calendar date (2026-09-13 fix -- was fetching every raw row created "
+          "today and summing client-side):")
+    import datetime as _dt
     from analyst import usage_log
+    from analyst.usage_log import HKT
     _reset_cache()
     captured = {}
 
-    def _fake_get(*a, **k):
+    def _fake_get(url, **k):
+        captured["url"] = url
         captured["params"] = k.get("params", {})
         return _FakeResp([])
 
@@ -73,9 +78,51 @@ def test_fetch_uses_hkt_boundary():
          mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
          mock.patch("httpx.get", side_effect=_fake_get):
         usage_log.fetch_shared_usage_today()
-    expected = usage_log._hkt_today_start_utc().isoformat() + "Z"
-    check("created_at filter uses the HKT-midnight boundary",
-          captured["params"]["created_at"], f"gte.{expected}")
+    # NOT _hkt_today_start_utc().date() -- that naive-UTC instant's own .date()
+    # is one day behind the HKT calendar day it anchors (found live in
+    # event-radar 2026-09-12: every call read yesterday's summary row).
+    expected_day = _dt.datetime.now(HKT).date().isoformat()
+    check("queries llm_daily_summary, not llm_calls",
+          "llm_daily_summary" in captured["url"], True)
+    check("day filter is the HKT calendar date",
+          captured["params"].get("day"), f"eq.{expected_day}")
+
+
+def test_fetch_uses_summary_row_when_present():
+    print("\nfetch_shared_usage_today(): maps the summary row, one HTTP call total:")
+    from analyst import usage_log
+    from analyst import supabase_meter
+    _reset_cache()
+    supabase_meter.reset()
+    row = {"total_calls": 42, "total_cost_usd": 1.2345,
+           "calls_by_project": {"quant": 30, "events": 12}}
+    with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
+         mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
+         mock.patch("httpx.get", return_value=_FakeResp([row])) as mock_get:
+        r = usage_log.fetch_shared_usage_today()
+    check("total calls", r["calls"], 42)
+    check("total cost", r["cost_usd"], 1.2345)
+    check("calls_by_project", r["calls_by_project"], {"quant": 30, "events": 12})
+    check("ok is True", r["ok"], True)
+    check("exactly one HTTP call (summary row, never raw llm_calls)",
+          mock_get.call_count, 1)
+    check("the call was metered",
+          supabase_meter.snapshot().get("GET llm_daily_summary"), 1)
+    supabase_meter.reset()
+
+
+def test_fetch_empty_summary_returns_zeros_without_falling_back():
+    print("\nfetch_shared_usage_today(): table exists but no row yet today (just "
+          "past HKT midnight) -- 200 [] must NOT trigger the raw-row fallback:")
+    from analyst import usage_log
+    _reset_cache()
+    with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
+         mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
+         mock.patch("httpx.get", return_value=_FakeResp([])) as mock_get:
+        r = usage_log.fetch_shared_usage_today()
+    check("returns zeros with ok=True", r,
+          {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": True})
+    check("only one HTTP call", mock_get.call_count, 1)
 
 
 def test_project_of_prefixes():
@@ -101,8 +148,9 @@ def test_fetch_returns_zeros_when_not_configured():
           r["ok"], False)
 
 
-def test_fetch_aggregates_by_project():
-    print("\nfetch_shared_usage_today(): aggregates rows into per-project counts + total cost:")
+def test_fetch_falls_back_to_raw_rows_when_summary_table_missing():
+    print("\nfetch_shared_usage_today(): 404 on llm_daily_summary (migration not "
+          "run yet) falls back to the original raw-row summing:")
     from analyst import usage_log
     _reset_cache()
     rows = [
@@ -111,9 +159,10 @@ def test_fetch_aggregates_by_project():
         {"purpose": "events:rerank", "cost_usd": 0.002, "created_at": "2026-07-15T03:00:00Z"},
         {"purpose": "explain_wrong_answer", "cost_usd": 0.0001, "created_at": "2026-07-15T04:00:00Z"},
     ]
+    responses = [_FakeResp([], status_code=404), _FakeResp(rows)]
     with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
          mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
-         mock.patch("httpx.get", return_value=_FakeResp(rows)):
+         mock.patch("httpx.get", side_effect=responses) as mock_get:
         r = usage_log.fetch_shared_usage_today()
     check("total calls", r["calls"], 4)
     check("calls_by_project quant", r["calls_by_project"]["quant"], 2)
@@ -121,6 +170,12 @@ def test_fetch_aggregates_by_project():
     check("calls_by_project study", r["calls_by_project"]["study"], 1)
     check("total cost summed", round(r["cost_usd"], 4), round(0.01 + 0.01 + 0.002 + 0.0001, 4))
     check("ok is True on a successful fetch", r["ok"], True)
+    check("two HTTP calls: summary first, then raw fallback", mock_get.call_count, 2)
+    check("first call hit llm_daily_summary",
+          "llm_daily_summary" in mock_get.call_args_list[0][0][0], True)
+    check("fallback hit llm_calls with the HKT-day boundary",
+          "llm_calls" in mock_get.call_args_list[1][0][0]
+          and "created_at" in mock_get.call_args_list[1][1]["params"], True)
 
 
 def test_fetch_caches_within_ttl():
@@ -132,7 +187,8 @@ def test_fetch_caches_within_ttl():
 
     def _fake_get(*a, **k):
         calls.append(1)
-        return _FakeResp([{"purpose": "quant:x", "cost_usd": 0.0, "created_at": "t"}])
+        return _FakeResp([{"total_calls": 7, "total_cost_usd": 0.01,
+                           "calls_by_project": {"quant": 7}}])
 
     with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
          mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
@@ -169,10 +225,10 @@ def test_shared_calls_ok_true_when_under_cap():
     print("\nshared_calls_ok(): under cap and reachable -> (True, calls):")
     from analyst import usage_log
     _reset_cache()
-    rows = [{"purpose": "quant:x", "cost_usd": 0.0, "created_at": "t"}] * 5
+    row = [{"total_calls": 5, "total_cost_usd": 0.0, "calls_by_project": {"quant": 5}}]
     with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
          mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
-         mock.patch("httpx.get", return_value=_FakeResp(rows)):
+         mock.patch("httpx.get", return_value=_FakeResp(row)):
         ok, calls = usage_log.shared_calls_ok(cap=200, reserve=10)
     check("ok is True", ok, True)
     check("calls reported", calls, 5)
@@ -182,10 +238,10 @@ def test_shared_calls_ok_false_when_near_cap():
     print("\nshared_calls_ok(): within the reserve of the cap -> (False, calls):")
     from analyst import usage_log
     _reset_cache()
-    rows = [{"purpose": "quant:x", "cost_usd": 0.0, "created_at": "t"}] * 195
+    row = [{"total_calls": 195, "total_cost_usd": 0.0, "calls_by_project": {"quant": 195}}]
     with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
          mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
-         mock.patch("httpx.get", return_value=_FakeResp(rows)):
+         mock.patch("httpx.get", return_value=_FakeResp(row)):
         ok, calls = usage_log.shared_calls_ok(cap=200, reserve=10)
     check("ok is False (195 >= 200-10)", ok, False)
     check("calls still reported", calls, 195)

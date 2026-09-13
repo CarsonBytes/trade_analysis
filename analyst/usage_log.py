@@ -10,8 +10,11 @@ import time
 
 import httpx
 
+from analyst import supabase_meter  # per-endpoint REST counts (memory-only unless SUPABASE_METER_FILE is set)
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+supabase_meter.configure(app="quant")
 
 # FIXED 2026-07-24: fetch_shared_usage_today() used a UTC day boundary, deliberately
 # "mirroring event-radar's fetch_shared_usage_today() exactly" per that function's own
@@ -76,6 +79,7 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
             },
             timeout=5,
         )
+        supabase_meter.record("POST", "llm_calls")
     except Exception:
         pass  # telemetry only -- never let this affect the trading pipeline
 
@@ -110,7 +114,17 @@ def fetch_shared_usage_today() -> dict:
     """Cross-project usage for today (HKT), from the shared Supabase ledger. Best-effort:
     returns zeros (with "ok": False) if Supabase isn't configured/unreachable, so a caller
     that needs to tell "genuinely 0 calls" apart from "couldn't check" can (see
-    shared_calls_ok(), used by the board-scan budget guard). Cached for _SHARED_USAGE_CACHE_SEC."""
+    shared_calls_ok(), used by the board-scan budget guard). Cached for _SHARED_USAGE_CACHE_SEC.
+
+    ADDED 2026-09-13: reads the one-row `llm_daily_summary` (kept current by a
+    trigger on every llm_calls insert -- see
+    D:\\llm-usage-dashboard\\migrations\\001_llm_daily_summary.sql) instead of
+    fetching every raw row created today and summing them here -- the same swap
+    event-radar's backend/app/llm_logging.py::fetch_shared_usage_today() already
+    made. The old query's cost scaled with today's row count, paid on every
+    poll past the 60s cache. Falls back to the raw-row method if the summary
+    table doesn't exist yet (404), so this keeps working before that migration
+    has been run."""
     empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False}
     now = time.time()
     if now - _shared_usage_cache["ts"] < _SHARED_USAGE_CACHE_SEC and _shared_usage_cache["data"]:
@@ -118,21 +132,66 @@ def fetch_shared_usage_today() -> dict:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return empty
 
-    today_start = _hkt_today_start_utc().isoformat() + "Z"
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    # NOT _hkt_today_start_utc().date() -- that instant is naive UTC (HKT
+    # midnight is 16:00 the PREVIOUS UTC calendar day), so its .date() is one
+    # day behind the HKT calendar day it anchors (found live in event-radar
+    # 2026-09-12: every call read yesterday's summary row). Compute the HKT
+    # calendar date in the HKT zone directly, same as the migration's trigger.
+    today = dt.datetime.now(HKT).date().isoformat()
     try:
         resp = httpx.get(
-            f"{SUPABASE_URL}/rest/v1/llm_calls",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            },
-            params={"select": "purpose,cost_usd,created_at", "created_at": f"gte.{today_start}"},
+            f"{SUPABASE_URL}/rest/v1/llm_daily_summary",
+            headers=headers,
+            params={"select": "total_calls,total_cost_usd,calls_by_project", "day": f"eq.{today}"},
             timeout=10,
         )
+        supabase_meter.record("GET", "llm_daily_summary")
+        if getattr(resp, "status_code", 200) == 404:
+            return _fetch_shared_usage_today_from_raw_rows(headers, now)
         resp.raise_for_status()
         rows = resp.json()
     except Exception:
         return empty   # best-effort -- a stale/zeroed display beats a broken tick
+
+    if not rows:
+        # Table exists but nothing logged yet today (e.g. just past HKT
+        # midnight) -- an empty set, NOT a missing table, so no raw fallback.
+        result = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": True}
+    else:
+        row = rows[0]
+        result = {"calls": row.get("total_calls") or 0,
+                  "cost_usd": row.get("total_cost_usd") or 0.0,
+                  "calls_by_project": row.get("calls_by_project") or {},
+                  "ok": True}
+    _shared_usage_cache["ts"] = now
+    _shared_usage_cache["data"] = result
+    return result
+
+
+def _fetch_shared_usage_today_from_raw_rows(headers: dict, now: float) -> dict:
+    """Pre-migration fallback: the original approach, summing every row created
+    today client-side -- real cost scales with today's row count, which is
+    exactly what llm_daily_summary's trigger exists to replace. Kept only so
+    fetch_shared_usage_today() doesn't break for a deployment whose Supabase
+    project hasn't run 001_llm_daily_summary.sql yet."""
+    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False}
+    today_start = _hkt_today_start_utc().isoformat() + "Z"
+    try:
+        resp = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/llm_calls",
+            headers=headers,
+            params={"select": "purpose,cost_usd,created_at", "created_at": f"gte.{today_start}"},
+            timeout=10,
+        )
+        supabase_meter.record("GET", "llm_calls")
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception:
+        return empty
 
     calls_by_project: dict[str, int] = {}
     total_cost = 0.0
