@@ -560,6 +560,25 @@ Operationally: a clientId collision (gateway leaked an id) is survivable and the
 now falls through to the next id automatically. A *wedged* gateway -- `remove Client N` repeating
 in the gateway log, every id timing out -- is not, and needs `scripts/gateway-relogin.sh`.
 
+### A "fresh" reopen must reset every field the resolver depends on (added 2026-09-12)
+
+`reopen_trade()` already knew to give a healed position a fresh `horizon_end` rather than the
+stale original -- its own 2026-08-17 docstring says so explicitly, to avoid immediately
+re-expiring. It never extended the same idea to `ts`, the entry timestamp the daily-bar
+resolver scans forward from. A position that genuinely breached its SL/TP on some real
+historical bar -- confirmed live: VNQ traded to $93.91 on 2026-09-10, a real 0.76-point breach,
+the broker's own resting stop simply never filled on it -- could never stay reopened: the very
+next `resolve_open()` rescans the *entire* original `[ts, horizon_end]` window, rediscovers the
+same already-past bar (it can never leave the past), and immediately reverses the heal. Four
+cycles happened in 18 hours, each landing right at the cooldown boundary, and it would have
+continued for over a month.
+
+The fix generalizes the lesson: a repair function's "start fresh" must apply to *every* field
+a downstream check depends on, not just the one that happened to cause the last incident. New
+`resolve_from` column, set by `reopen_trade()` to the reopen instant; the resolver scans from
+there when present. `ts` itself stays untouched -- it is the real, audit-relevant original
+entry date, and must keep saying so.
+
 ### Reading the two accounts' performance (as of 2026-09-05)
 
 **Paper's headline P&L is not comparable to live's right now.** Over the same 24 days paper

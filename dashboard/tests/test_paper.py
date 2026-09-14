@@ -9,6 +9,8 @@ import os
 import tempfile
 from unittest import mock
 
+import pandas as pd
+
 from dashboard.core.paper import deposit_adjusted_series, current_drawdown_pct, drawdown_series
 
 _fails = []
@@ -496,6 +498,114 @@ def test_withdraw_trade_noop_on_unknown_or_already_closed_id():
         paper.withdraw_trade(trade_id)  # already closed, not OPEN
         row = [t for t in paper.all_trades() if t["id"] == trade_id][0]
         check("status still WIN, not overwritten to CANCELLED", row["status"], "WIN")
+    finally:
+        _restore_db(old, path)
+
+
+# ADDED 2026-09-12: REGRESSION for the reopen-loop bug found live on paper. #128 VNQ genuinely
+# breached its SL on a real historical daily bar (2026-09-10, verified against real yfinance
+# data at both auto_adjust=True and False -- not a data artifact), but the broker's own resting
+# stop never filled on it. heal_flagged_positions()' GUARD 1 checks the CURRENT live price
+# (which had recovered back inside the band), so it kept reopening the trade -- but the very
+# next resolve_open() rescanned the ENTIRE original [ts, horizon_end] window, rediscovered the
+# SAME already-past 09-10 bar (which can never leave the past), and immediately flipped it back
+# to LOSS. Confirmed live: 4 reopen cycles in ~18h, each landing right at the
+# HEAL_COOLDOWN_H=6h boundary (12:50, 18:51, 01:10, 07:12), and would have continued for over a
+# month since horizon_end was 2026-10-17. `resolve_from` breaks the loop: reopen_trade() sets it
+# to the reopen moment, and _outcome_for() scans from there instead of the original `ts` once set.
+def _ohlc_with_one_breach(sl: float, breach_low: float) -> "pd.DataFrame":
+    """A tiny 5-day OHLC frame where exactly ONE day (day index 2) dips below `sl`, matching
+    the shape of the real #128 VNQ incident (a genuine, isolated intraday breach, not a
+    sustained move)."""
+    import pandas as pd
+    idx = pd.date_range("2026-09-08", periods=5, freq="D", tz="UTC")
+    base = sl + 1.0
+    lows = [base, base, breach_low, base, base]
+    return pd.DataFrame({
+        "open": [base] * 5, "high": [base + 0.5] * 5, "low": lows, "close": [base] * 5,
+    }, index=idx)
+
+
+def test_reopen_without_resolve_from_rediscovers_the_same_historical_breach():
+    print("_outcome_for(): REGRESSION setup -- without resolve_from, a trade reopened with its "
+          "ORIGINAL entry `ts` unchanged re-scans the whole original window and immediately "
+          "rediscovers a historical breach that already happened, days or weeks in the past:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        t = paper.Trade(
+            ts="2026-09-07T00:00:00+00:00", instrument="VNQ", direction="long",
+            method="ATR rr3.0", entry=97.86, sl=94.67446327209473, tp=107.42, rr=3.0,
+            size_units=15.7, horizon_end="2026-10-17T00:00:00+00:00", confidence=0.6,
+            rationale="test",
+        )
+        paper._insert(t)
+        row = paper.open_trades()[0]
+        check("resolve_from starts empty (never reopened)", row.get("resolve_from"), "")
+        ohlc = _ohlc_with_one_breach(sl=94.67446327209473, breach_low=93.91)
+        out = paper._outcome_for(row, lambda inst: ohlc)
+        check("the historical breach is (correctly) found the first time", out[0], "LOSS")
+    finally:
+        _restore_db(old, path)
+
+
+def test_resolve_from_stops_the_reopen_loop():
+    print("\nreopen_trade() + _outcome_for(): THE FIX -- after a reopen, resolve_from points "
+          "past the historical breach, so the same bar is no longer in the scan window and the "
+          "trade is correctly read as still OPEN (or whatever happens AFTER the reopen point), "
+          "not immediately flipped back to the same LOSS:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        t = paper.Trade(
+            ts="2026-09-07T00:00:00+00:00", instrument="VNQ", direction="long",
+            method="ATR rr3.0", entry=97.86, sl=94.67446327209473, tp=107.42, rr=3.0,
+            size_units=15.7, horizon_end="2026-10-17T00:00:00+00:00", confidence=0.6,
+            rationale="test",
+        )
+        paper._insert(t)
+        trade_id = paper.open_trades()[0]["id"]
+        # resolve_from is stored with timespec="seconds" (truncated, not rounded), so it can
+        # read up to ~1s earlier than a sub-second `before` checkpoint taken in the same
+        # wall-clock second -- floor both sides to whole seconds before comparing.
+        before = pd.Timestamp.now(tz="UTC").floor("s")
+        msg = paper.reopen_trade(trade_id)
+        after = pd.Timestamp.now(tz="UTC").ceil("s")
+        check("reopen succeeded", msg is not None, True)
+        row = [r for r in paper.all_trades() if r["id"] == trade_id][0]
+        check("status is OPEN again", row["status"], "OPEN")
+        check("resolve_from is non-empty", bool(row["resolve_from"]), True)
+        rf = paper._as_utc(row["resolve_from"])
+        check("resolve_from was set to the reopen moment (between before/after)",
+              before <= rf <= after, True)
+        check("ts (the real original entry) is untouched",
+              row["ts"], "2026-09-07T00:00:00+00:00")
+
+        ohlc = _ohlc_with_one_breach(sl=94.67446327209473, breach_low=93.91)  # 09-10 breach
+        out = paper._outcome_for(row, lambda inst: ohlc)
+        check("the same historical breach is NOT rediscovered -- scan starts after it now",
+              out, "OPEN")
+    finally:
+        _restore_db(old, path)
+
+
+def test_resolve_from_does_not_affect_a_never_reopened_trade():
+    print("\n_outcome_for(): back-compat -- a trade that has NEVER been reopened (resolve_from "
+          "still '') resolves exactly as before, using its real original ts:")
+    old, path = _isolated_db()
+    try:
+        from dashboard.core import paper
+        t = paper.Trade(
+            ts="2026-09-07T00:00:00+00:00", instrument="VNQ", direction="long",
+            method="ATR rr3.0", entry=97.86, sl=94.67446327209473, tp=107.42, rr=3.0,
+            size_units=15.7, horizon_end="2026-10-17T00:00:00+00:00", confidence=0.6,
+            rationale="test",
+        )
+        paper._insert(t)
+        row = paper.open_trades()[0]
+        ohlc = _ohlc_with_one_breach(sl=94.67446327209473, breach_low=93.91)
+        out = paper._outcome_for(row, lambda inst: ohlc)
+        check("still resolves against the real original ts", out[0], "LOSS")
     finally:
         _restore_db(old, path)
 

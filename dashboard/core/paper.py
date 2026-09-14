@@ -541,6 +541,7 @@ def _conn() -> sqlite3.Connection:
         ("exit_reason", "TEXT DEFAULT ''"),
         ("macro_linkage", "TEXT DEFAULT ''"),
         ("manual_paused", "INTEGER DEFAULT 0"),
+        ("resolve_from", "TEXT DEFAULT ''"),
     ]
     for table in ("paper_trades", "paper_trades_archive"):
         if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -1026,7 +1027,24 @@ def _outcome_for(t: dict, get_ohlc_fn):
     from dashboard.data import mt5_client
     inst = active_by_key(t["instrument"])
     # everything in true UTC; MT5 source times get the broker offset removed
-    entry_ts = _as_utc(t["ts"])
+    # FIXED 2026-09-12: use `resolve_from` (set by reopen_trade() to the REOPEN moment) as the
+    # scan window's lower bound when present, not the trade's original `ts`. Without this, a
+    # trade that genuinely breached its SL/TP on some historical bar gets caught in a permanent
+    # loop once heal_flagged_positions() reopens it: GUARD 1 there checks the CURRENT live price
+    # (which can be back inside the band after an intraday dip-and-recover), so the reopen
+    # succeeds -- but the very next resolve_open() rescans the ENTIRE original entry->horizon
+    # window, rediscovers the SAME historical breach bar (which never goes away -- it's already
+    # in the past), and immediately re-resolves it LOSS again. Confirmed live on paper: #128 VNQ
+    # genuinely touched $93.91 on 2026-09-10 (real yfinance daily low, 0.76 below its $94.67
+    # stop -- not a data artifact, auto_adjust=True/False agree exactly), the broker's resting
+    # stop never filled on it (IBKR paper's simulated stop-triggering isn't always perfectly
+    # faithful to a real dip-and-recover), and the position then reopened 4 times over ~18h
+    # (12:50, 18:51, 01:10, 07:12 -- each landing right at the HEAL_COOLDOWN_H=6h boundary),
+    # re-discovering the identical 09-10 bar every single time, and would have kept doing so
+    # for over a month (horizon_end=2026-10-17) since 09-10 never leaves the [ts, horizon_end]
+    # window. `ts` itself is left untouched -- it is the real, audit-relevant "when this trade
+    # was originally opened" and must keep saying 2026-06-24, not silently jump to today.
+    entry_ts = _as_utc(t["resolve_from"]) if t.get("resolve_from") else _as_utc(t["ts"])
     end_ts = _as_utc(t["horizon_end"])
     now_utc = pd.Timestamp.now(tz="UTC")
     horizon_passed = now_utc >= end_ts
@@ -1296,11 +1314,18 @@ def reopen_trade(trade_id: int, horizon_days: int = HORIZON_CAL) -> str | None:
         if row is None:
             return None
         instrument, old_status = row
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         new_horizon = (dt.datetime.now(dt.timezone.utc) +
                        dt.timedelta(days=horizon_days)).isoformat(timespec="seconds")
+        # `resolve_from` (ADDED 2026-09-12): resolve_open()'s bar-scan window starts here
+        # instead of the original `ts` once set -- see _outcome_for()'s note. Without this a
+        # trade with any real historical SL/TP breach inside [ts, horizon_end] can never stay
+        # reopened: the very next resolve_open() rescans the whole original window, rediscovers
+        # the same already-past bar, and immediately flips it back. `ts` itself is untouched --
+        # it stays the real, original entry timestamp for display/audit purposes.
         c.execute("UPDATE paper_trades SET status='OPEN', exit_ts='', exit_price=0, "
-                 "realized_r=0, exit_reason='', horizon_end=? WHERE id=?",
-                 (new_horizon, trade_id))
+                 "realized_r=0, exit_reason='', horizon_end=?, resolve_from=? WHERE id=?",
+                 (new_horizon, now_iso, trade_id))
     from dashboard.core import notable_events
     msg = (f"#{trade_id} {instrument}: REOPENED (was {old_status}) -- broker held the real "
           f"position the whole time; fresh horizon set to {new_horizon[:10]} "

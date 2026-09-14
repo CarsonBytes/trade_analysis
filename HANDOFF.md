@@ -1,7 +1,67 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-11.
+Last updated 2026-09-12.
+
+---
+
+### 🔥 FIXED 2026-09-12: flagged positions could never stay healed -- a permanent
+reopen loop caused by rescanning the ORIGINAL entry window every time
+
+User ask: *"debug why paper account still has flagged positions, verify if p&l is correct"*.
+Checking properly found a real, structural bug distinct from every prior flagged-position fix
+this project has made.
+
+**The trade.** #128 VNQ, entered 2026-06-24. Its own changelog showed FOUR reopen cycles in
+~18 hours (12:50, 18:51, 01:10, 07:12 -- each landing almost exactly on the
+`HEAL_COOLDOWN_H=6h` boundary), each one immediately undone.
+
+**The real market event.** VNQ genuinely traded down to $93.91 on 2026-09-10 -- confirmed
+against real yfinance daily bars at BOTH `auto_adjust=True` and `False` (identical result,
+ruling out a dividend-adjustment artifact): a real 0.76-point breach below the $94.67 stop.
+The broker's own resting stop order never filled on it (IBKR paper's simulated stop-triggering
+is not always perfectly faithful to an intraday dip-and-recover), and the position has sat at
+203 shares, held, ever since -- exactly the "flagged" shape `heal_flagged_positions()` exists
+for.
+
+**Why it could never stay reopened.** `heal_flagged_positions()`'s GUARD 1 checks the CURRENT
+live price at the moment of healing, and by the time each heal ran, price had recovered back
+inside the SL/TP band -- so the reopen correctly succeeded every time. But `reopen_trade()`
+only ever resets `status`/`horizon_end` (deliberately, per its own 2026-08-17 docstring: "fresh
+horizon, NOT the stale original -- which would just immediately re-expire"). It never touched
+`ts`, the trade's original entry timestamp -- and `_outcome_for()`'s daily-bar resolver scans
+`(ts, horizon_end]` on EVERY call. Since 2026-09-10 can never leave the past, every single
+resolve_open() cycle after every single reopen rediscovered the exact same historical bar and
+immediately flipped it back to LOSS. This would have continued for over a month --
+`horizon_end` was 2026-10-17 -- entirely undetectable as "still broken" by anything that only
+checks whether flagged positions get reopened, because they DO get reopened; they just cannot
+stay that way.
+
+The parallel to `reopen_trade()`'s own existing `horizon_end` fix (2026-08-17: "fresh, not
+stale") had already been half-built into this function and never extended to the equivalent
+case for the entry side of the same window.
+
+**Fix.** New `resolve_from` column (additive migration, defaults to `''` for every existing
+row -- zero behavior change for a trade that has never been reopened).
+`reopen_trade()` sets it to the reopen moment; `_outcome_for()` scans from `resolve_from` when
+set, instead of the original `ts`. `ts` itself is left completely untouched -- it stays the
+real, audit-relevant "when this trade actually opened" for display and history, exactly as
+before; only the technical lower bound the RESOLVER uses moves forward.
+
+**Verified live on paper:** called `reopen_trade(128)` for real (same function heal calls,
+guards already independently confirmed satisfied via the live price at the time), confirmed
+`resolve_from` set to the reopen instant, then let the dashboard's own real refresh cycle run
+`resolve_open()` against live yfinance data -- the exact cycle that had flipped this position
+back to LOSS four times running. It stayed OPEN. Position attribution matches broker truth
+exactly (+1,059.63 USD across VNQ/CPER/AMLP, both sides), `pnl_crosscheck()` reports `ok`, and
+all three resting OCA brackets are untouched at their correct sizes with zero duplicates.
+3 new tests added (237 total, was 234), including the exact reopen-then-rescan-the-same-bar
+regression.
+
+**Separately confirmed still correct, not new:** `HYD`/`CWB` remain `only_broker(untracked)`
+in reconcile (their mirror rows are CLOSED, invisible to the healer by design -- see the
+2026-09-05 entry) and still need `dashboard/ops/unwind_shorts.py APPLY=1` during US market
+hours; nothing about today's fix touches that.
 
 ---
 
