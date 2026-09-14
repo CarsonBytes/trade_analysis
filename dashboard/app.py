@@ -3257,11 +3257,16 @@ def _kill_and_relaunch_gateway() -> None:
 
 
 def _restart_server() -> None:
-    """Exit the process so the watchdog (DashboardApp task / dashboard.ps1)
-    relaunches it fresh with the latest code, ~10s later. If the IB Gateway link
-    is currently down, also force-kill + relaunch it -- restarting only the app
-    left a stuck gateway untouched, so "Restart" silently didn't fix the thing
-    the user was actually restarting for."""
+    """Exit the process so it comes back fresh with the latest code, ~10s later. The
+    mechanism that relaunches it is deployment-specific and this function doesn't need to
+    know which one is active -- os._exit(0) alone is enough either way: under Docker (the
+    current deployment) `restart: unless-stopped` in docker-compose.yml brings the
+    container straight back up; under the retired native deployment it was the
+    DashboardApp/DashboardAppLive scheduled task's watchdog (dashboard.ps1 /
+    run_dashboard_live.ps1) polling the port. If the IB Gateway link is currently down,
+    also force-kill + relaunch it (see _kill_and_relaunch_gateway(), itself
+    deployment-aware) -- restarting only the app left a stuck gateway untouched, so
+    "Restart" silently didn't fix the thing the user was actually restarting for."""
     import os
     import threading
     from dashboard.core.log import log
