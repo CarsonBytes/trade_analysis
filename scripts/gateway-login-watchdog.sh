@@ -40,6 +40,12 @@ container_for() {
         live)  echo quant-ibgateway-live-docker ;;
     esac
 }
+dashboard_container_for() {
+    case "$1" in
+        paper) echo quant-dashboard-docker ;;
+        live)  echo quant-dashboard-live-docker ;;
+    esac
+}
 port_hex_for() {
     case "$1" in
         paper) echo 0FA2 ;;
@@ -54,6 +60,41 @@ port_open() {
         "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i \":${container_hex}\" | grep -qi ' 0A '"
 }
 
+# --- on-demand restart request (ADDED 2026-09-14) -----------------------------
+# The dashboard's own "Restart" button used to shell out to powershell.exe + C:\IBC*
+# directly -- pure dead code inside this Linux container (no powershell.exe, no C:\IBC,
+# nothing reachable). Confirmed live: user report "restart function does not work, no
+# 2fa" -- the button's app-restart half worked fine via Docker's own `restart:
+# unless-stopped` policy, but the promised gateway kill+relaunch silently never
+# happened (subprocess.Popen raised FileNotFoundError, caught by a bare except, logged
+# nowhere the user would see). Now dashboard/app.py::_kill_and_relaunch_gateway() drops
+# a flag file into its OWN container's /data volume instead; checked here via `docker
+# exec` (matching this script's existing pattern, no new cross-container plumbing) on
+# EVERY run so it fires within ~1 min of the click, deliberately BEFORE the market-quiet
+# gate below -- an explicit user click is not the passive weekend-stall case that gate
+# exists to suppress, and must always act.
+restart_requested() {
+    local dcname
+    dcname=$(dashboard_container_for "$1")
+    docker exec "$dcname" sh -c "test -f /data/restart_gateway_request_$1"
+}
+clear_restart_request() {
+    local dcname
+    dcname=$(dashboard_container_for "$1")
+    docker exec "$dcname" sh -c "rm -f /data/restart_gateway_request_$1" 2>/dev/null || true
+}
+for t in paper live; do
+    if restart_requested "$t"; then
+        log "$t: on-demand gateway restart requested from the dashboard UI -- cycling relogin now"
+        clear_restart_request "$t"
+        /home/cap/quant/scripts/gateway-push.sh \
+            "IBKR ${t} gateway restart requested from the dashboard -- relogin cycle started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+        bash "$RELOGIN" "$t" "manual-ui-restart" >/dev/null 2>&1
+        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet" \
+              "$ST/$t.escalated" "$ST/$t.escalated.notified"
+    fi
+done
+
 # --- weekend / holiday gate (ADDED 2026-09-05) --------------------------------
 # This script had NO calendar gate at all while the scheduled relogin cron beside it is
 # weekday-only (`0 20 * * 1-5`). IBKR's weekly server reset means the gateway cannot hold a
@@ -64,7 +105,8 @@ port_open() {
 # rather than testing day-of-week (2026-09-07 is a Labor Day Monday).
 # Fails ACTIVE: if the container is down or the calendar errors, behave exactly as before.
 market_quiet() {
-    docker exec -w /app -e PYTHONPATH=/app quant-dashboard-docker         /app/.venv/bin/python -m dashboard.ops.gateway_window >/dev/null 2>&1
+    docker exec -w /app -e PYTHONPATH=/app quant-dashboard-docker \
+        /app/.venv/bin/python -m dashboard.ops.gateway_window >/dev/null 2>&1
 }
 QUIET=0
 if market_quiet; then QUIET=1; fi
@@ -76,7 +118,8 @@ for t in paper live; do
         # single escalation on 2026-08-26 permanently disabled that alarm -- ten days later
         # the file was still there, so no exhausted-retries notification could ever fire
         # again on this machine. Recovery must reset the whole ladder, not part of it.
-        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet"               "$ST/$t.escalated" "$ST/$t.escalated.notified"
+        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet" \
+              "$ST/$t.escalated" "$ST/$t.escalated.notified"
         continue
     fi
 
@@ -87,7 +130,8 @@ for t in paper live; do
         rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.escalated" "$ST/$t.escalated.notified"
         if [ ! -f "$ST/$t.quiet" ]; then
             touch "$ST/$t.quiet"
-            log "$t: API port closed, but no US session within reach (weekend/holiday) -- "                "watchdog quiet, no relogin and no phone push until the window reopens"
+            log "$t: API port closed, but no US session within reach (weekend/holiday) -- " \
+                "watchdog quiet, no relogin and no phone push until the window reopens"
         fi
         continue
     fi

@@ -3186,7 +3186,35 @@ def _kill_and_relaunch_gateway() -> None:
     forever (java.exe never exits) -- the port-down watchdog alone can't recover from
     that, only from a genuinely dead process (see HANDOFF 2026-07-08 "stuck alive" fix).
     Mirrors dashboard.ps1's own stale-gateway kill block, which only runs at task
-    START -- this makes the same recovery available on demand from the UI."""
+    START -- this makes the same recovery available on demand from the UI.
+
+    FIXED 2026-09-14: this whole function was pure dead code under the WSL2/Docker
+    deployment -- confirmed live, user report "restart function does not work, no 2fa".
+    It unconditionally shelled out to `powershell.exe` and referenced `C:\\IBC` /
+    `C:\\IBC-Live`, all leftovers from the retired native Windows deployment. Inside
+    THIS container there is no powershell.exe, no C:\\IBC, and no way to reach the
+    sibling ib-gateway container directly -- the subprocess.Popen call raised
+    FileNotFoundError every time, silently swallowed by the bare `except Exception`
+    below, so the Restart button's app-half worked (Docker's own `restart:
+    unless-stopped` policy handles that independently) while the promised gateway
+    kill+relaunch+2FA never happened, and never logged anything a user would see either.
+    Docker mode (detected via /.dockerenv, the standard marker) instead drops a request
+    flag into this container's own /data volume; gateway-login-watchdog.sh (running on
+    the WSL host, outside any container, once a minute) picks it up via `docker exec`
+    and runs the SAME scripts/gateway-relogin.sh this project already uses everywhere
+    else for a real relogin+2FA cycle -- see that script's own on-demand-request block."""
+    import pathlib
+    import datetime as _dt
+    from dashboard.core.log import log
+    if pathlib.Path("/.dockerenv").exists():
+        try:
+            flag = pathlib.Path(f"/data/restart_gateway_request_{DASH_MODE}")
+            flag.write_text(_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"))
+            log.info("gateway kill+relaunch requested via flag file (docker mode, mode=%s) -- "
+                    "gateway-login-watchdog.sh picks this up within ~1 min", DASH_MODE)
+        except Exception:
+            log.exception("gateway kill+relaunch flag write failed (docker mode)")
+        return
     import subprocess
     ibc_dir = r"C:\IBC-Live" if DASH_MODE == "live" else r"C:\IBC"
     # Distinguishing java.exe command-line substring for THIS mode's gateway -- "IBC-Live" for
