@@ -41,6 +41,11 @@ def _conn() -> sqlite3.Connection:
     c.execute("""CREATE TABLE IF NOT EXISTS rejected_signals (
         ts TEXT, instrument TEXT, direction TEXT, det_strength INTEGER,
         confidence REAL, reasons TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS scan_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, environment TEXT,
+        kind TEXT, n_signals INTEGER, agreement REAL,
+        input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL,
+        latency_ms INTEGER, skipped INTEGER, reason TEXT)""")
     return c
 
 
@@ -172,3 +177,56 @@ def rejection_counts() -> list[tuple[str, int]]:
                 key = _canon(part)
                 counts[key] = counts.get(key, 0) + 1
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+
+
+# ---- per-scan token/cost metrics (ADDED 2026-09-16) -------------------------
+
+def gate_agreement(result, scores_by_key: dict | None = None) -> float | None:
+    """Fraction of scanned instruments where the LLM action agrees with the
+    deterministic signal: det BUY/SELL matched by the same LLM action, or det
+    WATCH matched by LLM WAIT. Returns None when there is nothing to compare.
+
+    This is a DRIFT/canary metric, not a quality score: a news-driven LLM veto
+    of a deterministic BUY (disagreement) is often the CORRECT outcome -- see
+    evaluate_signal()'s "LLM vetoed to WAIT" path. What matters for the token
+    optimization is that agreement stays STABLE across prompt changes (canary:
+    run the compressed prompt on paper, agreement delta vs legacy ~= 0 means
+    the compression didn't change decisions), not that it is high.
+    """
+    if not result or not getattr(result, "signals", None):
+        return None
+    scores_by_key = scores_by_key or {}
+    agree = total = 0
+    for s in result.signals:
+        det = getattr(scores_by_key.get(s.key), "signal", None)
+        if det is None:
+            continue
+        total += 1
+        if (det in ("BUY", "SELL") and s.action == det) or \
+           (det == "WATCH" and s.action == "WAIT"):
+            agree += 1
+    return (agree / total) if total else None
+
+
+def record_scan_metrics(environment: str, kind: str, n_signals: int,
+                        agreement: float | None, input_tokens: int,
+                        output_tokens: int, cost_usd: float, latency_ms: int,
+                        skipped: bool, reason: str) -> None:
+    """One row per refresh_llm() outcome -- including SKIPS (tokens 0). Powers
+    tok/call, calls/day, cost/day and agreement-rate queries locally, without
+    depending on the shared Supabase ledger being reachable."""
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO scan_metrics(ts, environment, kind, n_signals, agreement, "
+            "input_tokens, output_tokens, cost_usd, latency_ms, skipped, reason) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (_now(), environment, kind, n_signals, agreement, input_tokens,
+             output_tokens, cost_usd, latency_ms, 1 if skipped else 0, reason))
+
+
+def scan_metrics_history(limit: int = 500) -> list[dict]:
+    """Newest-first per-scan metrics rows (both scans and skips)."""
+    with _LOCK, _conn() as c:
+        cur = c.execute("SELECT * FROM scan_metrics ORDER BY id DESC LIMIT ?", (limit,))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]

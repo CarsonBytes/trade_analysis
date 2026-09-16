@@ -10,6 +10,7 @@ UI keeps showing deterministic data only.
 """
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from dashboard.core import net  # noqa: F401
@@ -53,29 +54,55 @@ class BoardScan(BaseModel):
 # forcing a dedicated field (rather than hoping the free-text rationale mentions it) makes
 # this reliable and auditable instead of hopeful.
 SYSTEM = (
-    "You are the head analyst on a trading desk. You are given pre-computed, "
-    "factual indicators for several instruments (metals, energy, FX, indices, "
-    "crypto) plus recent "
-    "headlines. Do NOT invent numbers; reason only from the facts provided. "
-    "First form the macro_note (2-3 sentences on the overall backdrop). THEN, for each "
-    "instrument, give a bias, an action (BUY/SELL/WAIT), a calibrated confidence, a "
-    "one-line rationale, an explicit macro_linkage (does any theme from your OWN "
-    "macro_note actually apply to THIS instrument, through what mechanism -- or "
-    "genuinely nothing? Say so either way, don't skip this step even when the answer is "
-    "'none material'), and the explicit invalidation level. "
+    "You are the head analyst on a trading desk. You get pre-computed factual "
+    "indicators per instrument (top ones in full, the rest abbreviated) plus "
+    "recent headlines. Do NOT invent numbers; reason only from the facts given. "
+    "First write macro_note (2-3 sentences on the backdrop). THEN, for EACH "
+    "instrument: bias, action (BUY/SELL/WAIT), calibrated confidence, one-line "
+    "rationale, macro_linkage (does any theme from your OWN macro_note apply to "
+    "THIS instrument, through what mechanism -- or genuinely nothing? Say so "
+    "either way, never skip), and the explicit invalidation level. "
     "WAIT is correct when signals conflict or a trend is overextended. Only "
     "count headlines actually relevant to an instrument. You advise a human who "
     "makes the final call -- never overstate confidence."
 )
 
 
-def _facts_block(scores: list[Score]) -> str:
+def _compact_facts(s: Score) -> str:
+    """Abbreviated facts for instruments outside the actionable top-N: the
+    deterministic verdict plus the first 4 lines of facts_text (symbol, last
+    price, returns, RSI/ATR/vol) -- enough for news-awareness and veto
+    judgement, without the full multi-timeframe/structure detail the top
+    candidates get. Deterministic string slicing, no parsing of numbers."""
+    head = "\n".join(s.facts_text.splitlines()[:4])
+    return (
+        f"### {s.key}  (deterministic: {s.signal}, dir {s.direction}, "
+        f"strength {s.strength}/5 -- abbreviated facts)\n{head}"
+    )
+
+
+def _facts_block(scores: list[Score], full_n: int = 4) -> str:
+    """Full facts_text for the top `full_n` (ranked) instruments, compact facts
+    for the rest.
+
+    ADDED 2026-09-16 (token optimization): the board scan re-sends all 12
+    instruments' full facts every tick (~2.7k input tok/call on both live and
+    paper). `scores` arrives ranked by obviousness and a strength-5 setup --
+    the only kind that can clear the entry gate -- always sorts into the top
+    handful (see MAX_INSTRUMENTS' note), so full detail is spent where a trade
+    decision can actually turn on it. Coverage is unchanged: all 12 still get a
+    real LLM look every scan, just with abbreviated facts outside the top-4.
+    Estimated saving ~1k input tok/call (~35%).
+    """
     blocks = []
-    for s in scores:
-        blocks.append(
-            f"### {s.key}  (deterministic: {s.signal}, dir {s.direction}, "
-            f"strength {s.strength}/5)\n{s.facts_text}"
-        )
+    for i, s in enumerate(scores):
+        if i < full_n:
+            blocks.append(
+                f"### {s.key}  (deterministic: {s.signal}, dir {s.direction}, "
+                f"strength {s.strength}/5)\n{s.facts_text}"
+            )
+        else:
+            blocks.append(_compact_facts(s))
     return "\n\n".join(blocks)
 
 
@@ -109,6 +136,64 @@ def _facts_block(scores: list[Score]) -> str:
 MAX_INSTRUMENTS = 12
 MAX_NEWS = 10
 
+# Token-optimization cadence (ADDED 2026-09-16): the scan prompt is a pure
+# function of (ranked deterministic signals, headlines, open positions), so an
+# unchanged fingerprint means the LLM would re-read identical facts -- skip the
+# call and reuse the last scan. SCAN_MIN_RESCAN_MIN debounces rapid re-runs
+# when the fingerprint IS changing (event-driven trigger still fires, just not
+# more often than this); SCAN_MAX_IDLE_MIN forces a periodic fresh read even
+# with no delta (news staleness, model re-read).
+SCAN_MIN_RESCAN_MIN = 5
+SCAN_MAX_IDLE_MIN = 120
+
+
+def _dedupe_headlines(headlines: list[str], limit: int = MAX_NEWS) -> list[str]:
+    """Order-preserving dedupe (feeds overlap heavily) before the cap -- dupes
+    previously each cost tokens while adding zero information."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in headlines:
+        key = (h or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def scan_fingerprint(scores: list[Score], headlines: list[str],
+                     position_keys: tuple | list = ()) -> str:
+    """Stable hash of everything the scan prompt is built from: the ranked
+    deterministic verdicts (key/signal/direction/strength -- NOT raw prices, so
+    sub-gate noise doesn't churn it), the deduped headline set, and open
+    position keys. Pure function, no I/O -- unit-testable."""
+    import hashlib
+    parts = [f"{s.key}|{s.signal}|{s.direction}|{s.strength}"
+             for s in scores[:MAX_INSTRUMENTS]]
+    parts.append("news:" + hashlib.sha256(
+        "\n".join(_dedupe_headlines(headlines)).encode()).hexdigest()[:16])
+    parts.append("pos:" + ",".join(sorted(str(k) for k in position_keys)))
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:32]
+
+
+def should_scan(fingerprint: str, last_fingerprint: str | None,
+                last_scan_ts: float | None, now_ts: float) -> tuple[bool, str]:
+    """Pure cadence decision. Returns (proceed, reason)."""
+    if fingerprint != last_fingerprint:
+        if last_scan_ts and (now_ts - last_scan_ts) < SCAN_MIN_RESCAN_MIN * 60:
+            return False, "debounced: signal changed but last scan <5min ago"
+        return True, "signal delta"
+    if not last_scan_ts or (now_ts - last_scan_ts) >= SCAN_MAX_IDLE_MIN * 60:
+        return True, "max idle refresh"
+    return False, "no signal delta"
+
+
+# Last successful scan's token/cost telemetry, for the caller's per-scan
+# metrics logging (service.refresh_llm). Empty until the first success.
+LAST_SCAN_TELEMETRY: dict = {}
+
 
 # FIXED 2026-07-14: found live (both instances share one OpenAI-compatible API key/quota)
 # hammering a THIRD-PARTY free-tier daily limit (chatanywhere.tech, 200 req/day, resets at
@@ -135,22 +220,38 @@ def _clear_backoff() -> None:
     store.cache_set(_RATE_LIMIT_BACKOFF_KEY, None)
 
 
-def _set_rate_limit_backoff() -> None:
+def _set_rate_limit_backoff(long: bool = False) -> None:
     """Back off until the next provider reset (00:00 HKT / 16:00 UTC).
     The provider's own message says "请00:00后再试" -- that's Hong Kong time (UTC+8),
     NOT UTC midnight. The previous code used UTC midnight, extending the blackout
-    by an unnecessary 8 hours."""
+    by an unnecessary 8 hours.
+
+    FIXED 2026-09-16: that daily-reset assumption is WRONG for chatanywhere's
+    "7天免费点数不足以支持本次请求" 403 -- confirmed live (2026-09-14/15) that error's
+    own message means a rolling 7-DAY free-points window is exhausted, not a daily
+    quota. Backing off to the next 16:00 UTC just re-hits the identical 403 the
+    instant that boundary passes, because the 7-day window hasn't actually rolled
+    forward -- measured this looping every ~30-40s for 45+ hours straight before
+    being caught, hundreds of wasted round-trips a day for zero chance of success.
+    A 7-day exhaustion has no fixed reset instant to compute (points trickle back
+    in as old high-usage days age out of the window, see the quant-vs-events-vs-
+    study token breakdown in HANDOFF.md), so `long=True` (passed by the caller when
+    the error text names the 7-day window) checks back once a day instead of
+    guessing a reset time that's usually wrong."""
     import datetime as _dt
     now_utc = _dt.datetime.now(_dt.timezone.utc)
-    # Provider resets at 00:00 CST = 16:00 UTC
-    # If it's already past 16:00 UTC today, the reset already happened; back off
-    # to tomorrow's 16:00 UTC. Otherwise back off to today's 16:00 UTC.
-    reset_today = _dt.datetime.combine(now_utc.date(), _dt.time(16, 0),
-                                       tzinfo=_dt.timezone.utc)
-    if now_utc >= reset_today:
-        until = reset_today + _dt.timedelta(days=1)
+    if long:
+        until = now_utc + _dt.timedelta(hours=24)
     else:
-        until = reset_today
+        # Provider resets at 00:00 CST = 16:00 UTC
+        # If it's already past 16:00 UTC today, the reset already happened; back off
+        # to tomorrow's 16:00 UTC. Otherwise back off to today's 16:00 UTC.
+        reset_today = _dt.datetime.combine(now_utc.date(), _dt.time(16, 0),
+                                           tzinfo=_dt.timezone.utc)
+        if now_utc >= reset_today:
+            until = reset_today + _dt.timedelta(days=1)
+        else:
+            until = reset_today
     store.cache_set(_RATE_LIMIT_BACKOFF_KEY, until.isoformat())
 
 
@@ -185,7 +286,7 @@ def run_board_scan(scores: list[Score], headlines: list[str],
             pass    # malformed cached value -- ignore and attempt normally
 
     top = scores[:MAX_INSTRUMENTS]
-    news = headlines[:MAX_NEWS]
+    news = _dedupe_headlines(headlines)
     news_block = "\n".join(f"- {h}" for h in news) or "(no headlines available)"
 
     def _human_for(batch) -> str:
@@ -212,12 +313,20 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         # NOT change how invocation-level errors (429, auth failures) propagate, so the
         # except block below (is_chatanywhere_unavailable(e) etc.) is unaffected either way.
         def _invoke(prompt: str):
+            # ROUTED 2026-09-16 (token optimization, tier D): BOARD_SCAN_MODEL
+            # lets ops point the batched scan at a cheaper/faster model without
+            # touching the analyst CLI's OPENAI_MODEL. Unset = today's behavior
+            # exactly. The deterministic entry gate (paper.evaluate_signal())
+            # and risk sizing stay in code regardless of model -- the scan only
+            # advises, never decides. The model actually used is logged via
+            # last_model_used() on the log_usage() call below.
             return invoke_with_key_fallback(
                 lambda llm: llm.with_structured_output(BoardScan, include_raw=True),
                 [
                     {"role": "system", "content": SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
+                model=os.environ.get("BOARD_SCAN_MODEL") or None,
             )
 
         try:
@@ -247,27 +356,49 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         # beyond a stale "llm: never" timestamp. is_chatanywhere_unavailable() now covers
         # both classes (quota exhausted OR key rejected) so either backs off gracefully.
         if is_chatanywhere_unavailable(e):
-            _set_rate_limit_backoff()
-            reason = ("rate-limited by provider" if ("429" in str(e) or "RateLimitError" in type(e).__name__)
-                      else "provider rejected the key (auth/permission error)")
+            # ADDED 2026-09-16: "7天" (7-day) in the message means the provider's
+            # rolling weekly free-points pool is exhausted, not the ordinary daily
+            # quota -- see _set_rate_limit_backoff()'s docstring for why that needs a
+            # much longer, non-clock-aligned backoff instead of "wait for 16:00 UTC".
+            is_seven_day_exhaustion = "7天" in str(e) or "7-day" in str(e).lower()
+            _set_rate_limit_backoff(long=is_seven_day_exhaustion)
+            if is_seven_day_exhaustion:
+                reason = "provider's 7-day free-points window exhausted"
+            else:
+                reason = ("rate-limited by provider" if ("429" in str(e) or "RateLimitError" in type(e).__name__)
+                          else "provider rejected the key (auth/permission error)")
             return None, f"{reason} -- backing off until next reset ({e})"
         raise    # anything else is a real, unexpected failure -- don't swallow it
     # SUCCESS: clear any active backoff so subsequent scans aren't blocked by a
     # stale cache entry from a previous transient error.
     _clear_backoff()
     store.record_call(1)
+    # Telemetry for the caller (service.refresh_llm logs per-scan metrics into
+    # the journal): module-level stash, copied -- never raises, never affects
+    # the scan result. Reset at the top of every attempt below.
+    _telemetry = {"input_tokens": 0, "output_tokens": 0, "latency_ms": 0,
+                  "model": "", "provider": ""}
     try:                                          # cross-project usage visibility only
-        import os
         from analyst.llm import last_model_used, last_provider_used
         from analyst.usage_log import log_usage
         usage = getattr(raw_result.get("raw"), "usage_metadata", None) or {}
+        _telemetry.update(
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            latency_ms=int((time.perf_counter() - _start) * 1000),
+            model=last_model_used() or os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+            provider=last_provider_used(),
+        )
         log_usage(
             kind="board_scan",
-            model=last_model_used() or os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
-            input_tokens=usage.get("input_tokens", 0), output_tokens=usage.get("output_tokens", 0),
-            latency_ms=int((time.perf_counter() - _start) * 1000),
-            provider=last_provider_used(),
+            model=_telemetry["model"],
+            input_tokens=_telemetry["input_tokens"],
+            output_tokens=_telemetry["output_tokens"],
+            latency_ms=_telemetry["latency_ms"],
+            provider=_telemetry["provider"],
         )
     except Exception:
         pass                                       # telemetry only -- never affects the scan result
+    LAST_SCAN_TELEMETRY.clear()
+    LAST_SCAN_TELEMETRY.update(_telemetry)
     return result, "ok"

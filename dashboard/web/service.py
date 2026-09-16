@@ -19,6 +19,7 @@ from dashboard.data.providers import get_history
 from dashboard.core.scoring import score_from_facts, rank, Score
 from dashboard.web.news_sources import fetch_headlines
 from dashboard.web.board_scan import run_board_scan, InstrumentSignal
+from dashboard.web import board_scan
 from dashboard.data.providers import get_ohlc
 from dashboard.core import store
 from dashboard.core import paper
@@ -834,24 +835,108 @@ def refresh_news() -> None:
     STATE["news"] = fetch_headlines()
 
 
-def refresh_llm(cap: int | None = None) -> str:
-    """Run the batched board scan if budget allows. Returns a status string."""
+def _position_keys() -> tuple:
+    """Identity of open broker positions (instrument names where available).
+    Best-effort fingerprint input: only membership matters, never values, so
+    per-tick P&L movement doesn't churn the scan fingerprint."""
+    try:
+        keys = []
+        for pid, p in (STATE.get("positions") or {}).items():
+            if isinstance(p, dict):
+                for f in ("instrument", "symbol", "key"):
+                    if p.get(f):
+                        keys.append(str(p[f]))
+                        break
+            else:
+                keys.append(str(pid))
+        return tuple(sorted(set(keys)))
+    except Exception:
+        return ()
+
+
+def refresh_llm(cap: int | None = None, force: bool = False) -> str:
+    """Run the batched board scan if budget allows. Returns a status string.
+
+    `force` (manual refresh) bypasses the fingerprint cadence gate -- an
+    explicit user click is always honoured, budget permitting.
+    """
     cap = cap or STATE["cap"]
     scores = list(STATE["scores"].values())
     if not scores:
         return "no data yet -- run a cheap refresh first"
     ranked = rank(scores)
+    # ADDED 2026-09-16 (token optimization, tiers B+C): the scan prompt is a
+    # pure function of (ranked signals, headlines, open positions) -- an
+    # unchanged fingerprint means the LLM would re-read identical facts, so
+    # skip the call and reuse the last scan. A CHANGED fingerprint is the
+    # event-driven trigger (debounced to >=5min between scans); an unchanged
+    # one still forces a fresh read at least every 2h. Every outcome -- scan,
+    # budget-block, or skip -- writes one scan_metrics row (the local ledger
+    # for tok/call, calls/day, cost/day, agreement rate).
+    import time as _t
+    now_ts = _t.time()
+    env = usage_log._resolve_environment()
+    fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], _position_keys())
+    last_fp, _ = store.cache_get("llm_scan_fingerprint")
+    last_scan_raw, _ = store.cache_get("llm_scan_ts")
+    try:
+        last_scan_ts = float(last_scan_raw) if last_scan_raw else None
+    except (TypeError, ValueError):
+        last_scan_ts = None
+    if not force:
+        proceed, reason = board_scan.should_scan(fp, last_fp, last_scan_ts, now_ts)
+        if not proceed:
+            status = f"skipped ({reason}) -- reusing last scan"
+            STATE["last_status"] = status
+            try:
+                journal.record_scan_metrics(
+                    environment=env, kind="board_scan",
+                    n_signals=len(STATE.get("llm") or {}), agreement=None,
+                    input_tokens=0, output_tokens=0, cost_usd=0.0, latency_ms=0,
+                    skipped=True, reason=reason)
+            except Exception as e:
+                log.warning("journal: could not record scan skip: %s", e)
+            log.info("LLM board scan: %s", status)
+            return status
     result, status = run_board_scan(ranked, STATE["news"], cap=cap)
     if result is not None:
         STATE["llm"] = {s.key: s for s in result.signals}
         STATE["macro_note"] = result.macro_note
         STATE["last_llm"] = _now()
+        try:
+            store.cache_set("llm_scan_fingerprint", fp)
+            store.cache_set("llm_scan_ts", now_ts)
+        except Exception as e:
+            log.warning("could not persist scan fingerprint: %s", e)
         # append the FULL scan to the audit journal (the cache only keeps the
         # latest; this preserves the whole history for retrospective)
         try:
             journal.record_scan(result, STATE["scores"])
         except Exception as e:
             log.warning("journal: could not record board scan: %s", e)
+        # per-scan token/cost/agreement metrics (local ledger -- queryable even
+        # when the shared Supabase ledger is unreachable)
+        try:
+            tel = dict(board_scan.LAST_SCAN_TELEMETRY)
+            agreement = journal.gate_agreement(result, STATE["scores"])
+            journal.record_scan_metrics(
+                environment=env, kind="board_scan", n_signals=len(result.signals),
+                agreement=agreement,
+                input_tokens=tel.get("input_tokens", 0),
+                output_tokens=tel.get("output_tokens", 0),
+                cost_usd=usage_log.estimate_cost(
+                    tel.get("model") or "gpt-5-mini",
+                    tel.get("input_tokens", 0), tel.get("output_tokens", 0)),
+                latency_ms=tel.get("latency_ms", 0),
+                skipped=False, reason=status)
+            log.info("LLM board scan: %s (tok %d in/%d out, model %s, agreement %s, "
+                     "calls today %d/%d)",
+                     status, tel.get("input_tokens", 0), tel.get("output_tokens", 0),
+                     tel.get("model", "?"),
+                     f"{agreement:.0%}" if agreement is not None else "n/a",
+                     store.calls_today(), cap)
+        except Exception as e:
+            log.warning("journal: could not record scan metrics: %s", e)
         # cache a lightweight snapshot so a restart shows something immediately
         store.cache_set("last_board_scan", {
             "macro_note": result.macro_note,
@@ -877,7 +962,8 @@ def refresh_llm(cap: int | None = None) -> str:
         STATE["shared_calls_by_project"] = shared["calls_by_project"]
     except Exception as e:
         log.warning("shared usage fetch failed: %s", e)
-    log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)
+    if result is None:
+        log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)
     return status
 
 

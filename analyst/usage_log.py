@@ -6,6 +6,8 @@ affect analysis or trading decisions.
 """
 import datetime as dt
 import os
+import pathlib
+import sqlite3
 import time
 
 import httpx
@@ -42,21 +44,61 @@ _PRICING = {"gpt-5-mini": (0.25, 2.00)}
 _DEFAULT_PRICING = (0.50, 1.50)
 
 
+def _mode_db_path() -> pathlib.Path:
+    """Fixed location of the mode pointer DB (mirrors dashboard/core/store.py's
+    _MODE_DB without importing dashboard -- analyst/ must stay import-safe
+    standalone, see analyst/llm.py's notes on the same constraint)."""
+    return pathlib.Path(__file__).resolve().parents[1] / "dashboard" / "dashboard_mode.db"
+
+
+def _resolve_environment() -> str:
+    """Attribution for the `environment` ledger column. Never returns None/empty.
+
+    FIXED 2026-09-16: rows logged from any process that doesn't pin DASH_FIXED_MODE
+    (analyst CLI runs, backtests, ad-hoc scripts -- and any future failure-path
+    log call) landed with environment=NULL, surfacing as unattributable "unset"
+    rows in the usage dashboard. Chain is now: DASH_FIXED_MODE env var ->
+    persisted mode pointer (the same file store.get_mode() reads) -> "unknown"
+    literal. "unknown" is deliberately a real string, not NULL, so it aggregates
+    as its own visible bucket instead of silently merging into other projects'
+    legitimately-environmentless rows.
+    """
+    env = (os.environ.get("DASH_FIXED_MODE") or "").strip().lower()
+    if env:
+        return env
+    try:
+        db = _mode_db_path()
+        if db.exists():
+            with sqlite3.connect(db) as c:
+                row = c.execute("SELECT v FROM mode WHERE k='dash_mode'").fetchone()
+                if row and (row[0] or "").strip():
+                    return row[0].strip().lower()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Per-MTok reference pricing shared by log_usage() and the local
+    scan_metrics ledger -- one definition so the two can never drift apart."""
+    in_price, out_price = _PRICING.get(model, _DEFAULT_PRICING)
+    return round((input_tokens / 1_000_000) * in_price
+                 + (output_tokens / 1_000_000) * out_price, 6)
+
+
 def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, latency_ms: int,
              provider: str = "chatanywhere") -> None:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
     try:
-        in_price, out_price = _PRICING.get(model, _DEFAULT_PRICING)
-        cost_usd = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
+        cost_usd = estimate_cost(model, input_tokens, output_tokens)
         # RESTORED 2026-07-28: the project/call_type/environment/provider columns were
         # reverted 2026-07-18 because they 400'd against the live table at the time (the
         # migration adding them hadn't been run yet). It has since landed -- confirmed live
         # via direct PostgREST query 2026-07-28 -- so readers that key off the real columns
         # (rather than parsing the `purpose` prefix) now see this project's rows again.
-        # `environment` is filled from DASH_FIXED_MODE when the launch script pins one
-        # (dashboard.ps1='paper', run_dashboard_live.ps1='live'); falls back to whatever
-        # store.get_mode() would resolve to isn't worth the import here, so unset -> None.
+        # `environment` goes through _resolve_environment() (2026-09-16: was a bare
+        # os.environ.get("DASH_FIXED_MODE"), so any unpinned process logged NULL).
         resp = httpx.post(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers={
@@ -70,7 +112,7 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
                 "project": "quant",
                 "call_type": kind,
                 "provider": provider,
-                "environment": os.environ.get("DASH_FIXED_MODE"),
+                "environment": _resolve_environment(),
                 "model": model,
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
@@ -125,7 +167,8 @@ def fetch_shared_usage_today() -> dict:
     poll past the 60s cache. Falls back to the raw-row method if the summary
     table doesn't exist yet (404), so this keeps working before that migration
     has been run."""
-    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False}
+    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {},
+             "chatanywhere_calls": 0, "ok": False}
     now = time.time()
     if now - _shared_usage_cache["ts"] < _SHARED_USAGE_CACHE_SEC and _shared_usage_cache["data"]:
         return _shared_usage_cache["data"]
@@ -146,7 +189,8 @@ def fetch_shared_usage_today() -> dict:
         resp = httpx.get(
             f"{SUPABASE_URL}/rest/v1/llm_daily_summary",
             headers=headers,
-            params={"select": "total_calls,total_cost_usd,calls_by_project", "day": f"eq.{today}"},
+            params={"select": "total_calls,total_cost_usd,calls_by_project,chatanywhere_calls",
+                    "day": f"eq.{today}"},
             timeout=10,
         )
         supabase_meter.record("GET", "llm_daily_summary", supabase_meter.response_bytes(resp))
@@ -160,12 +204,23 @@ def fetch_shared_usage_today() -> dict:
     if not rows:
         # Table exists but nothing logged yet today (e.g. just past HKT
         # midnight) -- an empty set, NOT a missing table, so no raw fallback.
-        result = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": True}
+        result = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {},
+                  "chatanywhere_calls": 0, "ok": True}
     else:
         row = rows[0]
         result = {"calls": row.get("total_calls") or 0,
                   "cost_usd": row.get("total_cost_usd") or 0.0,
                   "calls_by_project": row.get("calls_by_project") or {},
+                  # FIXED 2026-09-15: shared_calls_ok() gates against the
+                  # chatanywhere.tech 200/day quota specifically -- "calls"
+                  # (every provider combined) overcounts it the moment any
+                  # project logs a non-chatanywhere call, same fix study-
+                  # platform's core/llm.py already made. Falls back to
+                  # "calls" only if this summary row predates migration 003
+                  # (no chatanywhere_calls column yet) rather than silently
+                  # reading None as 0 and under-gating.
+                  "chatanywhere_calls": row.get("chatanywhere_calls")
+                      if row.get("chatanywhere_calls") is not None else row.get("total_calls") or 0,
                   "ok": True}
     _shared_usage_cache["ts"] = now
     _shared_usage_cache["data"] = result
@@ -178,13 +233,15 @@ def _fetch_shared_usage_today_from_raw_rows(headers: dict, now: float) -> dict:
     exactly what llm_daily_summary's trigger exists to replace. Kept only so
     fetch_shared_usage_today() doesn't break for a deployment whose Supabase
     project hasn't run 001_llm_daily_summary.sql yet."""
-    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False}
+    empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {},
+             "chatanywhere_calls": 0, "ok": False}
     today_start = _hkt_today_start_utc().isoformat() + "Z"
     try:
         resp = httpx.get(
             f"{SUPABASE_URL}/rest/v1/llm_calls",
             headers=headers,
-            params={"select": "purpose,cost_usd,created_at", "created_at": f"gte.{today_start}"},
+            params={"select": "purpose,project,provider,cost_usd,created_at",
+                    "created_at": f"gte.{today_start}"},
             timeout=10,
         )
         supabase_meter.record("GET", "llm_calls", supabase_meter.response_bytes(resp))
@@ -195,12 +252,23 @@ def _fetch_shared_usage_today_from_raw_rows(headers: dict, now: float) -> dict:
 
     calls_by_project: dict[str, int] = {}
     total_cost = 0.0
+    chatanywhere_calls = 0
     for row in rows:
-        project = _project_of(row.get("purpose") or "")
+        purpose = row.get("purpose") or ""
+        project = row.get("project") or _project_of(purpose)
         calls_by_project[project] = calls_by_project.get(project, 0) + 1
         total_cost += row.get("cost_usd") or 0.0
+        # Same precedence as the 003 migration's trigger / study-platform's
+        # core/llm.py reader: an explicitly-set provider is authoritative;
+        # otherwise the project heuristic (quant/events rows are always via
+        # the shared proxy key) plus study's own embed calls.
+        provider = row.get("provider") or ""
+        if provider == "chatanywhere" or (not provider and (
+                project in ("quant", "events") or purpose.startswith("study:embed"))):
+            chatanywhere_calls += 1
 
-    result = {"calls": len(rows), "cost_usd": total_cost, "calls_by_project": calls_by_project, "ok": True}
+    result = {"calls": len(rows), "cost_usd": total_cost, "calls_by_project": calls_by_project,
+              "chatanywhere_calls": chatanywhere_calls, "ok": True}
     _shared_usage_cache["ts"] = now
     _shared_usage_cache["data"] = result
     return result
@@ -211,8 +279,17 @@ def shared_calls_ok(cap: int = 200, reserve: int = 10) -> tuple[bool, int | None
     shared ledger can't be reached, returns (False, None) rather than treating
     an unreachable fetch as "0 calls, all clear" -- see store.py::can_call()
     for why that's the safe default here (skipping one board-scan cycle is
-    free; silently overrunning the shared cap is not)."""
+    free; silently overrunning the shared cap is not).
+
+    FIXED 2026-09-15: `cap` is chatanywhere.tech's own 200/day free-tier
+    limit -- gating on usage["calls"] (every provider combined: DeepSeek,
+    Anthropic, etc.) overcounts it and would trip this guard on traffic that
+    doesn't touch that quota at all. usage["chatanywhere_calls"] is the
+    number that actually matters, same fix study-platform's core/llm.py
+    already made for its own display. Harmless no-op today (100% of current
+    traffic is chatanywhere, so the two numbers are identical), but wrong on
+    the day any project logs a non-chatanywhere call."""
     usage = fetch_shared_usage_today()
     if not usage["ok"]:
         return False, None
-    return usage["calls"] < (cap - reserve), usage["calls"]
+    return usage["chatanywhere_calls"] < (cap - reserve), usage["chatanywhere_calls"]

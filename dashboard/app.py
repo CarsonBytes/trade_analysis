@@ -56,7 +56,14 @@ from dashboard.core.scoring import rank                     # noqa: E402
 # ---- settings (live, editable from the UI) --------------------------------
 # cheap_min: prices/scores/trade-resolution interval (deterministic, free).
 # llm_min:   LLM macro/news scan interval (independent; slow-moving, budgeted).
-SETTINGS = {"cheap_min": 1, "llm_min": 15, "auto_pause": True,
+# CHANGED 2026-09-16 (token optimization, tier B): 15 -> 30. The scan prompt is
+# now fingerprinted (see board_scan.scan_fingerprint/should_scan): a real
+# signal/headline/position delta triggers an immediate re-scan (debounced to
+# >=5min), so the fixed interval only governs the no-change case -- and macro
+# posture genuinely moves on an hours timescale, not minutes. Live was burning
+# ~2.3x paper's tokens on the same days at 15min; the delta trigger preserves
+# responsiveness while the slower idle cadence cuts the steady-state burn.
+SETTINGS = {"cheap_min": 1, "llm_min": 30, "auto_pause": True,
             "cap": 200, "grid_cols": 4, "chart_period": "All", "chart_scale": "Truncated",
             "chart_view": "P&L (ex-deposits)",
             # ADDED 2026-08-05: Active Trades card sort control. "desc" is defined as
@@ -2854,7 +2861,7 @@ async def _do_llm(force: bool = False) -> None:
         service.STATE["last_status"] = "market closed (auto-pause) — LLM skipped"
         _refresh_for_all_clients(header_status)
         return
-    await run.io_bound(service.refresh_llm, SETTINGS["cap"])
+    await run.io_bound(service.refresh_llm, SETTINGS["cap"], force)
     _refresh_all_panels()
 
 
