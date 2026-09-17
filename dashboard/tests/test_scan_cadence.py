@@ -239,6 +239,105 @@ def test_estimate_cost_matches_log_pricing():
     check("unknown model falls back", estimate_cost("nope", 1_000_000, 0), 0.5)
 
 
+def _metric_row(minutes_ago, skipped=False, reason="ok", now=None,
+                n_signals=12, agreement=0.75, tok_in=1800, tok_out=900):
+    import datetime as _dt
+    base = now or _dt.datetime.now(_dt.timezone.utc)
+    return {"ts": (base - _dt.timedelta(minutes=minutes_ago)).isoformat(),
+            "environment": "live", "kind": "board_scan", "n_signals": n_signals,
+            "agreement": agreement, "input_tokens": 0 if skipped else tok_in,
+            "output_tokens": 0 if skipped else tok_out, "cost_usd": 0.002,
+            "latency_ms": 1200, "skipped": 1 if skipped else 0, "reason": reason}
+
+
+def test_heartbeat_fresh_and_reused():
+    print("\nllm_scan_status(): fresh + shared-reuse headlines:")
+    import datetime as _dt
+    from dashboard.web.service import llm_scan_status
+    now = _dt.datetime.now(_dt.timezone.utc)
+    fresh = _metric_row(5, now=now)
+    st = llm_scan_status(now=now, latest=fresh, latest_usable=fresh,
+                         board_scan_ts=None, backoff_until_iso=None,
+                         last_status="ok", market_open=True)
+    check("fresh state", st["state"], "fresh")
+    check("brain source fresh", st["brain_source"], "fresh")
+    check("not stale", st["stale"], False)
+    check("brain line names signals", "12 signals" in st["brain_line"], True)
+
+    reused = _metric_row(12, skipped=True, reason="reused live scan 8min old", now=now)
+    st = llm_scan_status(now=now, latest=reused, latest_usable=reused,
+                         board_scan_ts=None, backoff_until_iso=None,
+                         last_status="reused live scan (8min old)", market_open=True)
+    check("reuse not misclassified as skip", st["state"], "reused")
+    check("brain source shared", st["brain_source"], "shared")
+
+
+def test_heartbeat_skip_reports_brain_not_attempt():
+    print("\nllm_scan_status(): skip shows BRAIN age (usable scan), not check age:")
+    import datetime as _dt
+    from dashboard.web.service import llm_scan_status
+    now = _dt.datetime.now(_dt.timezone.utc)
+    usable = _metric_row(40, now=now)
+    skip = _metric_row(5, skipped=True, reason="no signal delta", now=now)
+    st = llm_scan_status(now=now, latest=skip, latest_usable=usable,
+                         board_scan_ts=None, backoff_until_iso=None,
+                         last_status="skipped (no signal delta) -- reusing last scan",
+                         market_open=True)
+    check("skip state", st["state"], "skipped")
+    check("brain age ~40m", round((st["brain_age_s"] or 0) / 60), 40)
+    check("attempt age ~5m", round((st["attempt_age_s"] or 0) / 60), 5)
+    check("not stale (40m < 2h idle)", st["stale"], False)
+
+
+def test_heartbeat_blocked_paused_cached_never():
+    print("\nllm_scan_status(): blocked / paused / cached / never:")
+    import datetime as _dt
+    from dashboard.web.service import llm_scan_status
+    now = _dt.datetime.now(_dt.timezone.utc)
+    usable = _metric_row(180, now=now)
+    future = (now + _dt.timedelta(hours=20)).isoformat()
+    st = llm_scan_status(now=now, latest=usable, latest_usable=usable,
+                         board_scan_ts=None, backoff_until_iso=future,
+                         last_status="provider's 7-day free-points window exhausted -- backing off",
+                         market_open=True)
+    check("backoff -> blocked", st["state"], "blocked")
+    check("7-day inferred", st["reason"], "7-day free-points window exhausted")
+    check("retry HKT present", bool(st["retry_hkt"]), True)
+    check("3h brain in hours -> stale", st["stale"], True)
+
+    st = llm_scan_status(now=now, latest=usable, latest_usable=usable,
+                         board_scan_ts=None, backoff_until_iso=None,
+                         last_status="market closed (auto-pause) — LLM skipped",
+                         market_open=False)
+    check("auto-pause -> paused", st["state"], "paused")
+    check("paused never stale (market closed)", st["stale"], False)
+
+    st = llm_scan_status(now=now, latest=None, latest_usable=None,
+                         board_scan_ts=(now - _dt.timedelta(minutes=30)).isoformat(),
+                         backoff_until_iso=None, last_status="restored cached scan",
+                         market_open=True)
+    check("cache fallback -> cached", st["state"], "cached")
+
+    st = llm_scan_status(now=now, latest=None, latest_usable=None,
+                         board_scan_ts=None, backoff_until_iso=None,
+                         last_status="not run yet", market_open=None)
+    check("nothing anywhere -> never", st["state"], "never")
+    check("unknown market -> not stale", st["stale"], False)
+
+
+def test_heartbeat_malformed_inputs_degrade():
+    print("\nllm_scan_status(): malformed timestamps degrade, never raise:")
+    import datetime as _dt
+    from dashboard.web.service import llm_scan_status
+    now = _dt.datetime.now(_dt.timezone.utc)
+    st = llm_scan_status(now=now, latest={"ts": "garbage!!", "skipped": 0, "reason": "ok"},
+                         latest_usable=None, board_scan_ts="also bad",
+                         backoff_until_iso="nope", last_status="",
+                         market_open=True)
+    check("bad ts -> no crash, usable state key", "state" in st, True)
+    check("bad brain ts -> never", st["state"], "never")
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

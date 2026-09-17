@@ -498,17 +498,26 @@ def health_banner() -> None:
     dur_txt = "n/a" if dur is None else f"{dur:.1f}s"
 
     cheap_txt, _ = _age_txt(service.STATE.get("last_cheap"))
-    llm_txt, _ = _age_txt(service.STATE.get("last_llm"))
-    # ADDED 2026-08-04: a growing "llm: 3h ago" reads as broken even when it's the
-    # market-hours auto-pause correctly holding it back (confirmed live: user reported
-    # "LLM call seems not running" at 05:49am ET, 3h40m before the 9:30am open -- the gate
-    # was working exactly as designed, but nothing in this compact status line said so, so
-    # a stale-looking age was the only visible signal). Append a short reason when the most
-    # recent skip was specifically the auto-pause, so this reads as "expected, not broken"
-    # without having to go check the info modal or HANDOFF.md.
-    if (SETTINGS.get("auto_pause") and
-            "market closed (auto-pause)" in (service.STATE.get("last_status") or "")):
-        llm_txt += " (paused, outside hours)"
+    # 2026-09-17 LLM heartbeat: was _age_txt(STATE["last_llm"]) -- an in-memory
+    # timestamp written only on fresh successes, wiped on restart, untouched by
+    # skips/reuses/blocks, so it read "never" ~always on a healthy pipeline.
+    # Now DB-derived: state + brain age, with the cause in the tooltip.
+    try:
+        _llm_st = service.get_llm_scan_status()
+    except Exception:                                  # noqa: BLE001 -- never break rendering
+        _llm_st = {}
+    _llm_state = _llm_st.get("state") or "never"
+    _llm_age = _llm_st.get("brain_age_txt") or "?"
+    llm_txt = f"{_llm_state} {_llm_age}".strip()
+    if _llm_st.get("stale") or _llm_state == "blocked":
+        llm_colour = "text-red"
+    elif _llm_state in ("paused", "cached", "never"):
+        llm_colour = "text-grey-5"
+    elif _llm_state == "skipped" and (_llm_st.get("brain_age_s") or 0) > 3600:
+        llm_colour = "text-orange"
+    else:
+        llm_colour = "text-green"
+    _llm_tip = _llm_st.get("tooltip") or "LLM board-scan heartbeat unavailable"
 
     # ADDED 2026-08-05, user-requested: time until the next real NYSE open/close, right next
     # to the cheap/llm row above that it directly explains (that row's "(paused, outside
@@ -670,7 +679,7 @@ def health_banner() -> None:
                 "past regression here looked like (excess per-request broker calls).")
         with ui.row().classes("items-baseline gap-1"):
             ui.label("cheap/llm:").classes("text-xs text-grey-6")
-            ui.label(f"{cheap_txt} / {llm_txt}").classes("text-xs text-grey-5")
+            ui.label(f"{cheap_txt} / {llm_txt}").classes(f"text-xs {llm_colour}").tooltip(_llm_tip)
         if market_txt:
             with ui.row().classes("items-baseline gap-1"):
                 ui.label("market:").classes("text-xs text-grey-6")
@@ -715,6 +724,14 @@ def macro_banner() -> None:
     with ui.card().classes("w-full bg-blue-1"):
         ui.label("Macro backdrop").classes("text-xs uppercase text-grey-7")
         ui.label(note).classes("text-sm")
+        # 2026-09-17 heartbeat caption: ties the brain's OUTPUT (above) to its
+        # freshness + provenance, so a stale macro_note can't masquerade as fresh.
+        try:
+            _cap = (service.get_llm_scan_status() or {}).get("caption") or ""
+        except Exception:                              # noqa: BLE001
+            _cap = ""
+        if _cap:
+            ui.label(_cap).classes("text-xs text-grey-5")
 
 
 def _sparkline_svg(series: list[float], up: bool, w: int = 240, h: int = 40) -> str:
@@ -3492,7 +3509,18 @@ def _open_info_modal() -> None:
         data_txt, data_css = _data_source_text()
         ui.label(data_txt).classes("text-sm " + data_css)
         ui.label("Prices/scores: " + _ago(service.STATE["last_cheap"])).classes("text-sm text-grey-7")
-        ui.label("LLM scan: " + _ago(service.STATE["last_llm"])).classes("text-sm text-grey-7")
+        # 2026-09-17 heartbeat: was "LLM scan: <_ago(last_llm)>" -- "never" ~always.
+        # Now: usable-brain line + last-attempt line + today's ledger totals.
+        try:
+            _mst = service.get_llm_scan_status() or {}
+            _mtot = service.get_llm_today_totals() or {}
+        except Exception:                              # noqa: BLE001
+            _mst, _mtot = {}, {}
+        ui.label(_mst.get("brain_line") or "Brain: ?").classes("text-sm text-grey-7")
+        ui.label(_mst.get("attempt_line") or "Last attempt: ?").classes("text-sm text-grey-7")
+        ui.label(f"Today: {_mtot.get('attempts', 0)} attempts · {_mtot.get('scans', 0)} scans · "
+                 f"{_mtot.get('input_tokens', 0) + _mtot.get('output_tokens', 0):,} tok · "
+                 f"${_mtot.get('cost_usd', 0.0):.3f}").classes("text-sm text-grey-7")
 
         cap = SETTINGS["cap"]
         used = service.STATE.get("calls_today", 0)

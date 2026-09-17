@@ -889,6 +889,301 @@ def _position_keys() -> tuple:
         return ()
 
 
+# ---- LLM board-scan heartbeat ------------------------------------------------
+# The health banner + info modal used to render STATE["last_llm"] ("LLM scan:
+# never") -- an in-memory timestamp written ONLY on a successful fresh provider
+# call, wiped on every restart, and untouched by skips/reuses/blocks. Under the
+# skip-mostly cadence + frequent deploys it read "never" ~always while the
+# pipeline was perfectly healthy. This derives the status from the DB-backed
+# scan ledger instead, so it survives restarts and distinguishes fresh / reused
+# / skipped / blocked / paused.
+_HKT = dt.timezone(dt.timedelta(hours=8))
+
+
+def _parse_scan_ts(v) -> dt.datetime | None:
+    """Parse a scan timestamp into aware UTC. Handles the aware ISO written by
+    journal._now(), the float epoch written to the llm_scan_ts cache, AND the
+    naive container-local ISO written by store.cache_set (containers run UTC,
+    so naive == UTC). None on anything unparseable -- never raises."""
+    if v is None or v == "":
+        return None
+    try:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return dt.datetime.fromtimestamp(v, tz=dt.timezone.utc)
+        d = dt.datetime.fromisoformat(str(v))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(dt.timezone.utc)
+
+
+def _short_age(secs: float | None) -> str:
+    """Compact age for the banner: 45s / 12m / 3h / 2d / ?."""
+    if secs is None or secs < 0:
+        return "?"
+    if secs < 60:
+        return f"{secs:.0f}s"
+    if secs < 3600:
+        return f"{secs / 60:.0f}m"
+    if secs < 86400:
+        return f"{secs / 3600:.0f}h"
+    return f"{secs / 86400:.0f}d"
+
+
+def _hkt_short(d: dt.datetime | None) -> str | None:
+    if d is None:
+        return None
+    return d.astimezone(_HKT).strftime("%a %H:%M")
+
+
+def _classify_scan_row(row: dict | None) -> str | None:
+    """fresh | reused | skipped | None. Reuse rows are written with skipped=1
+    and zero tokens, so the reason text ("reused live scan ...") is checked
+    FIRST -- a plain skipped flag alone would misclassify them."""
+    if not isinstance(row, dict):
+        return None
+    if "reused live scan" in str(row.get("reason") or ""):
+        return "reused"
+    if row.get("skipped"):
+        return "skipped"
+    return "fresh"
+
+
+def llm_scan_status(*, now, latest, latest_usable, board_scan_ts,
+                    backoff_until_iso, last_status, market_open) -> dict:
+    """Pure heartbeat summary for the board-scan pipeline (no I/O -- unit-
+    testable). Inputs are plain values; see get_llm_scan_status() for the
+    reader. Returns a dict with preformatted display strings so app.py stays
+    a thin renderer:
+      state: fresh|reused|skipped|blocked|paused|cached|never (headline)
+      stale: brain older than SCAN_MAX_IDLE_MIN while the market is open
+      brain_age_s / brain_source (fresh|shared|cache) / brain_age_txt
+      attempt / attempt_age_s / attempt_age_txt (latest ledger row's outcome)
+      reason (short human cause), retry_hkt, next_check
+      n_signals / tok_in / tok_out / latency_ms / agreement (brain's own)
+      brain_line / attempt_line / caption / tooltip (ready-to-render text)
+    `now` may be naive (assumed UTC) or aware. `market_open` True/False/None
+    (None = unknown -- never flags stale on unknown)."""
+    last_status = last_status or ""
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+
+    backoff_until = _parse_scan_ts(backoff_until_iso)
+    blocked = backoff_until is not None and now < backoff_until
+
+    attempt_kind = _classify_scan_row(latest)
+    attempt_ts = _parse_scan_ts((latest or {}).get("ts") if isinstance(latest, dict) else None)
+    if attempt_kind in ("fresh", "reused", "skipped") and attempt_ts is None:
+        attempt_kind = None    # flags claim an outcome but the timestamp is corrupt --
+        # without an age the headline would read "fresh ?" (worse than honest "never")
+    attempt_age = (now - attempt_ts).total_seconds() if attempt_ts else None
+
+    brain_ts, brain_source, brain_row = None, None, None
+    if isinstance(latest_usable, dict) and _classify_scan_row(latest_usable) != "skipped":
+        brain_ts = _parse_scan_ts(latest_usable.get("ts"))
+        if brain_ts is not None:
+            brain_source = "shared" if _classify_scan_row(latest_usable) == "reused" else "fresh"
+            brain_row = latest_usable
+    if brain_ts is None and board_scan_ts:
+        brain_ts = _parse_scan_ts(board_scan_ts)
+        if brain_ts is not None:
+            brain_source = "cache"
+    brain_age = (now - brain_ts).total_seconds() if brain_ts else None
+    brain_age_txt = _short_age(brain_age)
+
+    hay = f"{last_status} {((latest or {}).get('reason') if isinstance(latest, dict) else '') or ''}"
+    if blocked:
+        state, attempt = "blocked", "blocked"
+        if "7-day" in hay or "7天" in hay:
+            reason = "7-day free-points window exhausted"
+        elif "budget guard" in last_status:
+            reason = "budget guard"
+        else:
+            reason = "provider backoff"
+        retry_hkt = _hkt_short(backoff_until)
+        next_check = f"retry ~{retry_hkt} HKT" if retry_hkt else None
+        attempt_age_disp = None
+    elif "budget guard" in last_status:
+        # run_board_scan's budget block writes no metrics row -- last_status is
+        # the only record, and it is always from the most recent refresh_llm run.
+        state, attempt = "blocked", "blocked"
+        reason = "budget guard"
+        retry_hkt, next_check, attempt_age_disp = None, "when quota frees", None
+    elif "auto-pause" in last_status:
+        state, attempt = "paused", "paused"
+        reason = "market closed (auto-pause)"
+        retry_hkt, next_check, attempt_age_disp = None, "at market open", None
+    elif attempt_kind:
+        state, attempt = attempt_kind, attempt_kind
+        reason = str((latest or {}).get("reason") or "ok")[:64]
+        retry_hkt, next_check, attempt_age_disp = None, None, attempt_age
+        if attempt_kind == "skipped":
+            next_check = "on signal delta or 2h idle"
+    elif brain_ts is not None:
+        state, attempt = "cached", "none"
+        reason = "restored pre-restart scan"
+        retry_hkt, next_check, attempt_age_disp = None, None, None
+    else:
+        state, attempt = "never", "none"
+        reason = "no scan yet"
+        retry_hkt, next_check, attempt_age_disp = None, None, None
+
+    stale = bool(brain_ts is not None and brain_age is not None
+                 and brain_age >= board_scan.SCAN_MAX_IDLE_MIN * 60
+                 and market_open is True)
+
+    n = (brain_row or {}).get("n_signals")
+    tok_in = (brain_row or {}).get("input_tokens")
+    tok_out = (brain_row or {}).get("output_tokens")
+    lat = (brain_row or {}).get("latency_ms")
+    agree = (brain_row or {}).get("agreement")
+    agree_txt = f"{agree:.0%}" if isinstance(agree, (int, float)) else "n/a"
+    tok_txt = ("0 tok (shared)" if brain_source == "shared"
+               else (f"{(tok_in or 0) + (tok_out or 0):,} tok" if brain_row else "n/a"))
+
+    src_label = {"fresh": "fresh scan", "shared": "shared scan", "cache": "cached scan"}.get(
+        brain_source or "", "no scan")
+    if state == "fresh":
+        brain_line = f"Brain: fresh {brain_age_txt} ago · {n or '?'} signals · {agree_txt} agree"
+        caption = f"from fresh scan {brain_age_txt} ago · {n or '?'} signals · {agree_txt} agree"
+    elif state == "reused":
+        brain_line = f"Brain: shared {brain_age_txt} ago · {reason}"
+        caption = f"{reason} · served {brain_age_txt} ago"
+    elif state == "skipped":
+        brain_line = (f"Brain: {src_label} {brain_age_txt} ago · "
+                      f"checked {_short_age(attempt_age_disp)} ago ({reason})")
+        caption = (f"no change since {src_label} {brain_age_txt} ago · "
+                   f"rechecked {_short_age(attempt_age_disp)} ago")
+    elif state == "blocked":
+        brain_line = f"Brain: {src_label} {brain_age_txt} ago · BLOCKED ({reason})"
+        caption = f"brain {brain_age_txt} old ({brain_source or '?'}) · {reason}"
+    elif state == "paused":
+        brain_line = f"Brain: {src_label} {brain_age_txt} ago · paused (market closed)"
+        caption = f"brain {brain_age_txt} old ({brain_source or '?'}) · paused"
+    elif state == "cached":
+        brain_line = f"Brain: cached scan {brain_age_txt} ago (pre-restart)"
+        caption = f"cached scan {brain_age_txt} ago (pre-restart)"
+    else:
+        brain_line = "Brain: no scan yet"
+        caption = ""
+
+    attempt_age_txt = _short_age(attempt_age_disp)
+    if attempt in ("fresh", "reused", "skipped"):
+        attempt_line = (f"Last attempt: {attempt} {attempt_age_txt} ago — {reason}"
+                        + (f" · {tok_txt}" if attempt != "skipped" else "")
+                        + (f" · {lat}ms" if isinstance(lat, (int, float)) and attempt == "fresh" else ""))
+    elif attempt == "blocked":
+        attempt_line = f"Last attempt: blocked — {reason}" + (f" · {next_check}" if next_check else "")
+    elif attempt == "paused":
+        attempt_line = "Last attempt: paused — market closed"
+    else:
+        attempt_line = f"Last attempt: {reason}"
+
+    tip = (f"Brain ({brain_source or 'none'}) {_hkt_short(brain_ts) or '?'} HKT · "
+           f"last attempt: {attempt} {_hkt_short(attempt_ts) if attempt_ts and attempt_age_disp is not None else ''}".rstrip()
+           + f" — {reason}" + (f" · {tok_txt}" if brain_row else "")
+           + (f" · next: {next_check}" if next_check else ""))
+    return {"state": state, "stale": stale,
+            "brain_age_s": brain_age, "brain_source": brain_source,
+            "brain_age_txt": brain_age_txt,
+            "attempt": attempt, "attempt_age_s": attempt_age_disp,
+            "attempt_age_txt": attempt_age_txt,
+            "reason": reason, "retry_hkt": retry_hkt, "next_check": next_check,
+            "n_signals": n, "tok_in": tok_in, "tok_out": tok_out,
+            "latency_ms": lat, "agreement": agree,
+            "brain_line": brain_line, "attempt_line": attempt_line,
+            "caption": caption, "tooltip": tip}
+
+
+def get_llm_scan_status() -> dict:
+    """I/O wrapper around llm_scan_status(): reads the scan ledger (newest +
+    newest-usable rows), the last_board_scan cache ts, the rate-limit backoff
+    and market-hours, then returns the pure summary. Each source is guarded
+    individually so one failure degrades to 'never', never an exception."""
+    try:
+        rows = journal.scan_metrics_history(limit=20)
+    except Exception:
+        rows = []
+    rows = [r for r in rows if isinstance(r, dict)]
+    latest = rows[0] if rows else None
+    latest_usable = next(
+        (r for r in rows
+         if not r.get("skipped") or "reused live scan" in str(r.get("reason") or "")),
+        None)
+    try:
+        _, board_ts = store.cache_get("last_board_scan")
+    except Exception:
+        board_ts = None
+    try:
+        backoff = board_scan._rate_limited_until()
+    except Exception:
+        backoff = None
+    try:
+        from dashboard.core.market_calendar import us_lse_market_open
+        market_open: bool | None = bool(us_lse_market_open())
+    except Exception:
+        market_open = None
+    return llm_scan_status(
+        now=dt.datetime.now(dt.timezone.utc),
+        latest=latest, latest_usable=latest_usable, board_scan_ts=board_ts,
+        backoff_until_iso=backoff, last_status=STATE.get("last_status") or "",
+        market_open=market_open)
+
+
+def get_llm_today_totals() -> dict:
+    """Today's scan activity from the local ledger (UTC day): attempts, usable
+    scans served, tokens and cost. Modal-only (500-row scan on user click)."""
+    out = {"attempts": 0, "scans": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    try:
+        rows = journal.scan_metrics_history(limit=500)
+    except Exception:
+        return out
+    today = dt.datetime.now(dt.timezone.utc).date()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        d = _parse_scan_ts(r.get("ts"))
+        if d is None or d.date() != today:
+            continue
+        out["attempts"] += 1
+        if not r.get("skipped") or "reused live scan" in str(r.get("reason") or ""):
+            out["scans"] += 1
+        out["input_tokens"] += int(r.get("input_tokens") or 0)
+        out["output_tokens"] += int(r.get("output_tokens") or 0)
+        try:
+            out["cost_usd"] += float(r.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def maybe_alert_scan_stale() -> None:
+    """Yellow notable_event when the brain is stale in market hours (older than
+    the 2h max-idle cadence). Fixed kind+symbol => one stable dedupe key (one
+    incident row with a xN counter), not one row per tick as the age climbs.
+    Warning tier => local log only, no push. Never raises."""
+    try:
+        st = get_llm_scan_status()
+    except Exception:
+        return
+    if not st.get("stale"):
+        return
+    brain_h = (st.get("brain_age_s") or 0) / 3600
+    src = st.get("brain_source") or "?"
+    try:
+        notable_events.record(
+            "LLM board scan stale in market hours -- brain "
+            f"{brain_h:.1f}h old ({src}, max idle 2h)",
+            level="warning", kind="board-scan", symbol="BRAIN")
+    except Exception:
+        pass
+
+
 def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     """Run the batched board scan if budget allows. Returns a status string.
 
@@ -932,6 +1227,7 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
             except Exception as e:
                 log.warning("journal: could not record scan skip: %s", e)
             log.info("LLM board scan: %s", status)
+            maybe_alert_scan_stale()
             return status
     # ADDED 2026-09-17 (cross-instance sharing): paper reuses live's scan when
     # its own board fingerprints identically -- one LLM call serves both
@@ -1035,6 +1331,7 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         log.warning("shared usage fetch failed: %s", e)
     if result is None:
         log.info("LLM board scan: %s (calls today %d/%d)", status, STATE["calls_today"], cap)
+    maybe_alert_scan_stale()
     return status
 
 
@@ -1104,6 +1401,29 @@ def restore_cache() -> None:
         STATE["macro_note"] = data.get("macro_note", "")
         STATE["llm"] = {s["key"]: InstrumentSignal(**s) for s in data.get("signals", [])}
         STATE["last_status"] = f"restored cached scan from {ts}"
+    # LLM heartbeat backfill (2026-09-17): STATE["last_llm"] is in-memory only --
+    # without this it resets to None on every deploy, pinning the banner at
+    # "never" AND making _tick() fire refresh_llm every 30s until the first fresh
+    # success. Restore from the newest usable scan_metrics row (the DB survives
+    # restarts), falling back to the persisted llm_scan_ts / last_board_scan ts.
+    # Naive datetimes match STATE's existing convention (service._now()).
+    if STATE.get("last_llm") is None:
+        try:
+            _rows = journal.scan_metrics_history(limit=20)
+            _usable = next(
+                (r for r in _rows if isinstance(r, dict)
+                 and (not r.get("skipped") or "reused live scan" in str(r.get("reason") or ""))),
+                None)
+            _ts = (_usable or {}).get("ts")
+            if _ts is None:
+                _ts, _ = store.cache_get("llm_scan_ts")
+            if _ts is None and data:
+                _ts = ts
+            _d = _parse_scan_ts(_ts)
+            if _d is not None:
+                STATE["last_llm"] = _d.replace(tzinfo=None)
+        except Exception as e:                            # noqa: BLE001
+            log.debug("last_llm backfill error: %s", e)
     # portfolio snapshot: only fill keys the live refresh hasn't populated yet
     snap, _sts = store.cache_get("portfolio_snapshot")
     if snap:
