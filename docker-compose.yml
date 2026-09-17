@@ -118,7 +118,6 @@ services:
     environment:
       - TRADING_MODE=paper
       - VNC_SERVER_PASSWORD=
-      - TWOFA_TIMEOUT_ACTION=restart
       # IBC's native handler for the "Existing session detected" dialog -- docs claim this
       # defaults to 'primary' already, but live testing (2026-08-12) showed the dialog still
       # required a manual click, so set explicitly rather than trust an ambiguous default.
