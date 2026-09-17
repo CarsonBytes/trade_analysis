@@ -18,8 +18,9 @@ from dashboard.instruments import active_universe, active_by_key
 from dashboard.data.providers import get_history
 from dashboard.core.scoring import score_from_facts, rank, Score
 from dashboard.web.news_sources import fetch_headlines
-from dashboard.web.board_scan import run_board_scan, InstrumentSignal
+from dashboard.web.board_scan import run_board_scan, InstrumentSignal, BoardScan
 from dashboard.web import board_scan
+from dashboard.core import shared_cache
 from dashboard.data.providers import get_ohlc
 from dashboard.core import store
 from dashboard.core import paper
@@ -835,6 +836,40 @@ def refresh_news() -> None:
     STATE["news"] = fetch_headlines()
 
 
+def _reuse_allowed(env: str) -> bool:
+    """Cross-instance scan reuse guard (pure, unit-tested): live -> paper ONLY,
+    and only when explicitly enabled. Live never reads paper's views -- reverse
+    flow is a safety boundary, not an optimization. Paper with the flag off
+    behaves exactly as before this feature existed."""
+    import os as _os
+    return env == "paper" and _os.environ.get(board_scan.SHARED_SCAN_ENV_FLAG) == "1"
+
+
+def _try_shared_reuse(market_fp: str) -> tuple:
+    """Paper-only: reuse live's last scan when our board fingerprints
+    identically to what live scanned. Returns (BoardScan|None, age_min|None,
+    model, provider, latency_ms). Never raises -- any problem means 'do your
+    own scan'."""
+    import time as _t
+    _start = _t.perf_counter()
+    try:
+        payload, age_sec = shared_cache.read(
+            shared_cache.SCAN_KEY, board_scan.SHARED_SCAN_MAX_AGE_MIN * 60)
+        if not payload or payload.get("market_fp") != market_fp:
+            return None, None, "", "", 0
+        result = BoardScan.model_validate({
+            "macro_note": payload.get("macro_note", ""),
+            "signals": payload.get("signals", []),
+        })
+        if not result.signals:
+            return None, None, "", "", 0
+        latency_ms = int((_t.perf_counter() - _start) * 1000)
+        return (result, age_sec / 60.0, payload.get("model", ""),
+                payload.get("provider", ""), latency_ms)
+    except Exception:
+        return None, None, "", "", 0
+
+
 def _position_keys() -> tuple:
     """Identity of open broker positions (instrument names where available).
     Best-effort fingerprint input: only membership matters, never values, so
@@ -898,7 +933,22 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
                 log.warning("journal: could not record scan skip: %s", e)
             log.info("LLM board scan: %s", status)
             return status
-    result, status = run_board_scan(ranked, STATE["news"], cap=cap)
+    # ADDED 2026-09-17 (cross-instance sharing): paper reuses live's scan when
+    # its own board fingerprints identically -- one LLM call serves both
+    # instances. force=True (manual refresh) always takes the fresh path.
+    market_fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], ())
+    reuse_info = None  # (age_min, model, provider, latency_ms) when serving shared
+    if not force and _reuse_allowed(env):
+        shared_result, age_min, shared_model, shared_provider, shared_ms = \
+            _try_shared_reuse(market_fp)
+        if shared_result is not None:
+            result = shared_result
+            status = f"reused live scan ({age_min:.0f}min old)"
+            reuse_info = (age_min, shared_model, shared_provider, shared_ms)
+        else:
+            result, status = run_board_scan(ranked, STATE["news"], cap=cap)
+    else:
+        result, status = run_board_scan(ranked, STATE["news"], cap=cap)
     if result is not None:
         STATE["llm"] = {s.key: s for s in result.signals}
         STATE["macro_note"] = result.macro_note
@@ -917,24 +967,45 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         # per-scan token/cost/agreement metrics (local ledger -- queryable even
         # when the shared Supabase ledger is unreachable)
         try:
-            tel = dict(board_scan.LAST_SCAN_TELEMETRY)
             agreement = journal.gate_agreement(result, STATE["scores"])
-            journal.record_scan_metrics(
-                environment=env, kind="board_scan", n_signals=len(result.signals),
-                agreement=agreement,
-                input_tokens=tel.get("input_tokens", 0),
-                output_tokens=tel.get("output_tokens", 0),
-                cost_usd=usage_log.estimate_cost(
-                    tel.get("model") or "gpt-5-mini",
-                    tel.get("input_tokens", 0), tel.get("output_tokens", 0)),
-                latency_ms=tel.get("latency_ms", 0),
-                skipped=False, reason=status)
-            log.info("LLM board scan: %s (tok %d in/%d out, model %s, agreement %s, "
-                     "calls today %d/%d)",
-                     status, tel.get("input_tokens", 0), tel.get("output_tokens", 0),
-                     tel.get("model", "?"),
-                     f"{agreement:.0%}" if agreement is not None else "n/a",
-                     store.calls_today(), cap)
+            if reuse_info is not None:
+                # Served from live's scan: zero tokens, but still one metrics
+                # row (reuse rate) plus a zero-token ledger row so the shared
+                # dashboard can count reuses without polluting tok/call avgs.
+                age_min, shared_model, shared_provider, shared_ms = reuse_info
+                journal.record_scan_metrics(
+                    environment=env, kind="board_scan", n_signals=len(result.signals),
+                    agreement=agreement, input_tokens=0, output_tokens=0,
+                    cost_usd=0.0, latency_ms=shared_ms,
+                    skipped=True, reason=f"reused live scan {age_min:.0f}min old")
+                try:
+                    usage_log.log_usage(
+                        kind="board_scan_reuse", model=shared_model or "unknown",
+                        input_tokens=0, output_tokens=0, latency_ms=shared_ms,
+                        provider=shared_provider or "shared")
+                except Exception:
+                    pass                       # ledger is best-effort only
+                log.info("LLM board scan: %s (shared, model %s, agreement %s)",
+                         status, shared_model or "?",
+                         f"{agreement:.0%}" if agreement is not None else "n/a")
+            else:
+                tel = dict(board_scan.LAST_SCAN_TELEMETRY)
+                journal.record_scan_metrics(
+                    environment=env, kind="board_scan", n_signals=len(result.signals),
+                    agreement=agreement,
+                    input_tokens=tel.get("input_tokens", 0),
+                    output_tokens=tel.get("output_tokens", 0),
+                    cost_usd=usage_log.estimate_cost(
+                        tel.get("model") or "gpt-5-mini",
+                        tel.get("input_tokens", 0), tel.get("output_tokens", 0)),
+                    latency_ms=tel.get("latency_ms", 0),
+                    skipped=False, reason=status)
+                log.info("LLM board scan: %s (tok %d in/%d out, model %s, agreement %s, "
+                         "calls today %d/%d)",
+                         status, tel.get("input_tokens", 0), tel.get("output_tokens", 0),
+                         tel.get("model", "?"),
+                         f"{agreement:.0%}" if agreement is not None else "n/a",
+                         store.calls_today(), cap)
         except Exception as e:
             log.warning("journal: could not record scan metrics: %s", e)
         # cache a lightweight snapshot so a restart shows something immediately

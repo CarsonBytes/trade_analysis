@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from analyst.llm import invoke_with_key_fallback, is_chatanywhere_unavailable  # from quant/analyst
 from dashboard.core import store
+from dashboard.core import shared_cache
 from dashboard.core.log import log
 from dashboard.core.scoring import Score
 
@@ -193,6 +194,14 @@ def should_scan(fingerprint: str, last_fingerprint: str | None,
 # Last successful scan's token/cost telemetry, for the caller's per-scan
 # metrics logging (service.refresh_llm). Empty until the first success.
 LAST_SCAN_TELEMETRY: dict = {}
+
+# Cross-instance reuse (ADDED 2026-09-17, see dashboard/core/shared_cache.py):
+# paper may reuse live's scan when its own board fingerprints identically, and
+# only while live's scan is fresher than this. Direction is live -> paper ONLY
+# (enforced in service.refresh_llm) -- paper's views never feed live.
+SHARED_SCAN_MAX_AGE_MIN = 30
+# SHARED_SCAN_ENABLE=1 lets paper attempt reuse; default off for a safe canary.
+SHARED_SCAN_ENV_FLAG = "SHARED_SCAN_ENABLE"
 
 
 # FIXED 2026-07-14: found live (both instances share one OpenAI-compatible API key/quota)
@@ -401,4 +410,15 @@ def run_board_scan(scores: list[Score], headlines: list[str],
         pass                                       # telemetry only -- never affects the scan result
     LAST_SCAN_TELEMETRY.clear()
     LAST_SCAN_TELEMETRY.update(_telemetry)
+    try:                                          # cross-instance sharing only
+        shared_cache.write(shared_cache.SCAN_KEY, {
+            "market_fp": scan_fingerprint(top, news, ()),
+            "macro_note": result.macro_note,
+            "signals": [s.model_dump() for s in result.signals],
+            "model": _telemetry["model"],
+            "provider": _telemetry["provider"],
+            "environment": os.environ.get("DASH_FIXED_MODE", "unknown"),
+        })
+    except Exception:
+        pass                                       # sharing is best-effort only
     return result, "ok"

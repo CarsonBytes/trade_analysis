@@ -168,10 +168,24 @@ def fetch_shared_usage_today() -> dict:
     table doesn't exist yet (404), so this keeps working before that migration
     has been run."""
     empty = {"calls": 0, "cost_usd": 0.0, "calls_by_project": {},
-             "chatanywhere_calls": 0, "ok": False}
+              "chatanywhere_calls": 0, "ok": False}
     now = time.time()
     if now - _shared_usage_cache["ts"] < _SHARED_USAGE_CACHE_SEC and _shared_usage_cache["data"]:
         return _shared_usage_cache["data"]
+    # ADDED 2026-09-17 (cross-instance sharing): paper and live poll the
+    # IDENTICAL summary row -- whoever fetched last shares it via the shared
+    # volume, halving these reads. Same TTL as the memory cache, same shape,
+    # same fail-open behavior (a miss just falls through to the network).
+    try:
+        from dashboard.core import shared_cache  # local import: analyst/ stays
+                                                 # import-safe standalone
+        _shared_hit, _ = shared_cache.read(shared_cache.USAGE_KEY, _SHARED_USAGE_CACHE_SEC)
+        if isinstance(_shared_hit, dict) and isinstance(_shared_hit.get("result"), dict):
+            _shared_usage_cache["ts"] = now
+            _shared_usage_cache["data"] = _shared_hit["result"]
+            return _shared_hit["result"]
+    except Exception:
+        pass
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return empty
 
@@ -219,11 +233,12 @@ def fetch_shared_usage_today() -> dict:
                   # "calls" only if this summary row predates migration 003
                   # (no chatanywhere_calls column yet) rather than silently
                   # reading None as 0 and under-gating.
-                  "chatanywhere_calls": row.get("chatanywhere_calls")
-                      if row.get("chatanywhere_calls") is not None else row.get("total_calls") or 0,
-                  "ok": True}
+                   "chatanywhere_calls": row.get("chatanywhere_calls")
+                       if row.get("chatanywhere_calls") is not None else row.get("total_calls") or 0,
+                   "ok": True}
     _shared_usage_cache["ts"] = now
     _shared_usage_cache["data"] = result
+    _publish_shared_usage(result)
     return result
 
 
@@ -271,7 +286,19 @@ def _fetch_shared_usage_today_from_raw_rows(headers: dict, now: float) -> dict:
               "chatanywhere_calls": chatanywhere_calls, "ok": True}
     _shared_usage_cache["ts"] = now
     _shared_usage_cache["data"] = result
+    _publish_shared_usage(result)
     return result
+
+
+def _publish_shared_usage(result: dict) -> None:
+    """Write-through for the cross-instance usage cache (2026-09-17). Never
+    raises -- sharing is best-effort; a failed publish just means the other
+    instance fetches over the network as it always has."""
+    try:
+        from dashboard.core import shared_cache  # local import: see above
+        shared_cache.write(shared_cache.USAGE_KEY, {"result": result})
+    except Exception:
+        pass
 
 
 def shared_calls_ok(cap: int = 200, reserve: int = 10) -> tuple[bool, int | None]:

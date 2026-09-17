@@ -54,6 +54,11 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
         echo "    DashboardApp scheduled task for a clean run."
     fi
 
+    # ADDED 2026-09-17 (cross-instance sharing): the external quant_shared
+    # volume must exist before `up` recreates anything against the new compose
+    # file -- `up` fails outright on a missing external volume. Idempotent.
+    docker volume create quant_shared >/dev/null
+
     docker compose build
     build_rc=$?
     if [ $build_rc -ne 0 ]; then

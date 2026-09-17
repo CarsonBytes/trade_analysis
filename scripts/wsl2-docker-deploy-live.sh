@@ -47,6 +47,10 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
         echo "    succeeds. Expected during Stage 3 cutover; unexpected any other time."
     fi
 
+    # ADDED 2026-09-17 (cross-instance sharing): see paper's
+    # wsl2-docker-deploy.sh -- same external-volume precondition.
+    docker volume create quant_shared >/dev/null
+
     $COMPOSE build
     build_rc=$?
     if [ $build_rc -ne 0 ]; then

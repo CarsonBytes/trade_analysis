@@ -45,6 +45,11 @@ services:
       # collision if this container and the native paper Gateway ever run against the IB API
       # at the same time.
       - IB_CLIENT_ID=31
+      # ADDED 2026-09-17 (cross-instance sharing): 1 lets paper reuse live's
+      # board scan on fingerprint match (see service._reuse_allowed). Default 0
+      # for a safe canary -- flip to 1 deliberately after watching agreement +
+      # reuse rate. Live ignores this flag entirely (live never reads paper).
+      - SHARED_SCAN_ENABLE=0
     ports:
       # Host 18080 -> container 8090, deliberately far from the native deployment's
       # 8080 (paper) / 8081 (live) -- fully parallel, nothing to collide with.
@@ -55,6 +60,13 @@ services:
     volumes:
       - quant_docker_data:/data
       - quant_docker_logs:/app/logs
+      # ADDED 2026-09-17 (cross-instance sharing): paper <-> live exchange
+      # already-paid-for results here (LLM board scan, Supabase usage reads,
+      # provider-decision) instead of re-requesting them -- see
+      # dashboard/core/shared_cache.py. External so BOTH compose projects
+      # (paper + live) mount the same volume; created once via
+      # `docker volume create quant_shared` (deploy scripts ensure it).
+      - quant_shared:/shared
     depends_on:
       - ib-gateway
     # ADDED 2026-08-20, user-requested: the dashboard has a real, reproduced failure mode --
@@ -143,6 +155,8 @@ services:
 volumes:
   quant_docker_data:
   quant_docker_logs:
+  quant_shared:
+    external: true
 
 networks:
   default:

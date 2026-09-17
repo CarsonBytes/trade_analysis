@@ -51,6 +51,11 @@ services:
     volumes:
       - quant_docker_live_data:/data
       - quant_docker_live_logs:/app/logs
+      # ADDED 2026-09-17 (cross-instance sharing): same shared volume as
+      # paper's compose -- live WRITES scan results here, paper READS them
+      # (live never reads paper's; see service._reuse_allowed). External,
+      # created once via `docker volume create quant_shared`.
+      - quant_shared:/shared
     depends_on:
       - ib-gateway-live
     # ADDED 2026-08-20 -- same fix as paper's docker-compose.yml (see its comment for the
@@ -113,6 +118,8 @@ services:
 volumes:
   quant_docker_live_data:
   quant_docker_live_logs:
+  quant_shared:
+    external: true
 
 networks:
   default:

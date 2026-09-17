@@ -68,6 +68,20 @@ def provider_decision(cap: int = 200, reserve: int = 10) -> str:
     if now - _decision_cache["ts"] < _DECISION_CACHE_SEC and _decision_cache["provider"]:
         return _decision_cache["provider"]
 
+    # ADDED 2026-09-17 (cross-instance sharing): the edge-function answer is
+    # identical for both instances -- share it via the shared volume like the
+    # usage summary (see usage_log.fetch_shared_usage_today). Only the real
+    # edge answer is ever published/shared, never the fail-open defaults.
+    try:
+        from dashboard.core import shared_cache  # local import: see provider_decision()'s
+                                                 # note on staying import-safe
+        _hit, _ = shared_cache.read(shared_cache.PROVIDER_KEY, _DECISION_CACHE_SEC)
+        if isinstance(_hit, dict) and _hit.get("provider") in ("chatanywhere", "deepseek"):
+            _decision_cache["ts"] = now
+            _decision_cache["provider"] = _hit["provider"]
+            return _hit["provider"]
+    except Exception:
+        pass
     supabase_url = os.environ.get("SUPABASE_URL")
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not supabase_url or not service_key:
@@ -81,6 +95,11 @@ def provider_decision(cap: int = 200, reserve: int = 10) -> str:
         )
         resp.raise_for_status()
         provider = resp.json().get("provider", "chatanywhere")
+        try:
+            from dashboard.core import shared_cache
+            shared_cache.write(shared_cache.PROVIDER_KEY, {"provider": provider})
+        except Exception:
+            pass                               # sharing is best-effort only
     except Exception as e:                      # noqa: BLE001
         from dashboard.core.log import log      # local import: analyst/ stays import-safe
                                                   # standalone from dashboard/ at module-load
