@@ -277,6 +277,70 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
             pass
 
 
+def test_sync_closures_void_backfills_signal_only_suffix():
+    print("\nsync_closures(): VOIDing a mirror row for an already-resolved trade also "
+          "backfills the '(signal only)' suffix onto its exit_reason when missing "
+          "(2026-09-18: the suffix used to be written once at resolve time, so rows "
+          "VOIDed later kept funded-style text contradicting the funded column / "
+          "cumulative R -- confirmed on both instances, e.g. live #33/#34):")
+    from types import SimpleNamespace
+    from dashboard.execution import ib_exec
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import paper
+        with paper._LOCK, paper._conn() as _pc:   # ensures paper_trades table exists first
+            pass
+        with paper._LOCK, ib_exec._conn() as c:
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status, exit_ts, exit_price, "
+                     "realized_r, exit_reason) VALUES "
+                     "(1,'2026-06-01T00:00:00','SPY','long','ATR rr3.0',741.69,727.24,"
+                     "785.05,3.0,4,'EXPIRED','2026-09-02 00:00:00+00:00',765.16,1.619,"
+                     "'horizon expired')")
+            c.execute("INSERT INTO ib_mirror VALUES "
+                     "(1,0,111,'SPY',4.0,167.6,'','2026-07-31T00:18:39+00:00','OPEN','etf')")
+
+        fake_order = SimpleNamespace(orderId=1)
+        fake_trade = SimpleNamespace(
+            contract=SimpleNamespace(conId=111),
+            orderStatus=SimpleNamespace(status="Submitted"),
+            order=fake_order,
+        )
+
+        class _FakeIB:
+            def cancelOrder(self, order):
+                pass
+            def positions(self):
+                return []
+
+        fake_ib = _FakeIB()
+        with mock.patch.object(ib_exec, "_guard", return_value=fake_ib), \
+             mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+             mock.patch.object(ib_exec.ib_client, "_run", return_value=[fake_trade]), \
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+            ib_exec.sync_closures()
+
+        with ib_exec._conn() as c:
+            reason = c.execute("SELECT exit_reason FROM paper_trades WHERE id=1").fetchone()[0]
+        check("stale funded-style reason gained the signal-only suffix",
+              "(signal only -- never funded at the broker)" in reason, True)
+        check("original reason text preserved", reason.startswith("horizon expired"), True)
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def test_sync_closures_closes_stale_mirror_row_when_position_still_open_via_other_layer():
     print("\nsync_closures(): TWO paper trades share one broker position (layered ATR "
           "signals funding the same aggregate con_id) -- the OLDER one resolves independently "

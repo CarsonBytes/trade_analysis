@@ -1030,6 +1030,18 @@ def sync_closures() -> list[str]:
                     c.execute("UPDATE ib_mirror SET status='VOID', note=? WHERE paper_id=?",
                               (f"order cancelled: paper independently resolved to "
                                f"{pt['status']} while still unfilled at the broker", paper_id))
+                    # FIXED 2026-09-18: the row's exit_reason was written at resolve time,
+                    # when this mirror row was still non-VOID -- so it reads funded-style
+                    # ("stop-loss hit") with no signal-only note, contradicting the funded
+                    # column / cumulative R / P&L that all (correctly) treat it as never
+                    # funded from here on (confirmed on both instances: live #33/#34,
+                    # paper #137/#140/#152). Backfill the same suffix resolve_open()
+                    # would have written had it known then what we know now.
+                    _er = (pt.get("exit_reason") or "")
+                    if "(signal only" not in _er:
+                        c.execute("UPDATE paper_trades SET exit_reason=? WHERE id=?",
+                                  (_er + (" " if _er else "") +
+                                   "(signal only -- never funded at the broker)", paper_id))
                 msg = (f"{local_symbol}: cancelled stale unfilled order (paper already "
                       f"resolved {pt['status']} via real price/horizon, not a broker fill)")
                 logs.append(msg); log.info("ib_exec: %s", msg)

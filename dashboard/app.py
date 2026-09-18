@@ -1011,6 +1011,12 @@ def paper_panel() -> None:
         .classes("text-xs text-grey-6")
 
     # stats grouped by method -- resolved (WIN/LOSS/EXPIRED) trades only, see fix note above
+    # broker-truth set up front (local SQLite query, no broker round-trip): the method
+    # cards' executed-only total line AND both tables below need it. 2026-09-18: the
+    # cards used to total over ALL resolved signals while cumulative R / P&L count
+    # broker-executed only -- same tab, two "totals" that can't agree, nothing labeling
+    # the different populations (confirmed live+paper). Both figures are now shown.
+    _executed = _bk.executed_ids() if _bk.is_ib() else set()
     methods = sorted({t["method"] for t in resolved})
     with ui.row().classes("w-full flex-wrap gap-3"):
         if not resolved:
@@ -1030,7 +1036,15 @@ def paper_panel() -> None:
                 ui.label(f"expectancy: {s['expectancy_R']:+.3f} R").classes("text-base font-bold")
                 ui.label(f"win rate: {s['win_rate']:.0%}   n={s['n']}").classes("text-sm")
                 pf = "inf" if s["profit_factor"] == float("inf") else f"{s['profit_factor']:.2f}"
-                ui.label(f"PF {pf}   total {s['total_R']:+.1f}R").classes("text-xs text-grey-7")
+                ui.label(f"PF {pf}   total {s['total_R']:+.1f}R (all signals)").classes("text-xs text-grey-7")
+                if _bk.is_ib():
+                    _ex_rs = [t["realized_r"] for t in resolved
+                              if t["method"] == m and t["id"] in _executed]
+                    ui.label(f"executed total {sum(_ex_rs):+.1f}R (n={len(_ex_rs)}) ✓")\
+                        .classes("text-xs text-grey-7")\
+                        .tooltip("Same math, broker-executed closes only -- matches the "
+                                 "'cum R ✓' column's running total below (signal-only rows "
+                                 "excluded, no real money was ever on them)")
                 if not s["trustworthy"]:
                     ui.label("n<30 — too few to trust").classes("text-xs text-orange italic")
 
@@ -1041,7 +1055,7 @@ def paper_panel() -> None:
     # real money was ever on the line or not -- confirmed a real user had to ask why a CWB
     # "loss" happened, since nothing in this table said it was never funded. broker.executed_ids()
     # is a local SQLite query, not a broker round-trip, so this is cheap to check per render.
-    _executed = _bk.executed_ids() if _bk.is_ib() else set()
+    # (_executed itself is computed above, ahead of the method cards.)
 
     # P1 spec: Trades sub-filter (All / Active funded / Pending signal-only / Closed /
     # Cancelled) + search
@@ -1118,6 +1132,10 @@ def paper_panel() -> None:
         # resolved history, not just the visible slice below -- matches how the equity
         # curve/retrospective tab already compute it. Attached per-row as a fixed value,
         # independent of whatever sort order the table is currently displayed in.
+        # 2026-09-18: renamed the column "cum R ✓" (was "cumulative R") because the
+        # table shows NEWEST first (and is user-sortable), so the column does NOT read
+        # monotonically top-to-bottom -- each cell is "running total AT that close",
+        # chronological. The ✓ marks the executed-only population; ○ rows show —.
         # FIXED 2026-08-19: was summing ALL resolved trades regardless of funding --
         # confirmed live this disagreed with the Retro tab's own cumulative R (-4.03 here
         # vs -0.016 there) because 4 of the 8 resolved trades were "○ signal only" (never
@@ -1154,7 +1172,7 @@ def paper_panel() -> None:
             pnl = (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
                   if t["id"] in risk_by_id and t["id"] in _executed else "—")
             return {"instrument": t["instrument"], "status": t["status"],
-                   "R": round(t["realized_r"], 2), "cumulative R": cum_r_by_id.get(t["id"], "—"),
+                   "R": round(t["realized_r"], 2), "cum R ✓": cum_r_by_id.get(t["id"], "—"),
                    "invested (USD)": invested, "P&L (USD)": pnl,
                    "closed": _fmt_ts(t["exit_ts"]), "opened": _fmt_ts(t["ts"]),
                    "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
@@ -1162,7 +1180,7 @@ def paper_panel() -> None:
                    "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
                    "method": t["method"], "dir": t["direction"], "id": t["id"]}
 
-        col_order = ["instrument", "status", "R", "cumulative R", "invested (USD)", "P&L (USD)",
+        col_order = ["instrument", "status", "R", "cum R ✓", "invested (USD)", "P&L (USD)",
                     "closed", "opened", "funded", "exit", "entry", "SL", "TP", "method", "dir", "id"]
         if _resolved_filtered:
             rows = [_closed_row(t) for t in _resolved_filtered[:20]]
@@ -1174,7 +1192,10 @@ def paper_panel() -> None:
                     .tooltip("'R' is what the signal-logic scored regardless of funding -- "
                              "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
                              "rows -- '○ signal only' rows never had a real broker order, see the "
-                             "Retrospective tab for broker-executed-only KPIs")
+                             "Retrospective tab for broker-executed-only KPIs. 'cum R ✓' is the "
+                             "running total AT each close, chronological (oldest→newest) over "
+                             "✓ rows only -- the table shows newest first, so it won't read "
+                             "monotonically top-to-bottom")
                 # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
                 # row, muted text, thin left rule) instead of every row reading the same weight --
                 # a real broker outcome and a hypothetical never-funded one looked identical before,
