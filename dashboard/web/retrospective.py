@@ -79,6 +79,31 @@ def exec_cum_curve(resolved: list[dict], executed_ids: set[int]) -> tuple[list[s
     return xs, curve
 
 
+def display_cum_column(rows_in_display_order: list[dict],
+                       executed_ids: set[int]) -> dict[int, float | None]:
+    """Per-row cumulative R for a NEWEST-first table: each row's value is the
+    running total from the newest close down to and including that row
+    (broker-executed closes only; anything else maps to None -> "—").
+
+    2026-09-18: the old column accumulated oldest->newest but was displayed
+    newest-first, so a +0.66R row sat next to a -2.29 cumulative and read as
+    miscalculated. Anchoring at the newest end instead means a win ALWAYS lifts
+    the value vs the row above in the default view, and the bottom row equals
+    the full executed total (== exec_cum_curve()'s endpoint == the method
+    cards' executed total). Caveat, same as before: values follow the DEFAULT
+    newest-first order -- user re-sorting does not recompute them (noted in the
+    table tooltip). Pure function, unit-tested."""
+    out: dict[int, float | None] = {}
+    running = 0.0
+    for t in rows_in_display_order:
+        if t["id"] in executed_ids:
+            running += t["realized_r"] or 0.0
+            out[t["id"]] = round(running, 3)
+        else:
+            out[t["id"]] = None
+    return out
+
+
 def _demo_executed_ids() -> set[int]:
     """paper_ids the active broker actually placed (have a mirror row) -- the
     broker-truth set. Broker-aware: mt5_mirror under MT5, ib_mirror under IBKR."""

@@ -1136,7 +1136,14 @@ def paper_panel() -> None:
         # a -2.29 cumulative and read as miscalculated, confirmed user report.
         # Accumulation only reads correctly in chronological order -- as a curve.
         from dashboard.web.retrospective import exec_cum_curve as _r_exec_curve
+        from dashboard.web.retrospective import display_cum_column as _r_cum_col
         _cum_xs, _cum_curve = _r_exec_curve(resolved, _executed)
+        # newest-down running total for the per-row column: each row's value is
+        # the total from the newest close down to that row, so a win ALWAYS lifts
+        # the value vs the row above in the default view (the old oldest-up values
+        # read as miscalculated next to winning rows -- confirmed user report).
+        # Computed over the FULL history so later pages stay correct.
+        _cum_col = _r_cum_col(resolved, _executed)
         if _cum_curve:
             ui.label("Cumulative R — broker-executed, chronological").classes("text-sm font-bold mt-2")
             ui.echart({
@@ -1164,8 +1171,10 @@ def paper_panel() -> None:
                        if t["id"] in qty_by_id and t["id"] in _executed else "—")
             pnl = (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
                   if t["id"] in risk_by_id and t["id"] in _executed else "—")
+            _cum = _cum_col.get(t["id"])
             return {"instrument": t["instrument"], "status": t["status"],
                    "R": round(t["realized_r"], 2),
+                   "cum R ↓": ("—" if _cum is None else round(_cum, 2)),
                    "invested (USD)": invested, "P&L (USD)": pnl,
                    "closed": _fmt_ts(t["exit_ts"]), "opened": _fmt_ts(t["ts"]),
                    "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
@@ -1173,7 +1182,7 @@ def paper_panel() -> None:
                    "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
                    "method": t["method"], "dir": t["direction"], "id": t["id"]}
 
-        col_order = ["instrument", "status", "R", "invested (USD)", "P&L (USD)",
+        col_order = ["instrument", "status", "R", "cum R ↓", "invested (USD)", "P&L (USD)",
                     "closed", "opened", "funded", "exit", "entry", "SL", "TP", "method", "dir", "id"]
         if _resolved_filtered:
             rows = [_closed_row(t) for t in _resolved_filtered[:20]]
@@ -1184,8 +1193,11 @@ def paper_panel() -> None:
                     .classes("w-full min-w-[900px]").props("dense flat")\
                     .tooltip("'R' is what the signal-logic scored regardless of funding -- "
                              "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
-                             "rows -- '○ signal only' rows never had a real broker order. The "
-                             "chronological cumulative-R curve above covers ✓ rows only.")
+                             "rows -- '○ signal only' rows never had a real broker order. "
+                             "'cum R ↓' accumulates top-to-bottom from the newest close over "
+                             "✓ rows only (a win always lifts it vs the row above); the curve "
+                             "above shows the same total oldest→newest. Re-sorting the table "
+                             "does not recompute the column.")
                 # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
                 # row, muted text, thin left rule) instead of every row reading the same weight --
                 # a real broker outcome and a hypothetical never-funded one looked identical before,

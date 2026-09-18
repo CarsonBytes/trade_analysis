@@ -60,6 +60,23 @@ def test_empty_when_nothing_executed():
           ([], []))
 
 
+def test_display_cum_column_accumulates_newest_down():
+    print("\ndisplay_cum_column(): running total newest->oldest, wins lift:")
+    from dashboard.web.retrospective import display_cum_column, exec_cum_curve
+    rows = [_t(4, -1.003, "2026-09-16 00:00:00+00:00"),
+            _t(3, 0.661, "2026-09-15 00:00:00+00:00", "EXPIRED"),
+            _t(2, -1.006, "2026-09-14 00:00:00+00:00"),
+            _t(1, -1.012, "2026-08-31 00:00:00+00:00")]
+    got = display_cum_column(rows, {1, 3, 4})   # id 2 never funded -> skipped
+    check("newest row is its own R", got[4], -1.003)
+    check("win lifts vs the row above", got[3] > got[4], True)
+    check("signal-only row maps to None", got[2], None)
+    check("skipped rows don't move the total",
+          got[1], round(-1.003 + 0.661 - 1.012, 3))
+    _xs, curve = exec_cum_curve(rows, {1, 3, 4})
+    check("bottom row equals chronological curve endpoint", got[1], curve[-1])
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
