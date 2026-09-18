@@ -154,6 +154,52 @@ def test_permission_denied_error_also_backs_off():
         _restore_db(old, path)
 
 
+def test_seven_day_quota_exhaustion_backs_off_a_full_day_not_to_next_clock_reset():
+    print("\nrun_board_scan(): chatanywhere's 7-day free-points-exhausted 403 (2026-09-14/15 "
+          "incident -- confirmed live looping every ~30-40s for 45+ hours) means a rolling "
+          "7-DAY points window is exhausted, not the ordinary daily quota. Backing off to the "
+          "next 16:00 UTC re-hits the identical 403 immediately, since the window hasn't rolled "
+          "forward -- this must back off ~24h from NOW instead of to that fixed clock boundary:")
+    import datetime as _dt
+    old, path = _isolated_db()
+    try:
+        from dashboard.web import board_scan
+
+        class PermissionDeniedError(Exception):
+            pass
+
+        def _raise_seven_day_403(build_chain, messages, temperature=0.2, model=None):
+            raise PermissionDeniedError(
+                "Error code: 403 - {'error': {'message': '7天免费点数不足以支持本次请求，"
+                "请等待当前额度窗口结束，或访问 https://chatanywhere.tech/ 购买付费API。"
+                "The free points available in the current 7-day window are insufficient "
+                "for this request.', 'code': '403 FORBIDDEN'}}")
+
+        before = _dt.datetime.now(_dt.timezone.utc)
+        p1, p2 = _mock_budget_ok(board_scan)
+        with p1, p2, mock.patch.object(board_scan, "invoke_with_key_fallback",
+                                       side_effect=_raise_seven_day_403):
+            result, status = board_scan.run_board_scan([], [])
+        after = _dt.datetime.now(_dt.timezone.utc)
+
+        check("result is None", result, None)
+        check("status names the 7-day window, not a generic auth error",
+              "7-day" in status, True)
+        cached = board_scan._rate_limited_until()
+        cached_dt = _dt.datetime.fromisoformat(cached)
+        gap_hours = (cached_dt - before).total_seconds() / 3600
+        check("backoff is roughly 24h out (not to the next 16:00 UTC boundary)",
+              23.9 <= gap_hours <= 24.1, True)
+        # Regression guard: a same-day 16:00 UTC backoff would be at most ~24h away too
+        # ONLY by coincidence right at the boundary -- assert it's measured from `now`,
+        # not the clock, by checking it tracks `before`/`after` rather than any fixed hour.
+        check("backoff instant is after 'before' + ~24h and before 'after' + ~24h",
+              before + _dt.timedelta(hours=23, minutes=59) <= cached_dt
+              <= after + _dt.timedelta(hours=24, minutes=1), True)
+    finally:
+        _restore_db(old, path)
+
+
 def test_non_rate_limit_exception_still_propagates():
     print("\nrun_board_scan(): a genuinely unexpected error is NOT swallowed as a "
           "rate limit -- must still propagate so it surfaces as a real bug:")

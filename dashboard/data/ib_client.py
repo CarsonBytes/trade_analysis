@@ -202,9 +202,22 @@ def _ensure_conn():
                     return
                 sym = getattr(contract, "symbol", None) or (
                     str(getattr(contract, "localSymbol", "") or "") or None)
+                # ADDED 2026-09-18: see _order_error_detail()'s docstring -- the callback's
+                # own `contract` can be thin/empty (confirmed live on 202 cancels) and
+                # `errorString` can be genuinely blank, so look up the actual order that was
+                # placed (still in ib.trades()'s local cache even though it's now dead) for
+                # everything the bare error text doesn't carry. Also prefer THIS symbol (from
+                # the looked-up order's own contract) over the callback's thin one when the
+                # callback gave us nothing -- and pass it explicitly as notable_events.record's
+                # `symbol=` rather than only folding it into the message text: dedup keys off
+                # `symbol` when given, or else the first 48 chars of the message when not --
+                # or every occurrence would carry a distinct orderId in that prefix and defeat
+                # the "flapping reject doesn't spam" dedup this whole hook exists for.
+                detail_sym, detail = _order_error_detail(ib, reqId)
+                sym = sym or detail_sym
                 from dashboard.core import notable_events as _ne
-                _ne.record(f"{sym or 'order'}: broker error {code} -- {errorString}"
-                           .strip(), level="error")
+                _ne.record(f"{sym or 'order'}: broker error {code} -- {errorString}{detail}"
+                           .strip(), level="error", symbol=sym)
             ib.errorEvent += _on_ib_error
         except Exception as e:                          # noqa: BLE001
             log.debug("ib_client: errorEvent hook failed: %s", e)
@@ -229,6 +242,58 @@ def _ensure_conn():
              type(last_err).__name__ if last_err else "no-error", last_err)
     _S["ib"], _S["connected"] = None, False
     return None
+
+
+def _order_error_detail(ib, reqId) -> tuple[str | None, str]:
+    """Best-effort extra context for an order-related errorEvent (110/200/201/202/
+    10197 -- see _on_ib_error). `ib.trades()` is this client's own LOCAL cache (no
+    network call) of every order it has placed or been told about this session,
+    keyed by orderId; `reqId` on an order-status error IS the orderId, so this
+    just looks the matching Trade up and dumps what got sent plus its full status
+    history with timestamps. Returns (symbol_or_None, detail_str) -- the symbol is
+    returned SEPARATELY from the detail text (rather than folded into one string)
+    so the caller can pass it to notable_events.record(symbol=...) for stable
+    dedup; see the 2026-09-18 note at the call site on why that matters here.
+
+    ADDED 2026-09-18: found live -- IBKR sent error 202 "Order Canceled" with an
+    EMPTY reason string, and an empty/thin `contract` on the callback too (no
+    symbol), within 1-2s of DIA/EFA/DBC entries being placed -- 3 days running, 10
+    trades, all auto-cancelled by the existing 31min ghost-entry cleanup with no
+    clue why the broker actually killed them. The old handler could only log
+    "broker error 202 -- Order Canceled - reason:" verbatim, useless for a repeat.
+    `ib.trades()` still has the placed Order (orderRef ties it back to our own
+    paper_trades.id, e.g. "quant#119") and Trade.log (every status transition IBKR
+    reported, with timestamps) even after the order itself is dead -- this is the
+    one place that information still exists once the error has already fired.
+    Returns (None, "") if the order can't be found or anything goes wrong -- a
+    diagnostics lookup must never break error reporting itself."""
+    try:
+        for tr in ib.trades():
+            o = tr.order
+            if getattr(o, "orderId", None) != reqId:
+                continue
+            c = tr.contract
+            placed_at = tr.log[0].time if tr.log else None
+            age = (f"{(dt.datetime.now(dt.timezone.utc) - placed_at).total_seconds():.1f}s"
+                  if placed_at is not None else "?")
+            hist = " | ".join(
+                f"{getattr(e, 'time', None)} {getattr(e, 'status', '')} "
+                f"{getattr(e, 'message', '')}".strip()
+                for e in tr.log) if tr.log else ""
+            sym = getattr(c, "localSymbol", "") or getattr(c, "symbol", "") or None
+            detail = (f" [orderId={getattr(o, 'orderId', '?')} "
+                     f"permId={getattr(o, 'permId', 0)} clientId={getattr(o, 'clientId', '?')} "
+                     f"ref={getattr(o, 'orderRef', '')!r} "
+                     f"{getattr(o, 'action', '')} {getattr(o, 'totalQuantity', '')} "
+                     f"{getattr(o, 'orderType', '')} lmt={getattr(o, 'lmtPrice', '')} "
+                     f"aux={getattr(o, 'auxPrice', '')} tif={getattr(o, 'tif', '')} "
+                     f"sym={sym} conId={getattr(c, 'conId', 0)} "
+                     f"exch={getattr(c, 'exchange', '')} age={age}"
+                     f"{' hist=[' + hist + ']' if hist else ''}]")
+            return sym, detail
+    except Exception:                  # noqa: BLE001
+        pass
+    return None, ""
 
 
 def is_available() -> bool:

@@ -431,6 +431,101 @@ def test_fx_to_usd_uses_ccy_base_pair_directly_when_it_exists():
     check("close used directly, no inversion", rate, 1.08)
 
 
+class _FakeOrder:
+    def __init__(self, orderId, permId=0, clientId=41, orderRef="", action="BUY",
+                totalQuantity=13, orderType="MKT", lmtPrice=0.0, auxPrice=0.0, tif="GTC"):
+        self.orderId = orderId
+        self.permId = permId
+        self.clientId = clientId
+        self.orderRef = orderRef
+        self.action = action
+        self.totalQuantity = totalQuantity
+        self.orderType = orderType
+        self.lmtPrice = lmtPrice
+        self.auxPrice = auxPrice
+        self.tif = tif
+
+
+class _FakeContract:
+    def __init__(self, symbol="", localSymbol="", conId=0, exchange="SMART"):
+        self.symbol = symbol
+        self.localSymbol = localSymbol
+        self.conId = conId
+        self.exchange = exchange
+
+
+class _FakeLogEntry:
+    def __init__(self, time, status, message=""):
+        self.time = time
+        self.status = status
+        self.message = message
+
+
+class _FakeTrade:
+    def __init__(self, order, contract, log):
+        self.order = order
+        self.contract = contract
+        self.log = log
+
+
+def test_order_error_detail_finds_the_matching_trade_by_order_id():
+    print("_order_error_detail(): ADDED 2026-09-18, regression for the 09-15..17 live "
+          "incident -- IBKR's error 202 'Order Canceled' arrived with an EMPTY reason and a "
+          "thin/symbol-less contract on the callback; ib.trades()' local cache still has the "
+          "real order (and its full status history) even after it's dead. Look it up by "
+          "orderId (== errorEvent's reqId) and return BOTH a resolved symbol and a detail "
+          "string, not one string that swallows the symbol into free text:")
+    import datetime as dt
+    from dashboard.data import ib_client
+
+    placed_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1.5)
+    order = _FakeOrder(orderId=119, orderRef="quant#119", action="BUY", totalQuantity=13,
+                       lmtPrice=0.0, auxPrice=0.0)
+    contract = _FakeContract(symbol="DIA", localSymbol="DIA", conId=756733, exchange="ARCA")
+    log = [_FakeLogEntry(placed_at, "PendingSubmit"),
+          _FakeLogEntry(placed_at, "PreSubmitted"),
+          _FakeLogEntry(placed_at, "Cancelled", "Order Canceled - reason:")]
+    other_order = _FakeOrder(orderId=1, orderRef="quant#1")
+    fake_ib = mock.MagicMock()
+    fake_ib.trades.return_value = [_FakeTrade(other_order, _FakeContract(), []),
+                                    _FakeTrade(order, contract, log)]
+
+    sym, detail = ib_client._order_error_detail(fake_ib, reqId=119)
+    check("resolved the real symbol from the order's own contract", sym, "DIA")
+    check("orderRef (ties back to paper_trades.id) is in the detail", "quant#119" in detail, True)
+    check("clientId is in the detail", "clientId=41" in detail, True)
+    check("the full status history is in the detail", "PendingSubmit" in detail, True)
+    check("Cancelled status is in the detail", "Cancelled" in detail, True)
+    check("age is measured in low single-digit seconds, not '?'",
+          "age=?" in detail, False)
+
+
+def test_order_error_detail_no_match_returns_empty():
+    print("\n_order_error_detail(): no trade matches reqId -- returns (None, '') rather than "
+          "raising or fabricating anything:")
+    from dashboard.data import ib_client
+    fake_ib = mock.MagicMock()
+    fake_ib.trades.return_value = [_FakeTrade(_FakeOrder(orderId=1), _FakeContract(), [])]
+    sym, detail = ib_client._order_error_detail(fake_ib, reqId=999)
+    check("no symbol found", sym, None)
+    check("no detail text", detail, "")
+
+
+def test_order_error_detail_never_raises_on_a_broken_trades_call():
+    print("\n_order_error_detail(): ib.trades() itself raising must not propagate -- a "
+          "diagnostics lookup can never be allowed to break error reporting:")
+    from dashboard.data import ib_client
+    fake_ib = mock.MagicMock()
+    fake_ib.trades.side_effect = RuntimeError("boom")
+    raised = False
+    try:
+        sym, detail = ib_client._order_error_detail(fake_ib, reqId=1)
+    except Exception:
+        raised = True
+    check("did not raise", raised, False)
+    check("falls back to (None, '')", (sym, detail), (None, ""))
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
