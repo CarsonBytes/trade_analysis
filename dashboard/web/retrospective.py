@@ -60,6 +60,25 @@ def equity_curve(closed: list[dict]) -> tuple[list[float], float]:
     return curve, round(max_dd, 3)
 
 
+def exec_cum_curve(resolved: list[dict], executed_ids: set[int]) -> tuple[list[str], list[float]]:
+    """Chronological cumulative-R series over broker-executed WIN/LOSS/EXPIRED
+    closes: ([MM-DD labels], [running totals]). Powers the Track Record tab's
+    inline curve -- extracted pure (no I/O) so it has a regression test.
+
+    2026-09-18: this REPLACES the old per-row "cumulative R" table column, which
+    was chronologically correct per cell but displayed newest-first (and the
+    table is user-sortable) -- a +0.66R row could sit next to a -2.29 cumulative
+    and read as miscalculated (confirmed user report). Accumulation only reads
+    correctly in chronological order, i.e. as a curve. Sort ties (same daily-bar
+    exit date) keep input order -- callers pass id-DESC, so newer ids win ties,
+    matching equity_curve()'s own stable sort on the same key."""
+    chron = sorted((t for t in resolved if t["id"] in executed_ids),
+                   key=lambda t: t["exit_ts"] or t.get("ts") or "")
+    curve, _ = equity_curve(chron)
+    xs = [((t["exit_ts"] or t.get("ts") or "")[:10][5:] or "?") for t in chron]
+    return xs, curve
+
+
 def _demo_executed_ids() -> set[int]:
     """paper_ids the active broker actually placed (have a mirror row) -- the
     broker-truth set. Broker-aware: mt5_mirror under MT5, ib_mirror under IBKR."""

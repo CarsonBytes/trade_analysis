@@ -1042,8 +1042,8 @@ def paper_panel() -> None:
                               if t["method"] == m and t["id"] in _executed]
                     ui.label(f"executed total {sum(_ex_rs):+.1f}R (n={len(_ex_rs)}) ✓")\
                         .classes("text-xs text-grey-7")\
-                        .tooltip("Same math, broker-executed closes only -- matches the "
-                                 "'cum R ✓' column's running total below (signal-only rows "
+                        .tooltip("Same math, broker-executed closes only -- ends where the "
+                                 "chronological curve below ends (signal-only rows "
                                  "excluded, no real money was ever on them)")
                 if not s["trustworthy"]:
                     ui.label("n<30 — too few to trust").classes("text-xs text-orange italic")
@@ -1128,35 +1128,28 @@ def paper_panel() -> None:
                 f"SELECT paper_id, risk_money, qty FROM {_bk.mirror_table()}").fetchall()
         risk_by_id = {r[0]: r[1] for r in mirror_rows}
         qty_by_id = {r[0]: r[2] for r in mirror_rows}
-        # cumulative R: chronological (oldest -> newest) running total across the FULL
-        # resolved history, not just the visible slice below -- matches how the equity
-        # curve/retrospective tab already compute it. Attached per-row as a fixed value,
-        # independent of whatever sort order the table is currently displayed in.
-        # 2026-09-18: renamed the column "cum R ✓" (was "cumulative R") because the
-        # table shows NEWEST first (and is user-sortable), so the column does NOT read
-        # monotonically top-to-bottom -- each cell is "running total AT that close",
-        # chronological. The ✓ marks the executed-only population; ○ rows show —.
-        # FIXED 2026-08-19: was summing ALL resolved trades regardless of funding --
-        # confirmed live this disagreed with the Retro tab's own cumulative R (-4.03 here
-        # vs -0.016 there) because 4 of the 8 resolved trades were "○ signal only" (never
-        # funded at the broker, a real price-action outcome but no real money on it) --
-        # Retro's equity_curve() only ever counts broker-EXECUTED trades (see its own
-        # header text: "signals never placed are excluded"), and this table's OWN
-        # neighboring "P&L (USD)" column already makes the same distinction (shows "—"
-        # for signal-only rows). Restricting to the same _executed set makes both figures
-        # agree and keeps cumulative R meaning the same thing as the P&L column next to
-        # it -- a signal-only row's cumulative R now correctly falls through to "—" via
-        # cum_r_by_id.get()'s default below, same as its P&L.
-        cum_r_by_id: dict[int, float] = {}
-        running = 0.0
-        for t in sorted(resolved, key=lambda t: t["exit_ts"] or ""):
-            if t["id"] not in _executed:
-                continue
-            running += t["realized_r"]
-            # 3dp, matching equity_curve()'s own precision -- 2dp here made a
-            # mathematically-identical number LOOK different from Retro's (-0.02 vs
-            # -0.016), confusing on top of the population mismatch this same fix addresses.
-            cum_r_by_id[t["id"]] = round(running, 3)
+        # 2026-09-18: chronological cumulative-R curve (broker-executed closes
+        # only -- same population + math as retrospective.equity_curve, via the
+        # exec_cum_curve() helper). REPLACES the old per-row "cumulative R" table
+        # column, which was chronologically correct per cell but displayed
+        # newest-first (and the table is user-sortable): a +0.66R row sat next to
+        # a -2.29 cumulative and read as miscalculated, confirmed user report.
+        # Accumulation only reads correctly in chronological order -- as a curve.
+        from dashboard.web.retrospective import exec_cum_curve as _r_exec_curve
+        _cum_xs, _cum_curve = _r_exec_curve(resolved, _executed)
+        if _cum_curve:
+            ui.label("Cumulative R — broker-executed, chronological").classes("text-sm font-bold mt-2")
+            ui.echart({
+                "tooltip": {"trigger": "axis"},
+                "xAxis": {"type": "category", "data": _cum_xs, "name": "close date (MM-DD)"},
+                "yAxis": {"type": "value", "name": "cumulative R"},
+                "series": [{"type": "line", "data": _cum_curve, "smooth": True,
+                            "areaStyle": {}, "lineStyle": {"width": 2}}],
+                "grid": {"left": 50, "right": 20, "top": 30, "bottom": 40},
+            }).classes("w-full h-48").tooltip(
+                "Running R total over broker-executed closes, oldest→newest -- rises "
+                "on wins, falls on losses. Ends at the 'executed total' on the method "
+                "cards above. ○ signal-only rows never enter it (no real money).")
 
         def _closed_row(t: dict) -> dict:
             # FIXED 2026-08-25: gated on _executed (same broker-truth set the neighboring
@@ -1172,7 +1165,7 @@ def paper_panel() -> None:
             pnl = (f"{t['realized_r'] * risk_by_id[t['id']]:+,.0f}"
                   if t["id"] in risk_by_id and t["id"] in _executed else "—")
             return {"instrument": t["instrument"], "status": t["status"],
-                   "R": round(t["realized_r"], 2), "cum R ✓": cum_r_by_id.get(t["id"], "—"),
+                   "R": round(t["realized_r"], 2),
                    "invested (USD)": invested, "P&L (USD)": pnl,
                    "closed": _fmt_ts(t["exit_ts"]), "opened": _fmt_ts(t["ts"]),
                    "funded": "✓ broker" if t["id"] in _executed else "○ signal only",
@@ -1180,7 +1173,7 @@ def paper_panel() -> None:
                    "entry": round(t["entry"], 4), "SL": round(t["sl"], 4), "TP": round(t["tp"], 4),
                    "method": t["method"], "dir": t["direction"], "id": t["id"]}
 
-        col_order = ["instrument", "status", "R", "cum R ✓", "invested (USD)", "P&L (USD)",
+        col_order = ["instrument", "status", "R", "invested (USD)", "P&L (USD)",
                     "closed", "opened", "funded", "exit", "entry", "SL", "TP", "method", "dir", "id"]
         if _resolved_filtered:
             rows = [_closed_row(t) for t in _resolved_filtered[:20]]
@@ -1191,11 +1184,8 @@ def paper_panel() -> None:
                     .classes("w-full min-w-[900px]").props("dense flat")\
                     .tooltip("'R' is what the signal-logic scored regardless of funding -- "
                              "'P&L (USD)' is the real $ risked x R, only available for '✓ broker' "
-                             "rows -- '○ signal only' rows never had a real broker order, see the "
-                             "Retrospective tab for broker-executed-only KPIs. 'cum R ✓' is the "
-                             "running total AT each close, chronological (oldest→newest) over "
-                             "✓ rows only -- the table shows newest first, so it won't read "
-                             "monotonically top-to-bottom")
+                             "rows -- '○ signal only' rows never had a real broker order. The "
+                             "chronological cumulative-R curve above covers ✓ rows only.")
                 # ADDED 2026-08-19, user-requested: demote '○ signal only' rows visually (tinted
                 # row, muted text, thin left rule) instead of every row reading the same weight --
                 # a real broker outcome and a hypothetical never-funded one looked identical before,
