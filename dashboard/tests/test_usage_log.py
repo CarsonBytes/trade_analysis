@@ -103,6 +103,8 @@ def test_fetch_uses_summary_row_when_present():
     check("total calls", r["calls"], 42)
     check("total cost", r["cost_usd"], 1.2345)
     check("calls_by_project", r["calls_by_project"], {"quant": 30, "events": 12})
+    check("chatanywhere_calls falls back to total_calls when the summary row "
+          "predates migration 003 (no column)", r["chatanywhere_calls"], 42)
     check("ok is True", r["ok"], True)
     check("exactly one HTTP call (summary row, never raw llm_calls)",
           mock_get.call_count, 1)
@@ -121,7 +123,7 @@ def test_fetch_empty_summary_returns_zeros_without_falling_back():
          mock.patch("httpx.get", return_value=_FakeResp([])) as mock_get:
         r = usage_log.fetch_shared_usage_today()
     check("returns zeros with ok=True", r,
-          {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": True})
+          {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "chatanywhere_calls": 0, "ok": True})
     check("only one HTTP call", mock_get.call_count, 1)
 
 
@@ -168,6 +170,8 @@ def test_fetch_falls_back_to_raw_rows_when_summary_table_missing():
     check("calls_by_project quant", r["calls_by_project"]["quant"], 2)
     check("calls_by_project events", r["calls_by_project"]["events"], 1)
     check("calls_by_project study", r["calls_by_project"]["study"], 1)
+    check("chatanywhere_calls counts quant+events (project heuristic), excludes "
+          "the unprefixed study row", r["chatanywhere_calls"], 3)
     check("total cost summed", round(r["cost_usd"], 4), round(0.01 + 0.01 + 0.002 + 0.0001, 4))
     check("ok is True on a successful fetch", r["ok"], True)
     check("two HTTP calls: summary first, then raw fallback", mock_get.call_count, 2)
@@ -214,7 +218,7 @@ def test_fetch_handles_request_failure_gracefully():
             raised = True
     check("does not raise", raised, False)
     check("returns zeros on failure", r,
-          {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "ok": False})
+          {"calls": 0, "cost_usd": 0.0, "calls_by_project": {}, "chatanywhere_calls": 0, "ok": False})
 
 
 # ADDED 2026-07-15: shared_calls_ok() -- fails CLOSED (treats "couldn't reach the ledger"
@@ -245,6 +249,26 @@ def test_shared_calls_ok_false_when_near_cap():
         ok, calls = usage_log.shared_calls_ok(cap=200, reserve=10)
     check("ok is False (195 >= 200-10)", ok, False)
     check("calls still reported", calls, 195)
+
+
+def test_shared_calls_ok_gates_on_chatanywhere_calls_not_total():
+    print("\nshared_calls_ok(): FIXED 2026-09-15 -- gates on chatanywhere_calls "
+          "(the actual 200/day-capped quota), not total_calls (every provider "
+          "combined). A project logging heavily via a non-chatanywhere provider "
+          "must not trip this guard:")
+    from analyst import usage_log
+    _reset_cache()
+    # total_calls is WAY over cap, but almost none of it is chatanywhere --
+    # the old bug would have reported (False, 250); the fix must see through
+    # to the real quota-relevant count.
+    row = [{"total_calls": 250, "total_cost_usd": 0.0,
+            "calls_by_project": {"quant": 250}, "chatanywhere_calls": 50}]
+    with mock.patch.object(usage_log, "SUPABASE_URL", "https://fake.supabase.co"), \
+         mock.patch.object(usage_log, "SUPABASE_SERVICE_ROLE_KEY", "fake-key"), \
+         mock.patch("httpx.get", return_value=_FakeResp(row)):
+        ok, calls = usage_log.shared_calls_ok(cap=200, reserve=10)
+    check("ok is True (50 < 200-10, even though total_calls=250 is over cap)", ok, True)
+    check("reports chatanywhere_calls (50), not total_calls (250)", calls, 50)
 
 
 def test_shared_calls_ok_fails_closed_when_unreachable():
