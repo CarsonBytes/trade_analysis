@@ -46,10 +46,12 @@ services:
       # at the same time.
       - IB_CLIENT_ID=31
       # ADDED 2026-09-17 (cross-instance sharing): 1 lets paper reuse live's
-      # board scan on fingerprint match (see service._reuse_allowed). Default 0
-      # for a safe canary -- flip to 1 deliberately after watching agreement +
-      # reuse rate. Live ignores this flag entirely (live never reads paper).
-      - SHARED_SCAN_ENABLE=0
+      # board scan on fingerprint match (see service._reuse_allowed). Shipped
+      # as 0 for a safe canary; FLIPPED TO 1 2026-09-19 at the user's explicit
+      # request (paper otherwise re-hits the same chatanywhere quota live already
+      # spent -- confirmed during the 7-day-window exhaustion). Live ignores this
+      # flag entirely (live never reads paper).
+      - SHARED_SCAN_ENABLE=1
     ports:
       # Host 18080 -> container 8090, deliberately far from the native deployment's
       # 8080 (paper) / 8081 (live) -- fully parallel, nothing to collide with.
