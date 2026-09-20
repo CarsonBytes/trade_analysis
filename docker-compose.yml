@@ -24,6 +24,9 @@ services:
       - DASH_PORT=8090
       # Self-meter (2026-09-13): per-endpoint Supabase REST counts, flushed
       # ~1/min into the persisted logs volume for egress attribution.
+      # Paper's label (live compose sets quant-live) -- paper/live used to
+      # share one `quant` label (spec 2026-09-20 splits them).
+      - SUPABASE_METER_APP=quant-paper
       - SUPABASE_METER_FILE=/app/logs/supabase_meter.jsonl
       # Absolute path -> pathlib's `parents[1] / DASH_DB_NAME` resolves to exactly this,
       # discarding the base (standard pathlib join-with-absolute-path behavior). Keeps this

@@ -16,7 +16,16 @@ from analyst import supabase_meter  # per-endpoint REST counts (memory-only unle
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-supabase_meter.configure(app="quant")
+# Meter label (spec 2026-09-20): explicit SUPABASE_METER_APP wins (both
+# compose files set it: quant-paper / quant-live); otherwise derive from
+# DASH_FIXED_MODE, defaulting to paper -- same default as
+# dashboard/core/mode.py::resolve_mode(). Paper and live used to share one
+# `quant` label, making their egress indistinguishable in the rollup.
+_meter_app = os.environ.get("SUPABASE_METER_APP") or (
+    "quant-live" if (os.environ.get("DASH_FIXED_MODE") or "").strip().lower() == "live"
+    else "quant-paper"
+)
+supabase_meter.configure(app=_meter_app)
 
 # FIXED 2026-07-24: fetch_shared_usage_today() used a UTC day boundary, deliberately
 # "mirroring event-radar's fetch_shared_usage_today() exactly" per that function's own
