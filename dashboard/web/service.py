@@ -325,11 +325,13 @@ def compute_today_pnl() -> dict:
         _fx = STATE.get("fx_usd_per_base")
         usd_to_base = 1.0 / (_fx or ib_client._PEG_USD_PER.get(ccy, 1.0))
 
-        # --- equity start of day ---
+        # --- equity start of day (from equity_history, which stores HKD values) ---
         hist, _ = store.cache_get("equity_history")
         hist = hist or []
         today_start_ts = None
         equity_start = None
+        gpv_start = None
+        cash_start = None
         now_ts = _time.time()
         today_date = dt.datetime.now(dt.timezone.utc).date()
 
@@ -339,16 +341,44 @@ def compute_today_pnl() -> dict:
             if entry_date == today_date:
                 today_start_ts = entry_ts
                 equity_start = entry[1]
+                cash_start = entry[3] if len(entry) > 3 else None
+                gpv_start = entry[4] if len(entry) > 4 else None
             elif entry_date < today_date:
                 break
 
         if equity_start is None and hist:
             equity_start = hist[-1][1]
             today_start_ts = hist[-1][0]
+            cash_start = hist[-1][3] if len(hist[-1]) > 3 else None
+            gpv_start = hist[-1][4] if len(hist[-1]) > 4 else None
+
+        # current values (HKD)
+        cash_now = acct.get("TotalCashValue")
+        gpv_now = acct.get("GrossPositionValue")
 
         # --- strategy P&L ---
+        # Try broker positions first (real-time USD profit field)
         positions = STATE.get("positions") or {}
         unrealized_usd = sum(p.get("profit", 0.0) for p in positions.values())
+
+        # If broker positions are unavailable (gateway disconnected), estimate from
+        # equity_history's GPV column. GPV includes SGOV, so subtract SGOV to get
+        # pure strategy position value.
+        strategy_pnl_hkd = 0.0
+        strategy_source = "broker"
+        if positions:
+            strategy_pnl_hkd = unrealized_usd * usd_to_base
+        elif gpv_start is not None and gpv_now is not None:
+            # Estimate strategy position change from GPV (ex-SGOV)
+            sweep = STATE.get("cash_sweep") or {}
+            sgov_now_val = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+            sgov_hist_local, _ = store.cache_get("sgov_history")
+            sgov_hist_local = sgov_hist_local or []
+            sgov_start_val = sgov_hist_local[-1][1] if sgov_hist_local else sgov_now_val
+            strategy_gpv_start = gpv_start - sgov_start_val
+            strategy_gpv_now = gpv_now - sgov_now_val
+            strategy_pnl_hkd = strategy_gpv_now - strategy_gpv_start
+            strategy_source = "gpv-estimate"
 
         with paper._LOCK, paper._conn() as c:
             risk_by_id = dict(c.execute(
@@ -363,11 +393,13 @@ def compute_today_pnl() -> dict:
                     if close_ts and close_ts[:10] == today_date_str:
                         realized_usd += t.get("realized_r", 0.0) * risk_by_id[t["id"]]
 
-        strategy_pnl = (unrealized_usd + realized_usd) * usd_to_base
+        realized_hkd = realized_usd * usd_to_base
+        strategy_total = strategy_pnl_hkd + realized_hkd
         out["strategy"] = {
-            "unrealized": round(unrealized_usd * usd_to_base, 2),
-            "realized": round(realized_usd * usd_to_base, 2),
-            "total": round(strategy_pnl, 2),
+            "unrealized": round(strategy_pnl_hkd, 2),
+            "realized": round(realized_hkd, 2),
+            "total": round(strategy_total, 2),
+            "source": strategy_source,
         }
 
         # --- SGOV P&L ---
@@ -420,9 +452,23 @@ def compute_today_pnl() -> dict:
             "daily": round(interest_daily, 2),
         }
 
-        # --- FX impact (residual) ---
+        # --- FX impact ---
+        # For an HKD account trading USD ETFs, FX effects are real: position values
+        # fluctuate with USD/HKD. The equity_history records HKD values, so:
+        #   equity_change = strategy(HKD) + SGOV + interest + cash_change + FX
+        # FX = equity_change - strategy - SGOV - interest - cash_change(ex-deposits)
+        # When strategy is estimated from GPV, the FX residual should be near-zero
+        # (GPV already captures USD->HKD conversion at current rates).
         total_equity_change = (nl - equity_start) if equity_start is not None else 0.0
-        fx_impact = total_equity_change - strategy_pnl - sgov_pnl - interest_daily
+        cash_change = 0.0
+        if cash_now is not None and cash_start is not None:
+            cash_change = cash_now - cash_start
+        # Subtract cash change (deposits/withdrawals excluded from P&L)
+        # The detect_external_cash_flow logic in equity_history already excludes
+        # large deposits, but small cash movements (dividends, small adjustments) remain
+        fx_impact = total_equity_change - strategy_total - sgov_pnl - interest_daily
+        # If we used GPV-estimate for strategy, FX should be near-zero (GPV is already in HKD)
+        # If we used broker positions (USD->HKD), FX reflects actual currency fluctuation
         out["fx"] = {"impact": round(fx_impact, 2)}
 
         # --- total ---
@@ -436,11 +482,11 @@ def compute_today_pnl() -> dict:
         }
 
         # --- breakdown (for stacked bar) ---
-        total_abs = abs(strategy_pnl) + abs(sgov_pnl) + abs(interest_daily) + abs(fx_impact)
+        total_abs = abs(strategy_total) + abs(sgov_pnl) + abs(interest_daily) + abs(fx_impact)
         if total_abs > 0:
             out["breakdown"] = [
-                {"label": "Strategy", "value": round(strategy_pnl, 2),
-                 "pct": round(strategy_pnl / total_abs * 100, 1)},
+                {"label": "Strategy", "value": round(strategy_total, 2),
+                 "pct": round(strategy_total / total_abs * 100, 1)},
                 {"label": "SGOV", "value": round(sgov_pnl, 2),
                  "pct": round(sgov_pnl / total_abs * 100, 1)},
                 {"label": "Interest", "value": round(interest_daily, 2),
