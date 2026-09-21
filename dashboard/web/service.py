@@ -726,9 +726,15 @@ def refresh_cheap() -> None:
         log.debug("keep-cash-usd error: %s", e)
     # park idle cash in SGOV (opt-in CASH_SWEEP=1); strategy always keeps a buffer
     try:
-        _cs = broker.sweep_cash()                       # keep last-good unless the read succeeded
+        _cs = broker.sweep_cash()
+        # ALWAYS update STATE so failures show in the dashboard (not just the last ok=True
+        # snapshot).  ok=False with a non-empty log means something went wrong -- surface
+        # it at WARNING so the operator can see it, instead of silently showing stale data.
         if _cs.get("enabled") is False or _cs.get("ok"):
             STATE["cash_sweep"] = _cs
+        elif _cs.get("log"):
+            STATE["cash_sweep"] = _cs
+            log.warning("cash sweep failed: %s", _cs["log"])
     except Exception as e:
         log.debug("cash sweep error: %s", e)
     # current short-term T-bill rate (^IRX) = live SGOV-yield proxy; refreshed ~daily

@@ -1963,7 +1963,7 @@ def keep_cash_usd() -> dict:
 # --- idle-cash sweep into SGOV (0-3mo T-bill ETF) --------------------------------
 SGOV_SYMBOL = "SGOV"
 SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MKT fills real)
-CASH_SWEEP_TARGET = 0.60      # park 60% of (idle cash + SGOV); keep 40% buffer for the strategy
+CASH_SWEEP_TARGET = 0.80      # park 80% of (idle cash + SGOV); keep 20% buffer for the strategy
 CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas (anti-churn ONLY -- not a
                               # substitute for CASH_SWEEP_MIN_NAV_USD below; see 2026-07-08 HANDOFF)
 CASH_SWEEP_MIN_NAV_USD = 10_000   # LOWERED 2026-08-06 (was 75_000): the ORIGINAL "T+1
