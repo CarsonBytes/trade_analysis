@@ -55,6 +55,7 @@ services:
       # spent -- confirmed during the 7-day-window exhaustion). Live ignores this
       # flag entirely (live never reads paper).
       - SHARED_SCAN_ENABLE=1
+      - SLEEVE_ENABLED=1
     ports:
       # Host 18080 -> container 8090, deliberately far from the native deployment's
       # 8080 (paper) / 8081 (live) -- fully parallel, nothing to collide with.

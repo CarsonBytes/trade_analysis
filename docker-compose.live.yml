@@ -39,6 +39,7 @@ services:
       # DASH_FIXED_MODE=live -- set both explicitly anyway, for self-documentation, matching
       # the emphasis _guard()'s own docstring places on this exact account/port match.
       - IB_ALLOW_LIVE=1
+      - SLEEVE_ENABLED=1
       - DASH_DB_NAME=/data/dashboard_live_docker.db
       - IB_HOST=ib-gateway-live
       # Distinct from native paper's 7, native live's 21, and Docker paper's 31.
