@@ -295,6 +295,228 @@ def pnl_crosscheck() -> dict:
     return out
 
 
+def compute_today_pnl() -> dict:
+    """Today's P&L breakdown: strategy (unrealized + realized), SGOV, interest, FX.
+    Returns dict with 'strategy', 'sgov', 'interest', 'fx', 'total', 'breakdown', 'history_30d'.
+    Never raises -- partial data is acceptable."""
+    out = {
+        "strategy": {"unrealized": 0.0, "realized": 0.0, "total": 0.0},
+        "sgov": {"value_now": 0.0, "value_start": 0.0, "pnl": 0.0, "rate": None},
+        "interest": {"accrued": 0.0, "daily": 0.0},
+        "fx": {"impact": 0.0},
+        "total": {"equity_start": 0.0, "equity_now": 0.0, "pnl": 0.0, "pct": 0.0},
+        "breakdown": [],
+        "history_30d": [],
+        "ccy": "",
+        "as_of": None,
+    }
+    try:
+        import time as _time
+        from dashboard.data import ib_client
+
+        acct = STATE.get("account") or {}
+        nl = acct.get("NetLiquidation")
+        ccy = acct.get("_ccy", "")
+        out["ccy"] = ccy
+
+        if nl is None:
+            return out
+
+        _fx = STATE.get("fx_usd_per_base")
+        usd_to_base = 1.0 / (_fx or ib_client._PEG_USD_PER.get(ccy, 1.0))
+
+        # --- equity start of day ---
+        hist, _ = store.cache_get("equity_history")
+        hist = hist or []
+        today_start_ts = None
+        equity_start = None
+        now_ts = _time.time()
+        today_date = dt.datetime.now(dt.timezone.utc).date()
+
+        for entry in reversed(hist):
+            entry_ts = entry[0]
+            entry_date = dt.datetime.fromtimestamp(entry_ts, tz=dt.timezone.utc).date()
+            if entry_date == today_date:
+                today_start_ts = entry_ts
+                equity_start = entry[1]
+            elif entry_date < today_date:
+                break
+
+        if equity_start is None and hist:
+            equity_start = hist[-1][1]
+            today_start_ts = hist[-1][0]
+
+        # --- strategy P&L ---
+        positions = STATE.get("positions") or {}
+        unrealized_usd = sum(p.get("profit", 0.0) for p in positions.values())
+
+        with paper._LOCK, paper._conn() as c:
+            risk_by_id = dict(c.execute(
+                f"SELECT paper_id, risk_money FROM {broker.mirror_table()}").fetchall())
+
+        realized_usd = 0.0
+        if risk_by_id:
+            today_date_str = today_date.isoformat()
+            for t in paper.all_trades():
+                if t["status"] != "OPEN" and t["id"] in risk_by_id:
+                    close_ts = t.get("close_ts") or ""
+                    if close_ts and close_ts[:10] == today_date_str:
+                        realized_usd += t.get("realized_r", 0.0) * risk_by_id[t["id"]]
+
+        strategy_pnl = (unrealized_usd + realized_usd) * usd_to_base
+        out["strategy"] = {
+            "unrealized": round(unrealized_usd * usd_to_base, 2),
+            "realized": round(realized_usd * usd_to_base, 2),
+            "total": round(strategy_pnl, 2),
+        }
+
+        # --- SGOV P&L ---
+        sweep = STATE.get("cash_sweep") or {}
+        sgov_now = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+        _tb = STATE.get("tbill_rate")
+        sgov_rate = (_tb - 0.07) if _tb else None
+
+        sgov_hist, _ = store.cache_get("sgov_history")
+        sgov_hist = sgov_hist or []
+        sgov_start = None
+        for entry in reversed(sgov_hist):
+            entry_ts = entry[0]
+            entry_date = dt.datetime.fromtimestamp(entry_ts, tz=dt.timezone.utc).date()
+            if entry_date == today_date:
+                sgov_start = entry[1]
+            elif entry_date < today_date:
+                break
+
+        if sgov_start is None and sgov_hist:
+            sgov_start = sgov_hist[-1][1]
+
+        sgov_pnl = (sgov_now - sgov_start) if sgov_start is not None else 0.0
+        out["sgov"] = {
+            "value_now": round(sgov_now, 2),
+            "value_start": round(sgov_start, 2) if sgov_start is not None else 0.0,
+            "pnl": round(sgov_pnl, 2),
+            "rate": sgov_rate,
+        }
+
+        # --- interest P&L ---
+        accrued = float(acct.get("AccruedCash", 0.0) or 0.0) * usd_to_base
+        interest_hist, _ = store.cache_get("interest_history")
+        interest_hist = interest_hist or []
+        interest_start = None
+        for entry in reversed(interest_hist):
+            entry_ts = entry[0]
+            entry_date = dt.datetime.fromtimestamp(entry_ts, tz=dt.timezone.utc).date()
+            if entry_date == today_date:
+                interest_start = entry[1]
+            elif entry_date < today_date:
+                break
+
+        if interest_start is None and interest_hist:
+            interest_start = interest_hist[-1][1]
+
+        interest_daily = (accrued - interest_start) if interest_start is not None else 0.0
+        out["interest"] = {
+            "accrued": round(accrued, 2),
+            "daily": round(interest_daily, 2),
+        }
+
+        # --- FX impact (residual) ---
+        total_equity_change = (nl - equity_start) if equity_start is not None else 0.0
+        fx_impact = total_equity_change - strategy_pnl - sgov_pnl - interest_daily
+        out["fx"] = {"impact": round(fx_impact, 2)}
+
+        # --- total ---
+        pnl = total_equity_change
+        pct = (pnl / equity_start * 100.0) if equity_start and equity_start > 0 else 0.0
+        out["total"] = {
+            "equity_start": round(equity_start, 2) if equity_start is not None else 0.0,
+            "equity_now": round(nl, 2),
+            "pnl": round(pnl, 2),
+            "pct": round(pct, 2),
+        }
+
+        # --- breakdown (for stacked bar) ---
+        total_abs = abs(strategy_pnl) + abs(sgov_pnl) + abs(interest_daily) + abs(fx_impact)
+        if total_abs > 0:
+            out["breakdown"] = [
+                {"label": "Strategy", "value": round(strategy_pnl, 2),
+                 "pct": round(strategy_pnl / total_abs * 100, 1)},
+                {"label": "SGOV", "value": round(sgov_pnl, 2),
+                 "pct": round(sgov_pnl / total_abs * 100, 1)},
+                {"label": "Interest", "value": round(interest_daily, 2),
+                 "pct": round(interest_daily / total_abs * 100, 1)},
+                {"label": "FX", "value": round(fx_impact, 2),
+                 "pct": round(fx_impact / total_abs * 100, 1)},
+            ]
+
+        # --- 30-day history ---
+        daily_hist, _ = store.cache_get("daily_pnl_history")
+        daily_hist = daily_hist or []
+        out["history_30d"] = daily_hist[-30:]
+
+        out["as_of"] = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    except Exception as e:
+        log.debug("compute_today_pnl error: %s", e)
+    return out
+
+
+def record_daily_pnl_snapshot() -> None:
+    """Record a daily P&L snapshot for historical tracking. Called from refresh_cheap()."""
+    try:
+        import time as _time
+        now_ts = _time.time()
+        today_date = dt.datetime.now(dt.timezone.utc).date()
+
+        acct = STATE.get("account") or {}
+        nl = acct.get("NetLiquidation")
+        if nl is None:
+            return
+
+        from dashboard.data import ib_client
+        ccy = acct.get("_ccy", "")
+        _fx = STATE.get("fx_usd_per_base")
+        usd_to_base = 1.0 / (_fx or ib_client._PEG_USD_PER.get(ccy, 1.0))
+
+        positions = STATE.get("positions") or {}
+        unrealized_usd = sum(p.get("profit", 0.0) for p in positions.values())
+
+        sweep = STATE.get("cash_sweep") or {}
+        sgov_now = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+        _tb = STATE.get("tbill_rate")
+        sgov_rate = (_tb - 0.07) if _tb else None
+        accrued = float(acct.get("AccruedCash", 0.0) or 0.0)
+
+        daily_hist, _ = store.cache_get("daily_pnl_history")
+        daily_hist = daily_hist or []
+
+        entry_date = today_date.isoformat()
+        entry = [now_ts, entry_date,
+                 round(unrealized_usd * usd_to_base, 2),
+                 round(sgov_now, 2),
+                 round(accrued * usd_to_base, 2),
+                 round(float(nl), 2)]
+
+        if daily_hist and daily_hist[-1][1] == entry_date:
+            daily_hist[-1] = entry
+        else:
+            daily_hist.append(entry)
+
+        store.cache_set("daily_pnl_history", daily_hist[-30:])
+
+        interest_hist, _ = store.cache_get("interest_history")
+        interest_hist = interest_hist or []
+        interest_entry = [now_ts, round(accrued * usd_to_base, 2)]
+        if interest_hist and dt.datetime.fromtimestamp(interest_hist[-1][0], tz=dt.timezone.utc).date() == today_date:
+            interest_hist[-1] = interest_entry
+        else:
+            interest_hist.append(interest_entry)
+        store.cache_set("interest_history", interest_hist[-3000:])
+
+    except Exception as e:
+        log.debug("record_daily_pnl_snapshot error: %s", e)
+
+
 # ADDED 2026-07-30, alongside the same-day fix for OPEN positions' stale price (see
 # ib_exec.py::live_positions()'s current_price). PENDING (not-yet-funded) signals have no
 # broker position to read a live mark from, so they were still falling back to STATE["live"]'s
@@ -604,6 +826,11 @@ def refresh_cheap() -> None:
                 level="warning")
     except Exception as e:                                 # noqa: BLE001
         log.debug("pnl_crosscheck wiring error: %s", e)
+    # Record daily P&L snapshot for today's breakdown display
+    try:
+        record_daily_pnl_snapshot()
+    except Exception as e:
+        log.debug("daily_pnl_snapshot error: %s", e)
     STATE["last_cheap"] = _now()
     live = STATE["live"]
     n_mt5 = sum(1 for v in live.values() if v.get("src") == "mt5-tick")

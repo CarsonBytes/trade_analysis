@@ -2349,6 +2349,128 @@ def _sort_active(items: list, get_trade, get_pos, real_qty_by_id: dict) -> list:
 
 
 @ui.refreshable
+def today_pnl_panel() -> None:
+    """Today's P&L breakdown: strategy, SGOV, interest, FX with expandable detail."""
+    from dashboard.web import service as _svc
+    data = _svc.compute_today_pnl()
+    if not data or data.get("total", {}).get("pnl") is None:
+        return
+
+    ccy = data.get("ccy", "")
+    total = data.get("total", {})
+    strategy = data.get("strategy", {})
+    sgov = data.get("sgov", {})
+    interest = data.get("interest", {})
+    fx = data.get("fx", {})
+    breakdown = data.get("breakdown", [])
+    positions = service.STATE.get("positions") or {}
+
+    def _money(x):
+        return f"{ccy} {x:,.0f}"
+
+    pnl = total.get("pnl", 0.0)
+    pct = total.get("pct", 0.0)
+    color = "text-green" if pnl >= 0 else "text-red"
+
+    with ui.card().classes("w-full"):
+        with ui.row().classes("items-center gap-3"):
+            ui.label("Today's P&L").classes("text-sm font-bold text-grey-7")
+            ui.label(f"{_money(pnl)} ({pct:+.2f}%)").classes(f"text-lg font-bold {color}")
+            if total.get("equity_start"):
+                ui.label(f"from {_money(total['equity_start'])}").classes("text-xs text-grey-5")
+
+        # breakdown lines
+        with ui.column().classes("gap-0"):
+            for item in breakdown:
+                val = item.get("value", 0)
+                lbl = item.get("label", "")
+                item_color = "text-green" if val >= 0 else "text-red"
+                icon = "trending_up" if val >= 0 else "trending_down" if val < 0 else "remove"
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon(icon, color="green" if val >= 0 else "red").classes("text-sm")
+                    ui.label(f"{lbl}:").classes("text-xs text-grey-6 w-16")
+                    ui.label(f"{_money(val)}").classes(f"text-xs font-bold {item_color}")
+
+        # expandable per-position detail
+        with ui.expansion("Per-position detail", icon="expand_more").classes("w-full"):
+            with ui.column().classes("w-full gap-1"):
+                with ui.row().classes("w-full text-xs font-bold text-grey-6 px-2"):
+                    ui.label("Symbol").classes("w-16")
+                    ui.label("Dir").classes("w-8")
+                    ui.label("Entry").classes("w-16 text-right")
+                    ui.label("Current").classes("w-16 text-right")
+                    ui.label("Change").classes("w-16 text-right")
+                    ui.label(f"P&L ({ccy})").classes("w-20 text-right")
+                for pid, pos in sorted(positions.items(),
+                                        key=lambda x: abs(x[1].get("profit", 0)), reverse=True):
+                    sym = pos.get("symbol", "?")
+                    direction = pos.get("direction", "long")
+                    entry = pos.get("open", 0)
+                    current = pos.get("current_price", 0)
+                    profit_usd = pos.get("profit", 0)
+                    fx_usd = service.STATE.get("fx_usd_per_base")
+                    from dashboard.data import ib_client as _ibc
+                    usd_to_base = 1.0 / (fx_usd or _ibc._PEG_USD_PER.get(ccy, 1.0))
+                    pnl_val = profit_usd * usd_to_base
+                    change_pct = ((current - entry) / entry * 100) if entry else 0
+                    p_color = "text-green" if pnl_val >= 0 else "text-red"
+                    with ui.row().classes("w-full text-xs px-2"):
+                        ui.label(sym).classes("w-16 font-bold")
+                        ui.label("L" if direction == "long" else "S").classes("w-8")
+                        ui.label(f"{entry:.2f}").classes("w-16 text-right text-grey-6")
+                        ui.label(f"{current:.2f}").classes("w-16 text-right")
+                        ui.label(f"{change_pct:+.1f}%").classes(f"w-16 text-right {p_color}")
+                        ui.label(f"{pnl_val:+,.0f}").classes(f"w-20 text-right font-bold {p_color}")
+
+        # 30-day bar chart
+        history = data.get("history_30d", [])
+        if history and len(history) > 1:
+            with ui.expansion("30-day history", icon="show_chart").classes("w-full"):
+                _render_daily_pnl_chart(history, ccy)
+
+
+def _render_daily_pnl_chart(history: list, ccy: str) -> None:
+    """Render a stacked bar chart of daily P&L components over 30 days."""
+    from nicegui import ui as _ui
+    dates = []
+    strategy_vals = []
+    sgov_vals = []
+    interest_vals = []
+    fx_vals = []
+    for entry in history[-30:]:
+        ts = entry[0]
+        date_str = entry[1]
+        strategy_pnl = entry[2] if len(entry) > 2 else 0
+        sgov_val = entry[3] if len(entry) > 3 else 0
+        interest_val = entry[4] if len(entry) > 4 else 0
+        total_val = entry[5] if len(entry) > 5 else 0
+        fx_val = total_val - strategy_pnl - sgov_val - interest_val
+        dates.append(date_str[-5:])
+        strategy_vals.append(round(strategy_pnl, 2))
+        sgov_vals.append(round(sgov_val, 2))
+        interest_vals.append(round(interest_val, 2))
+        fx_vals.append(round(fx_val, 2))
+    option = {
+        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+        "legend": {"data": ["Strategy", "SGOV", "Interest", "FX"], "bottom": 0},
+        "grid": {"left": "3%", "right": "4%", "bottom": "15%", "top": "10%", "containLabel": True},
+        "xAxis": {"type": "category", "data": dates},
+        "yAxis": {"type": "value", "name": ccy},
+        "series": [
+            {"name": "Strategy", "type": "bar", "stack": "total", "data": strategy_vals,
+             "itemStyle": {"color": "#3B82F6"}},
+            {"name": "SGOV", "type": "bar", "stack": "total", "data": sgov_vals,
+             "itemStyle": {"color": "#10B981"}},
+            {"name": "Interest", "type": "bar", "stack": "total", "data": interest_vals,
+             "itemStyle": {"color": "#F59E0B"}},
+            {"name": "FX", "type": "bar", "stack": "total", "data": fx_vals,
+             "itemStyle": {"color": "#EF4444"}},
+        ],
+    }
+    _ui.echart(option).classes("w-full h-48")
+
+
+@ui.refreshable
 def active_panel() -> None:
     """Open positions shown on the Board with live unrealized P&L in R. Splits
     CONFIRMED (a real, broker-mirrored position) from PENDING (a signal that fired
@@ -4082,6 +4204,8 @@ def main_page() -> None:
                     with ui.element("div").classes("col-span-12"):
                         portfolio_panel()
                     with ui.element("div").classes("col-span-12"):
+                        today_pnl_panel()
+                    with ui.element("div").classes("col-span-12"):
                         active_panel()
             with ui.tab_panel(t_alerts):               # notable events, read at your pace
                 alerts_panel()
@@ -4171,5 +4295,14 @@ async def _clear_backoff_route(request):
 
 
 _webapp.add_route("/api/clear-backoff", _clear_backoff_route, methods=["POST"])
+
+
+async def _today_pnl_route(request):
+    from dashboard.web import service as _svc
+    data = _svc.compute_today_pnl()
+    return JSONResponse(data, headers=_CORS)
+
+
+_webapp.add_route("/api/today-pnl", _today_pnl_route, methods=["GET"])
 
 ui.run(title=f"Quantitative Trading System [{_MODE}]", favicon="📈", port=_DASH_PORT, reload=False, show=False)
