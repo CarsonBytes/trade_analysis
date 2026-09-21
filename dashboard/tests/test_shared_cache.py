@@ -140,13 +140,15 @@ def test_try_shared_reuse_match_and_mismatch():
             "signals": [_sig("AAA", "BUY"), _sig("BBB", "WAIT")],
             "model": "gpt-5-mini", "provider": "chatanywhere",
             "environment": "live"})
-        result, age_min, model, provider, ms = service._try_shared_reuse(fp)
+        result, age_min, model, provider, ms, cache_exists = service._try_shared_reuse(fp)
         check("match -> result", result is not None, True)
         check("actions preserved", [s.action for s in result.signals], ["BUY", "WAIT"])
         check("model passed through", model, "gpt-5-mini")
         check("age sane", age_min is not None and 0 <= age_min < 1, True)
-        check("mismatch -> miss",
-              service._try_shared_reuse("0" * 32)[0], None)
+        check("cache_exists on match", cache_exists, True)
+        mismatch_result, _, _, _, _, mismatch_cache = service._try_shared_reuse("0" * 32)
+        check("mismatch -> miss", mismatch_result, None)
+        check("mismatch -> cache_exists True", mismatch_cache, True)
         with mock.patch.object(board_scan, "SHARED_SCAN_MAX_AGE_MIN", -1):
             check("stale -> miss", service._try_shared_reuse(fp)[0], None)
     finally:

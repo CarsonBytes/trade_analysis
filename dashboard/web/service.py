@@ -848,26 +848,34 @@ def _reuse_allowed(env: str) -> bool:
 def _try_shared_reuse(market_fp: str) -> tuple:
     """Paper-only: reuse live's last scan when our board fingerprints
     identically to what live scanned. Returns (BoardScan|None, age_min|None,
-    model, provider, latency_ms). Never raises -- any problem means 'do your
-    own scan'."""
+    model, provider, latency_ms, cache_file_exists). Never raises -- any
+    problem means 'do your own scan'."""
     import time as _t
     _start = _t.perf_counter()
     try:
         payload, age_sec = shared_cache.read(
             shared_cache.SCAN_KEY, board_scan.SHARED_SCAN_MAX_AGE_MIN * 60)
-        if not payload or payload.get("market_fp") != market_fp:
-            return None, None, "", "", 0
+        if not payload:
+            # File missing or stale -- caller may try its own LLM call
+            return None, None, "", "", 0, False
+        cache_file_exists = True
+        if payload.get("market_fp") != market_fp:
+            # File exists but fingerprint doesn't match -- caller should NOT
+            # fall through to run_board_scan() for paper (the mismatch is
+            # just timing jitter in refresh_cheap() scores; live's scan is
+            # still perfectly valid).
+            return None, None, "", "", 0, cache_file_exists
         result = BoardScan.model_validate({
             "macro_note": payload.get("macro_note", ""),
             "signals": payload.get("signals", []),
         })
         if not result.signals:
-            return None, None, "", "", 0
+            return None, None, "", "", 0, cache_file_exists
         latency_ms = int((_t.perf_counter() - _start) * 1000)
         return (result, age_sec / 60.0, payload.get("model", ""),
-                payload.get("provider", ""), latency_ms)
+                payload.get("provider", ""), latency_ms, cache_file_exists)
     except Exception:
-        return None, None, "", "", 0
+        return None, None, "", "", 0, False
 
 
 def _position_keys() -> tuple:
@@ -1235,13 +1243,22 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     market_fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], ())
     reuse_info = None  # (age_min, model, provider, latency_ms) when serving shared
     if not force and _reuse_allowed(env):
-        shared_result, age_min, shared_model, shared_provider, shared_ms = \
+        shared_result, age_min, shared_model, shared_provider, shared_ms, cache_hit = \
             _try_shared_reuse(market_fp)
         if shared_result is not None:
             result = shared_result
             status = f"reused live scan ({age_min:.0f}min old)"
             reuse_info = (age_min, shared_model, shared_provider, shared_ms)
+        elif cache_hit:
+            # Shared cache file exists but fingerprint mismatched -- live's
+            # scan is still valid, the mismatch is just timing jitter in
+            # scores/headlines.  Paper must NOT fall through to its own
+            # run_board_scan() here: it would hit the shared chatanywhere key,
+            # get rate-limited, and set a local backoff that blocks ALL future
+            # attempts (the 2026-09-18 paper-stuck bug).
+            result, status = None, "shared cache fingerprint mismatch (live scan valid, skipped)"
         else:
+            # Shared cache missing/stale -- paper can try its own LLM call
             result, status = run_board_scan(ranked, STATE["news"], cap=cap)
     else:
         result, status = run_board_scan(ranked, STATE["news"], cap=cap)
