@@ -1077,8 +1077,8 @@ def paper_panel() -> None:
                   value=_trades_filter, on_change=_set_trades_filter).props("dense")
         ui.input(placeholder="Filter instrument…", value=_trades_search,
                  on_change=_set_trades_search).props("dense clearable").classes("w-[200px]")
-        ui.toggle(value=_include_signal_only, on_change=_set_include_signal_only)\
-            .props("label='Include signal-only' dense")
+        ui.switch("Signal-only", value=_include_signal_only, on_change=_set_include_signal_only)\
+            .props("dense")
         ui.label(f"Total {len(trades)} · Open {len(open_t)} · Closed {len(closed)}")\
             .classes("text-xs text-grey-6 ml-auto")
 
