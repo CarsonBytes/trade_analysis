@@ -71,7 +71,8 @@ SETTINGS = {"cheap_min": 1, "llm_min": 30, "auto_pause": True,
             # profit, largest invested amount) -- one consistent mental model instead of
             # per-key direction semantics.
             "active_sort": "entry_date", "active_sort_dir": "desc",
-            "alerts_filter": "all", "density": "comfortable"}
+            "alerts_filter": "all", "density": "comfortable",
+            "include_signal_only": True}
 # label -> sort-key value, in the order shown in the dropdown
 ACTIVE_SORT_KEYS = {"entry_date": "Entry date", "r": "Unrealized R",
                     "profit": "Profit", "invested": "Invested amount"}
@@ -97,6 +98,7 @@ def _save_settings() -> None:
             "density": SETTINGS.get("density", "comfortable"),
             "trades_filter": SETTINGS.get("trades_filter", "all"),
             "trades_search": SETTINGS.get("trades_search", ""),
+            "include_signal_only": SETTINGS.get("include_signal_only", True),
             "risk_per_trade": _p.RISK_PER_TRADE,
             "overext_filter": _p.OVEREXT_FILTER, "overext_hi": _p.OVEREXT_HI,
             "tech_paused": _p.TECH_PAUSED})
@@ -114,7 +116,8 @@ def _load_settings() -> None:
             return
         for k in ("cheap_min", "llm_min", "auto_pause", "cap", "grid_cols", "chart_period",
                  "chart_scale", "chart_view", "active_sort", "active_sort_dir",
-                 "alerts_filter", "density", "trades_filter", "trades_search"):
+                 "alerts_filter", "density", "trades_filter", "trades_search",
+                 "include_signal_only"):
             if k in saved:
                 SETTINGS[k] = saved[k]
         if "risk_per_trade" in saved:
@@ -1061,16 +1064,21 @@ def paper_panel() -> None:
     # Cancelled) + search
     _trades_filter = SETTINGS.get("trades_filter", "all")
     _trades_search = SETTINGS.get("trades_search", "")
+    _include_signal_only = SETTINGS.get("include_signal_only", True)
     def _set_trades_filter(e) -> None:
         SETTINGS.update(trades_filter=e.value); _save_settings(); paper_panel.refresh()
     def _set_trades_search(e) -> None:
         SETTINGS.update(trades_search=e.value or ""); _save_settings(); paper_panel.refresh()
+    def _set_include_signal_only(e) -> None:
+        SETTINGS.update(include_signal_only=e.value); _save_settings(); paper_panel.refresh()
     with ui.row().classes("items-center gap-2 w-full flex-wrap mt-2"):
         ui.toggle({"all": "All", "active": "Active ✓", "pending": "Pending ○",
                    "closed": "Closed", "cancelled": "Cancelled"},
                   value=_trades_filter, on_change=_set_trades_filter).props("dense")
         ui.input(placeholder="Filter instrument…", value=_trades_search,
                  on_change=_set_trades_search).props("dense clearable").classes("w-[200px]")
+        ui.toggle(value=_include_signal_only, on_change=_set_include_signal_only)\
+            .props("label='Include signal-only' dense")
         ui.label(f"Total {len(trades)} · Open {len(open_t)} · Closed {len(closed)}")\
             .classes("text-xs text-grey-6 ml-auto")
 
@@ -1109,10 +1117,13 @@ def paper_panel() -> None:
     # EXPIRED) only; CANCELLED/VOID moved to a collapsed section below.
     if _show_closed and resolved:
         _resolved_filtered = [t for t in resolved
-                              if not _trades_search or _trades_search.lower() in t["instrument"].lower()]
+                              if (not _trades_search or _trades_search.lower() in t["instrument"].lower())
+                              and (_include_signal_only or t["id"] in _executed)]
         if _resolved_filtered:
             with ui.row().classes("items-center gap-2 mt-2"):
-                ui.label(f"Recent closed ({len(_resolved_filtered)}/{len(resolved)})").classes("text-sm font-bold")
+                _signal_note = "" if _include_signal_only else " (executed only)"
+                ui.label(f"Recent closed ({len(_resolved_filtered)}/{len(resolved)}){_signal_note}")\
+                    .classes("text-sm font-bold")
                 ui.button("Archive selected", icon="archive",
                           on_click=lambda: _archive_records(closed_tbl)).props("flat dense")
         # ADDED 2026-07-24: entry/SL/TP/exit + a $ P&L column -- R alone doesn't say how much
