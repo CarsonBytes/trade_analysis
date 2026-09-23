@@ -1966,6 +1966,10 @@ SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MK
 CASH_SWEEP_TARGET = 0.80      # park 80% of (idle cash + SGOV); keep 20% buffer for the strategy
 CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas (anti-churn ONLY -- not a
                               # substitute for CASH_SWEEP_MIN_NAV_USD below; see 2026-07-08 HANDOFF)
+CASH_SWEEP_COOLDOWN_SEC = 300  # 5 min cooldown between sweep order submissions (prevents ghost
+                               # order flood -- confirmed live: 160 identical BUY orders placed
+                               # every ~65s because no pending-order guard existed)
+_sweep_last_order_ts: float = 0.0   # monotonic timestamp of last sweep order submission
 CASH_SWEEP_MIN_NAV_USD = 10_000   # LOWERED 2026-08-06 (was 75_000): the ORIGINAL "T+1
                                   # settlement friction isn't worth it" reasoning turned out
                                   # to rest on a premise that doesn't hold for this account --
@@ -2063,6 +2067,22 @@ def sweep_cash() -> dict:
                          f"(idle ${cash_usd:,.0f} -> target SGOV ${target_usd:,.0f})")
         log.info("ib_exec: %s", status["log"])
         return status
+    # ADDED 2026-09-22: guard against ghost order flood. Without this, every cycle places
+    # a new MARKET BUY that IB silently accepts but never fills (confirmed live: 160 identical
+    # orders in one session). Check: (1) existing pending SGOV order, (2) cooldown timer.
+    global _sweep_last_order_ts
+    now_mono = time.monotonic()
+    if now_mono - _sweep_last_order_ts < CASH_SWEEP_COOLDOWN_SEC:
+        remaining = int(CASH_SWEEP_COOLDOWN_SEC - (now_mono - _sweep_last_order_ts))
+        status["log"] = f"cash-sweep: cooldown {remaining}s, skipping"
+        return status
+    try:
+        pending_syms = ib_client.broker_open_order_symbols()
+        if pending_syms is not None and SGOV_SYMBOL in pending_syms:
+            status["log"] = f"cash-sweep: pending {SGOV_SYMBOL} order already live, skipping"
+            return status
+    except Exception:                                  # noqa: BLE001
+        pass                                           # if we can't check, proceed (fail-open)
     import ib_async
 
     def _send():
@@ -2077,6 +2097,7 @@ def sweep_cash() -> dict:
     except Exception as e:                         # noqa: BLE001
         status["log"] = f"cash-sweep: order failed ({e})"
         return status
+    _sweep_last_order_ts = time.monotonic()        # start cooldown after successful submission
     status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
     status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
     status["log"] = (status["log"] + f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
