@@ -2468,48 +2468,70 @@ def today_pnl_panel() -> None:
 
 
 def _render_daily_pnl_chart(history: list, ccy: str) -> None:
-    """Render stacked bars (strategy/SGOV/interest deltas) + total P&L line, ex-cash."""
+    """Render stacked bars (strategy / interest / FX) + total P&L line, ex-cash.
+
+    All values are stored as ABSOLUTE snapshots.  Deltas are computed at render time.
+    Cash deposits/withdrawals are excluded from the NL delta by looking up the
+    cash_flows cache (keyed by date).  SGOV market-value delta is excluded (it is a
+    cash transfer, not P&L); SGOV yield shows in the Interest bar via AccruedCash.
+    FX residual = adjusted_NL_delta − strategy_delta − interest_delta."""
     from nicegui import ui as _ui
-    # Parse absolute snapshots; strategy is already a daily delta, others are absolutes
+    from dashboard.core import store as _store
+    from datetime import date as _date
+
     rows = []
     for entry in history[-30:]:
         ts = entry[0]
         date_str = entry[1]
-        strategy_pnl = float(entry[2]) if len(entry) > 2 else 0.0
-        sgov_abs = float(entry[3]) if len(entry) > 3 else 0.0
+        strategy_abs = float(entry[2]) if len(entry) > 2 else 0.0
         interest_abs = float(entry[4]) if len(entry) > 4 else 0.0
         nl_abs = float(entry[5]) if len(entry) > 5 else 0.0
-        rows.append((date_str, strategy_pnl, sgov_abs, interest_abs, nl_abs))
+        rows.append((date_str, strategy_abs, interest_abs, nl_abs))
 
-    dates, strategy_d, sgov_d, interest_d, total_d = [], [], [], [], []
-    for i, (date_str, strat, sgov, intr, nl) in enumerate(rows):
+    # Map cash flows to date strings so we can exclude same-day deposits.
+    flows_raw, _ = _store.cache_get("cash_flows")
+    cash_by_date: dict[str, float] = {}
+    for f in (flows_raw or []):
+        try:
+            d = _date.fromtimestamp(int(f[0])).isoformat()
+        except Exception:
+            continue
+        cash_by_date[d] = cash_by_date.get(d, 0.0) + float(f[1])
+
+    dates, strategy_d, interest_d, fx_d, total_d = [], [], [], [], []
+    for i, (date_str, strat, intr, nl) in enumerate(rows):
         dates.append(date_str[-5:])
-        # Day-over-day deltas for SGOV and interest (absolute snapshots -> deltas)
-        sgov_delta = sgov - rows[i - 1][2] if i > 0 else 0.0
-        intr_delta = intr - rows[i - 1][3] if i > 0 else 0.0
-        nl_delta = nl - rows[i - 1][4] if i > 0 else 0.0
-        # FX residual = NL change - strategy - SGOV delta - interest delta
-        # (absorbs currency fluctuation; cash deposits excluded by design)
-        fx_resid = nl_delta - strat - sgov_delta - intr_delta
-        total = strat + sgov_delta + intr_delta + fx_resid
-        strategy_d.append(round(strat, 2))
-        sgov_d.append(round(sgov_delta, 2))
+        if i == 0:
+            strategy_d.append(0.0)
+            interest_d.append(0.0)
+            fx_d.append(0.0)
+            total_d.append(0.0)
+            continue
+        prev = rows[i - 1]
+        strat_delta = strat - prev[1]
+        intr_delta = intr - prev[2]
+        nl_delta = nl - prev[3]
+        cash_today = cash_by_date.get(date_str, 0.0)
+        adj_nl_delta = nl_delta - cash_today
+        fx_resid = adj_nl_delta - strat_delta - intr_delta
+        strategy_d.append(round(strat_delta, 2))
         interest_d.append(round(intr_delta, 2))
-        total_d.append(round(total, 2))
+        fx_d.append(round(fx_resid, 2))
+        total_d.append(round(adj_nl_delta, 2))
 
     option = {
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "legend": {"data": ["Strategy", "SGOV", "Interest", "Total"], "bottom": 0},
+        "legend": {"data": ["Strategy", "Interest", "FX", "Total"], "bottom": 0},
         "grid": {"left": "3%", "right": "4%", "bottom": "15%", "top": "10%", "containLabel": True},
         "xAxis": {"type": "category", "data": dates},
         "yAxis": {"type": "value", "name": f"{ccy} daily P&L"},
         "series": [
             {"name": "Strategy", "type": "bar", "stack": "total", "data": strategy_d,
              "itemStyle": {"color": "#3B82F6"}},
-            {"name": "SGOV", "type": "bar", "stack": "total", "data": sgov_d,
-             "itemStyle": {"color": "#10B981"}},
             {"name": "Interest", "type": "bar", "stack": "total", "data": interest_d,
              "itemStyle": {"color": "#F59E0B"}},
+            {"name": "FX", "type": "bar", "stack": "total", "data": fx_d,
+             "itemStyle": {"color": "#8B5CF6"}},
             {"name": "Total", "type": "line", "data": total_d,
              "itemStyle": {"color": "#1F2937"}, "lineStyle": {"width": 2},
              "symbol": "circle", "symbolSize": 4},

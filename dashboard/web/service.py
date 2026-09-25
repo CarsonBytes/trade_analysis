@@ -543,7 +543,11 @@ def compute_today_pnl() -> dict:
 
 
 def record_daily_pnl_snapshot() -> None:
-    """Record a daily P&L snapshot for historical tracking. Called from refresh_cheap()."""
+    """Record a daily P&L snapshot for historical tracking. Called from refresh_cheap().
+
+    Stores RAW values (NL, strategy unrealised, interest, SGOV) as absolute snapshots.
+    Cash-flow exclusion and delta computation happen at *render* time in the chart so
+    that a new deposit doesn't retroactively break historical entries."""
     try:
         import time as _time
         now_ts = _time.time()
@@ -571,18 +575,12 @@ def record_daily_pnl_snapshot() -> None:
         daily_hist, _ = store.cache_get("daily_pnl_history")
         daily_hist = daily_hist or []
 
-        # Exclude cash deposits/withdrawals from NL so the 30-day history shows
-        # pure trading P&L. cash_flows = [[ts, amount, ccy], ...].
-        flows, _ = store.cache_get("cash_flows")
-        net_flows = sum(f[1] for f in (flows or []))
-        nl_ex_cash = float(nl) - net_flows
-
         entry_date = today_date.isoformat()
         entry = [now_ts, entry_date,
                  round(unrealized_usd * usd_to_base, 2),
                  round(sgov_now, 2),
                  round(accrued * usd_to_base, 2),
-                 round(nl_ex_cash, 2)]
+                 round(float(nl), 2)]
 
         if daily_hist and daily_hist[-1][1] == entry_date:
             daily_hist[-1] = entry
