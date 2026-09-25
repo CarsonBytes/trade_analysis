@@ -463,16 +463,16 @@ def compute_today_pnl() -> dict:
         cash_change = 0.0
         if cash_now is not None and cash_start is not None:
             cash_change = cash_now - cash_start
-        # Subtract cash change (deposits/withdrawals excluded from P&L)
-        # The detect_external_cash_flow logic in equity_history already excludes
-        # large deposits, but small cash movements (dividends, small adjustments) remain
-        fx_impact = total_equity_change - strategy_total - sgov_pnl - interest_daily
+        # Exclude cash deposits/withdrawals from P&L -- only trading performance counts.
+        trading_change = total_equity_change - cash_change
+        # FX = residual after removing strategy + SGOV + interest from the trading change
+        fx_impact = trading_change - strategy_total - sgov_pnl - interest_daily
         # If we used GPV-estimate for strategy, FX should be near-zero (GPV is already in HKD)
         # If we used broker positions (USD->HKD), FX reflects actual currency fluctuation
         out["fx"] = {"impact": round(fx_impact, 2)}
 
-        # --- total ---
-        pnl = total_equity_change
+        # --- total (excludes cash deposits/withdrawals) ---
+        pnl = trading_change
         pct = (pnl / equity_start * 100.0) if equity_start and equity_start > 0 else 0.0
         out["total"] = {
             "equity_start": round(equity_start, 2) if equity_start is not None else 0.0,
@@ -494,6 +494,41 @@ def compute_today_pnl() -> dict:
                 {"label": "FX", "value": round(fx_impact, 2),
                  "pct": round(fx_impact / total_abs * 100, 1)},
             ]
+
+        # --- per-position today P&L ---
+        _day_snap_data, _ = store.cache_get("position_day_open")
+        _day_snap_date = (_day_snap_data or {}).get("date") if _day_snap_data else None
+        _day_snap = (_day_snap_data or {}).get("snap", {})
+        _today_str = today_date.isoformat()
+        per_pos = []
+        if _day_snap_date == _today_str and _day_snap and positions:
+            for _pid, _p in positions.items():
+                _sym = _p.get("symbol", "?")
+                _dir = _p.get("direction", "long")
+                _entry = _p.get("open", 0)
+                _now_px = _p.get("current_price")
+                _vol = _p.get("volume", 0)
+                _s = _day_snap.get(str(_pid))
+                if _s and _now_px and _s.get("price"):
+                    _open_px = _s["price"]
+                    _day_chg = ((_now_px - _open_px) / _open_px * 100) if _open_px else 0
+                    _day_pnl_usd = (_now_px - _open_px) * _vol if _dir == "long" \
+                        else (_open_px - _now_px) * _vol
+                    _day_pnl = _day_pnl_usd * usd_to_base
+                    per_pos.append({
+                        "symbol": _sym, "direction": _dir,
+                        "entry": _entry, "current": _now_px,
+                        "day_chg_pct": round(_day_chg, 2),
+                        "day_pnl": round(_day_pnl, 2),
+                    })
+                else:
+                    per_pos.append({
+                        "symbol": _sym, "direction": _dir,
+                        "entry": _entry, "current": _now_px,
+                        "day_chg_pct": None, "day_pnl": None,
+                    })
+            per_pos.sort(key=lambda x: abs(x.get("day_pnl") or 0), reverse=True)
+        out["per_position_today"] = per_pos
 
         # --- 30-day history ---
         daily_hist, _ = store.cache_get("daily_pnl_history")
@@ -536,12 +571,18 @@ def record_daily_pnl_snapshot() -> None:
         daily_hist, _ = store.cache_get("daily_pnl_history")
         daily_hist = daily_hist or []
 
+        # Exclude cash deposits/withdrawals from NL so the 30-day history shows
+        # pure trading P&L. cash_flows = [[ts, amount, ccy], ...].
+        flows, _ = store.cache_get("cash_flows")
+        net_flows = sum(f[1] for f in (flows or []))
+        nl_ex_cash = float(nl) - net_flows
+
         entry_date = today_date.isoformat()
         entry = [now_ts, entry_date,
                  round(unrealized_usd * usd_to_base, 2),
                  round(sgov_now, 2),
                  round(accrued * usd_to_base, 2),
-                 round(float(nl), 2)]
+                 round(nl_ex_cash, 2)]
 
         if daily_hist and daily_hist[-1][1] == entry_date:
             daily_hist[-1] = entry
@@ -658,6 +699,26 @@ def refresh_cheap() -> None:
         _pos = broker.live_positions()                 # None on connection failure
         if _pos is not None:                           # keep last-good on a failed read
             STATE["positions"] = _pos
+            # Snapshot each position's price at start-of-day for today's P&L breakdown.
+            # Only writes ONCE per calendar day (checked via cache timestamp).
+            try:
+                import time as _snap_t
+                _today_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+                _existing, _ets = store.cache_get("position_day_open")
+                _existing_date = (_existing or {}).get("date") if _existing else None
+                if _existing_date != _today_str:
+                    _snap = {}
+                    for _pid, _p in _pos.items():
+                        _px = _p.get("current_price")
+                        if _px and _px > 0:
+                            _snap[str(_pid)] = {"price": _px, "qty": _p.get("volume", 0),
+                                                 "dir": _p.get("direction", "long")}
+                    if _snap:
+                        store.cache_set("position_day_open", {"date": _today_str, "snap": _snap})
+                        log.info("position_day_open: snapshotted %d positions for %s",
+                                 len(_snap), _today_str)
+            except Exception as _snap_err:
+                log.debug("position_day_open snapshot error: %s", _snap_err)
     except Exception as e:
         log.debug("live_positions error: %s", e)
     _refresh_pending_ticks()
@@ -1000,16 +1061,14 @@ def refresh_cheap() -> None:
     # park idle cash in SGOV (opt-in CASH_SWEEP=1); strategy always keeps a buffer
     try:
         _cs = broker.sweep_cash()
-        # ALWAYS update STATE so failures show in the dashboard (not just the last ok=True
-        # snapshot).  ok=False with a non-empty log means something went wrong -- surface
-        # it at WARNING so the operator can see it, instead of silently showing stale data.
         if _cs.get("enabled") is False or _cs.get("ok"):
             STATE["cash_sweep"] = _cs
         elif _cs.get("log"):
-            STATE["cash_sweep"] = _cs
+            # On failure, keep last-good STATE so the pie chart retains SGOV position data;
+            # only log the warning for operator visibility.
             log.warning("cash sweep failed: %s", _cs["log"])
     except Exception as e:
-        log.debug("cash sweep error: %s", e)
+        log.warning("cash sweep exception: %s", e)
     # current short-term T-bill rate (^IRX) = live SGOV-yield proxy; refreshed ~daily
     try:
         import time as _t3

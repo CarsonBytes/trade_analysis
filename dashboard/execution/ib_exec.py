@@ -2001,13 +2001,17 @@ def sweep_cash() -> dict:
               "ccy": "", "log": ""}
     if not _sweep_on():
         return status
+    log.info("cash-sweep: cycle start")
     ib = _guard()
     if ib is None:
+        status["log"] = "cash-sweep: broker unreachable"
+        log.warning("cash-sweep: %s", status["log"])
         return status
     acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
     contract = ib_client.stock_contract(SGOV_SYMBOL)
     if contract is None:
         status["log"] = "cash-sweep: SGOV contract unavailable, retry"
+        log.warning("cash-sweep: %s", status["log"])
         return status
     con_id = getattr(contract, "conId", 0)
 
@@ -2032,6 +2036,7 @@ def sweep_cash() -> dict:
     status["sgov_qty"] = sgov_qty
     status["sgov_value_base"] = sgov_usd * base_per_usd
     if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
+        log.info("cash-sweep: account summary unavailable, skipping rebalance")
         return status                                            # SGOV value, skip rebalancing
     # ADDED 2026-08-27: SGOV is a US-listed ETF -- placing MARKET orders when NYSE is
     # closed just fails/retries every 30s tick. The read-only reporting above (SGOV qty,
@@ -2039,11 +2044,13 @@ def sweep_cash() -> dict:
     # only the order placement below is skipped.
     if not within_entry_execution_window():
         status["log"] = "cash-sweep: market closed, rebalance deferred to next US session"
+        log.info("cash-sweep: %s", status["log"])
         return status
     nav_usd = float(summ.get("NetLiquidation", 0.0) or 0.0) / base_per_usd
     if nav_usd < CASH_SWEEP_MIN_NAV_USD:
         status["log"] = (f"cash-sweep: paused until NAV reaches ${CASH_SWEEP_MIN_NAV_USD:,.0f} "
                          f"(currently ~${nav_usd:,.0f}) -- T+1 friction isn't worth it yet")
+        log.info("cash-sweep: %s", status["log"])
         return status                                            # SGOV value already reported above
     cash_usd = float(summ["TotalCashValue"]) / base_per_usd
 
@@ -2056,10 +2063,14 @@ def sweep_cash() -> dict:
     target_usd = investable * CASH_SWEEP_TARGET
     delta_usd = target_usd - sgov_usd
     if abs(delta_usd) < CASH_SWEEP_MIN_USD:
+        status["log"] = f"cash-sweep: delta ${abs(delta_usd):,.0f} < ${CASH_SWEEP_MIN_USD:,.0f} min"
+        log.info("cash-sweep: %s", status["log"])
         return status
     shares = int(delta_usd // px) if delta_usd > 0 else -int((-delta_usd) // px)
     shares = max(-int(sgov_qty), shares)          # never sell more SGOV than we hold
     if shares == 0:
+        status["log"] = f"cash-sweep: shares=0 (delta={delta_usd:.0f}, px={px:.2f})"
+        log.info("cash-sweep: %s", status["log"])
         return status
     action, qty = ("BUY", shares) if shares > 0 else ("SELL", -shares)
     if os.environ.get("CASH_SWEEP_DRYRUN", "").lower() in ("1", "true", "yes"):
@@ -2075,11 +2086,13 @@ def sweep_cash() -> dict:
     if now_mono - _sweep_last_order_ts < CASH_SWEEP_COOLDOWN_SEC:
         remaining = int(CASH_SWEEP_COOLDOWN_SEC - (now_mono - _sweep_last_order_ts))
         status["log"] = f"cash-sweep: cooldown {remaining}s, skipping"
+        log.info("cash-sweep: %s", status["log"])
         return status
     try:
         pending_syms = ib_client.broker_open_order_symbols()
         if pending_syms is not None and SGOV_SYMBOL in pending_syms:
             status["log"] = f"cash-sweep: pending {SGOV_SYMBOL} order already live, skipping"
+            log.info("cash-sweep: %s", status["log"])
             return status
     except Exception:                                  # noqa: BLE001
         pass                                           # if we can't check, proceed (fail-open)

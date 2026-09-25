@@ -2361,7 +2361,7 @@ def _sort_active(items: list, get_trade, get_pos, real_qty_by_id: dict) -> list:
 
 @ui.refreshable
 def today_pnl_panel() -> None:
-    """Today's P&L breakdown: strategy, SGOV, interest, FX with expandable detail."""
+    """Today's P&L breakdown: strategy, SGOV, interest, FX (footnote), per-position today."""
     from dashboard.web import service as _svc
     data = _svc.compute_today_pnl()
     if not data or data.get("total", {}).get("pnl") is None:
@@ -2373,8 +2373,8 @@ def today_pnl_panel() -> None:
     sgov = data.get("sgov", {})
     interest = data.get("interest", {})
     fx = data.get("fx", {})
-    breakdown = data.get("breakdown", [])
-    positions = service.STATE.get("positions") or {}
+    per_pos = data.get("per_position_today", [])
+    equity_start = total.get("equity_start", 0)
 
     def _money(x):
         return f"{ccy} {x:,.0f}"
@@ -2384,98 +2384,135 @@ def today_pnl_panel() -> None:
     color = "text-green" if pnl >= 0 else "text-red"
 
     with ui.card().classes("w-full"):
+        # --- header ---
         with ui.row().classes("items-center gap-3"):
             ui.label("Today's P&L").classes("text-sm font-bold text-grey-7")
             ui.label(f"{_money(pnl)} ({pct:+.2f}%)").classes(f"text-lg font-bold {color}")
-            if total.get("equity_start"):
-                ui.label(f"from {_money(total['equity_start'])}").classes("text-xs text-grey-5")
+            if equity_start:
+                ui.label(f"from {_money(equity_start)}").classes("text-xs text-grey-5")
 
-        # breakdown lines
+        # --- breakdown lines ---
         with ui.column().classes("gap-0"):
-            for item in breakdown:
-                val = item.get("value", 0)
-                lbl = item.get("label", "")
-                item_color = "text-green" if val >= 0 else "text-red"
-                icon = "trending_up" if val >= 0 else "trending_down" if val < 0 else "remove"
+            s_u = strategy.get("unrealized", 0)
+            s_r = strategy.get("realized", 0)
+            for val, lbl in [
+                (s_u, "Strategy (unrealized)"),
+                (s_r, "Strategy (realized)"),
+                (sgov.get("pnl", 0), "SGOV yield"),
+                (interest.get("daily", 0), "Interest"),
+            ]:
+                if val == 0:
+                    continue
+                ic = "text-green" if val >= 0 else "text-red"
+                icon = "trending_up" if val >= 0 else "trending_down"
                 with ui.row().classes("items-center gap-2"):
                     ui.icon(icon, color="green" if val >= 0 else "red").classes("text-sm")
-                    ui.label(f"{lbl}:").classes("text-xs text-grey-6 w-16")
-                    ui.label(f"{_money(val)}").classes(f"text-xs font-bold {item_color}")
+                    ui.label(f"{lbl}:").classes("text-xs text-grey-6 w-40")
+                    ui.label(f"{_money(val)}").classes(f"text-xs font-bold {ic}")
 
-        # expandable per-position detail
-        with ui.expansion("Per-position detail", icon="expand_more").classes("w-full"):
-            with ui.column().classes("w-full gap-1"):
-                with ui.row().classes("w-full text-xs font-bold text-grey-6 px-2"):
-                    ui.label("Symbol").classes("w-16")
-                    ui.label("Dir").classes("w-8")
-                    ui.label("Entry").classes("w-16 text-right")
-                    ui.label("Current").classes("w-16 text-right")
-                    ui.label("Change").classes("w-16 text-right")
-                    ui.label(f"P&L ({ccy})").classes("w-20 text-right")
-                for pid, pos in sorted(positions.items(),
-                                        key=lambda x: abs(x[1].get("profit", 0)), reverse=True):
-                    sym = pos.get("symbol", "?")
-                    direction = pos.get("direction", "long")
-                    entry = pos.get("open", 0)
-                    current = pos.get("current_price", 0)
-                    profit_usd = pos.get("profit", 0)
-                    fx_usd = service.STATE.get("fx_usd_per_base")
-                    from dashboard.data import ib_client as _ibc
-                    usd_to_base = 1.0 / (fx_usd or _ibc._PEG_USD_PER.get(ccy, 1.0))
-                    pnl_val = profit_usd * usd_to_base
-                    change_pct = ((current - entry) / entry * 100) if entry else 0
-                    p_color = "text-green" if pnl_val >= 0 else "text-red"
-                    with ui.row().classes("w-full text-xs px-2"):
-                        ui.label(sym).classes("w-16 font-bold")
-                        ui.label("L" if direction == "long" else "S").classes("w-8")
-                        ui.label(f"{entry:.2f}").classes("w-16 text-right text-grey-6")
-                        ui.label(f"{current:.2f}").classes("w-16 text-right")
-                        ui.label(f"{change_pct:+.1f}%").classes(f"w-16 text-right {p_color}")
-                        ui.label(f"{pnl_val:+,.0f}").classes(f"w-20 text-right font-bold {p_color}")
+            # subtotal (everything except FX)
+            sub = s_u + s_r + sgov.get("pnl", 0) + interest.get("daily", 0)
+            with ui.row().classes("items-center gap-2 border-t border-grey-3 mt-1 pt-1"):
+                ui.label("Subtotal:").classes("text-xs font-bold text-grey-6 w-40")
+                sub_c = "text-green" if sub >= 0 else "text-red"
+                ui.label(f"{_money(sub)}").classes(f"text-xs font-bold {sub_c}")
 
-        # 30-day bar chart
+            # FX footnote — only shown when significant
+            fx_val = fx.get("impact", 0)
+            if equity_start and abs(fx_val) > abs(equity_start) * 0.0005:
+                fx_c = "text-green" if fx_val >= 0 else "text-red"
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("~").classes("text-xs text-grey-4 w-40 text-right")
+                    ui.label(f"FX (HKD/USD): {_money(fx_val)}").classes(
+                        f"text-xs {fx_c} text-grey-4")
+
+        # --- per-position today ---
+        if per_pos:
+            with ui.expansion(f"Positions today ({len(per_pos)})", icon="expand_more").classes("w-full"):
+                with ui.column().classes("w-full gap-1"):
+                    with ui.row().classes("w-full text-xs font-bold text-grey-6 px-2"):
+                        ui.label("Symbol").classes("w-16")
+                        ui.label("Dir").classes("w-8")
+                        ui.label("Entry").classes("w-16 text-right")
+                        ui.label("Current").classes("w-16 text-right")
+                        ui.label("Day Chg").classes("w-16 text-right")
+                        ui.label(f"Day P&L ({ccy})").classes("w-20 text-right")
+                    for pos in per_pos:
+                        sym = pos["symbol"]
+                        d = "L" if pos["direction"] == "long" else "S"
+                        entry = pos.get("entry", 0)
+                        cur = pos.get("current") or 0
+                        dchg = pos.get("day_chg_pct")
+                        dpnl = pos.get("day_pnl")
+                        dc = "text-green" if (dpnl or 0) >= 0 else "text-red"
+                        arrow = "▲" if (dchg or 0) > 0 else "▼" if (dchg or 0) < 0 else ""
+                        with ui.row().classes("w-full text-xs px-2"):
+                            ui.label(sym).classes("w-16 font-bold")
+                            ui.label(d).classes("w-8")
+                            ui.label(f"{entry:.2f}").classes("w-16 text-right text-grey-6")
+                            ui.label(f"{cur:.2f}" if cur else "—").classes("w-16 text-right")
+                            if dchg is not None:
+                                ui.label(f"{arrow} {dchg:+.1f}%").classes(f"w-16 text-right {dc}")
+                            else:
+                                ui.label("—").classes("w-16 text-right text-grey-4")
+                            if dpnl is not None:
+                                ui.label(f"{dpnl:+,.0f}").classes(f"w-20 text-right font-bold {dc}")
+                            else:
+                                ui.label("—").classes("w-20 text-right text-grey-4")
+
+        # 30-day P&L bar chart
         history = data.get("history_30d", [])
         if history and len(history) > 1:
-            with ui.expansion("30-day history", icon="show_chart").classes("w-full"):
+            with ui.expansion("30-day P&L", icon="show_chart").classes("w-full"):
                 _render_daily_pnl_chart(history, ccy)
 
 
 def _render_daily_pnl_chart(history: list, ccy: str) -> None:
-    """Render a stacked bar chart of daily P&L components over 30 days."""
+    """Render stacked bars (strategy/SGOV/interest deltas) + total P&L line, ex-cash."""
     from nicegui import ui as _ui
-    dates = []
-    strategy_vals = []
-    sgov_vals = []
-    interest_vals = []
-    fx_vals = []
+    # Parse absolute snapshots; strategy is already a daily delta, others are absolutes
+    rows = []
     for entry in history[-30:]:
         ts = entry[0]
         date_str = entry[1]
-        strategy_pnl = entry[2] if len(entry) > 2 else 0
-        sgov_val = entry[3] if len(entry) > 3 else 0
-        interest_val = entry[4] if len(entry) > 4 else 0
-        total_val = entry[5] if len(entry) > 5 else 0
-        fx_val = total_val - strategy_pnl - sgov_val - interest_val
+        strategy_pnl = float(entry[2]) if len(entry) > 2 else 0.0
+        sgov_abs = float(entry[3]) if len(entry) > 3 else 0.0
+        interest_abs = float(entry[4]) if len(entry) > 4 else 0.0
+        nl_abs = float(entry[5]) if len(entry) > 5 else 0.0
+        rows.append((date_str, strategy_pnl, sgov_abs, interest_abs, nl_abs))
+
+    dates, strategy_d, sgov_d, interest_d, total_d = [], [], [], [], []
+    for i, (date_str, strat, sgov, intr, nl) in enumerate(rows):
         dates.append(date_str[-5:])
-        strategy_vals.append(round(strategy_pnl, 2))
-        sgov_vals.append(round(sgov_val, 2))
-        interest_vals.append(round(interest_val, 2))
-        fx_vals.append(round(fx_val, 2))
+        # Day-over-day deltas for SGOV and interest (absolute snapshots -> deltas)
+        sgov_delta = sgov - rows[i - 1][2] if i > 0 else 0.0
+        intr_delta = intr - rows[i - 1][3] if i > 0 else 0.0
+        nl_delta = nl - rows[i - 1][4] if i > 0 else 0.0
+        # FX residual = NL change - strategy - SGOV delta - interest delta
+        # (absorbs currency fluctuation; cash deposits excluded by design)
+        fx_resid = nl_delta - strat - sgov_delta - intr_delta
+        total = strat + sgov_delta + intr_delta + fx_resid
+        strategy_d.append(round(strat, 2))
+        sgov_d.append(round(sgov_delta, 2))
+        interest_d.append(round(intr_delta, 2))
+        total_d.append(round(total, 2))
+
     option = {
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "legend": {"data": ["Strategy", "SGOV", "Interest", "FX"], "bottom": 0},
+        "legend": {"data": ["Strategy", "SGOV", "Interest", "Total"], "bottom": 0},
         "grid": {"left": "3%", "right": "4%", "bottom": "15%", "top": "10%", "containLabel": True},
         "xAxis": {"type": "category", "data": dates},
-        "yAxis": {"type": "value", "name": ccy},
+        "yAxis": {"type": "value", "name": f"{ccy} daily P&L"},
         "series": [
-            {"name": "Strategy", "type": "bar", "stack": "total", "data": strategy_vals,
+            {"name": "Strategy", "type": "bar", "stack": "total", "data": strategy_d,
              "itemStyle": {"color": "#3B82F6"}},
-            {"name": "SGOV", "type": "bar", "stack": "total", "data": sgov_vals,
+            {"name": "SGOV", "type": "bar", "stack": "total", "data": sgov_d,
              "itemStyle": {"color": "#10B981"}},
-            {"name": "Interest", "type": "bar", "stack": "total", "data": interest_vals,
+            {"name": "Interest", "type": "bar", "stack": "total", "data": interest_d,
              "itemStyle": {"color": "#F59E0B"}},
-            {"name": "FX", "type": "bar", "stack": "total", "data": fx_vals,
-             "itemStyle": {"color": "#EF4444"}},
+            {"name": "Total", "type": "line", "data": total_d,
+             "itemStyle": {"color": "#1F2937"}, "lineStyle": {"width": 2},
+             "symbol": "circle", "symbolSize": 4},
         ],
     }
     _ui.echart(option).classes("w-full h-48")
