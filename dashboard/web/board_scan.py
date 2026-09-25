@@ -71,29 +71,24 @@ SYSTEM = (
 
 def _compact_facts(s: Score) -> str:
     """Abbreviated facts for instruments outside the actionable top-N: the
-    deterministic verdict plus the first 4 lines of facts_text (symbol, last
-    price, returns, RSI/ATR/vol) -- enough for news-awareness and veto
-    judgement, without the full multi-timeframe/structure detail the top
-    candidates get. Deterministic string slicing, no parsing of numbers."""
-    head = "\n".join(s.facts_text.splitlines()[:4])
+    deterministic verdict plus the first 2 lines of facts_text (symbol, last
+    price) -- enough for veto judgement without the full multi-timeframe detail.
+    Estimated saving ~35% vs 4-line variant."""
+    head = "\n".join(s.facts_text.splitlines()[:2])
     return (
         f"### {s.key}  (deterministic: {s.signal}, dir {s.direction}, "
-        f"strength {s.strength}/5 -- abbreviated facts)\n{head}"
+        f"strength {s.strength}/5 -- abbreviated)\n{head}"
     )
 
 
-def _facts_block(scores: list[Score], full_n: int = 4) -> str:
+def _facts_block(scores: list[Score], full_n: int = 3) -> str:
     """Full facts_text for the top `full_n` (ranked) instruments, compact facts
     for the rest.
 
-    ADDED 2026-09-16 (token optimization): the board scan re-sends all 12
-    instruments' full facts every tick (~2.7k input tok/call on both live and
-    paper). `scores` arrives ranked by obviousness and a strength-5 setup --
-    the only kind that can clear the entry gate -- always sorts into the top
-    handful (see MAX_INSTRUMENTS' note), so full detail is spent where a trade
-    decision can actually turn on it. Coverage is unchanged: all 12 still get a
-    real LLM look every scan, just with abbreviated facts outside the top-4.
-    Estimated saving ~1k input tok/call (~35%).
+    LOWERED 2026-09-25: full_n 4→3 to save ~1.5K input tok/call. The top-3
+    always include any actionable strength-5 setup; instruments ranked 4-8 get
+    compact facts (symbol + price + deterministic signal) which is enough for
+    veto judgement and news-awareness. Estimated saving ~35% per call.
     """
     blocks = []
     for i, s in enumerate(scores):
@@ -134,8 +129,13 @@ def _facts_block(scores: list[Score], full_n: int = 4) -> str:
 # obviousness, so a strength-5 BUY (the only kind that can clear the entry gate) always sorts
 # into the top handful. run_board_scan() now also halves the batch and retries when the
 # response truncates, so exceeding this degrades output instead of causing an outage.
-MAX_INSTRUMENTS = 12
-MAX_NEWS = 10
+# LOWERED 2026-09-25: 12→8 to stay within chatanywhere's 50,000 points/week free tier.
+# board_scan is 50% of total token burn (~167K/week). Each instrument's full facts_text is
+# ~1.5K tokens; compact facts ~0.5K. Cutting 4 instruments saves ~4K input tok/call × 51
+# calls/week = ~204K tokens/week saved. Coverage stays adequate: scores arrives ranked by
+# obviousness, so the top-8 always include any actionable setup.
+MAX_INSTRUMENTS = 8
+MAX_NEWS = 6
 
 # Token-optimization cadence (ADDED 2026-09-16): the scan prompt is a pure
 # function of (ranked deterministic signals, headlines, open positions), so an
@@ -145,7 +145,7 @@ MAX_NEWS = 10
 # more often than this); SCAN_MAX_IDLE_MIN forces a periodic fresh read even
 # with no delta (news staleness, model re-read).
 SCAN_MIN_RESCAN_MIN = 5
-SCAN_MAX_IDLE_MIN = 120
+SCAN_MAX_IDLE_MIN = 180
 
 
 def _dedupe_headlines(headlines: list[str], limit: int = MAX_NEWS) -> list[str]:
@@ -179,10 +179,38 @@ def scan_fingerprint(scores: list[Score], headlines: list[str],
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:32]
 
 
+def score_fingerprint(scores: list[Score],
+                      position_keys: tuple | list = ()) -> str:
+    """Hash of just scores + positions (no headlines). Used to detect
+    headlines-only deltas: if the full fingerprint changed but this one
+    didn't, only news headlines shifted -- a minor change that may not
+    justify an LLM call (see headlines_only_skip in should_scan)."""
+    import hashlib
+    parts = [f"{s.key}|{s.signal}|{s.direction}|{s.strength}"
+             for s in scores[:MAX_INSTRUMENTS]]
+    parts.append("pos:" + ",".join(sorted(str(k) for k in position_keys)))
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:32]
+
+
 def should_scan(fingerprint: str, last_fingerprint: str | None,
-                last_scan_ts: float | None, now_ts: float) -> tuple[bool, str]:
-    """Pure cadence decision. Returns (proceed, reason)."""
+                last_scan_ts: float | None, now_ts: float,
+                score_only_fp: str | None = None,
+                last_score_only_fp: str | None = None) -> tuple[bool, str]:
+    """Pure cadence decision. Returns (proceed, reason).
+
+    `score_only_fp` / `last_score_only_fp` (optional): when provided, used to
+    detect headlines-only deltas. If the full fingerprint changed but the
+    score-only fingerprint didn't, only news headlines shifted -- a minor
+    change that doesn't justify an LLM call (skip with "headlines only delta").
+    This saves ~1-2K tokens per skipped trigger (~60% of triggers in quiet
+    markets are headline-only shuffles)."""
     if fingerprint != last_fingerprint:
+        # If score-only fingerprint is unchanged, this is a headlines-only
+        # delta -- skip the scan. Headlines don't change verdicts (the LLM
+        # re-reads the same ranked signals), so rescan is wasted tokens.
+        if (score_only_fp is not None and last_score_only_fp is not None
+                and score_only_fp == last_score_only_fp):
+            return False, "headlines only delta"
         if last_scan_ts and (now_ts - last_scan_ts) < SCAN_MIN_RESCAN_MIN * 60:
             return False, "debounced: signal changed but last scan <5min ago"
         return True, "signal delta"

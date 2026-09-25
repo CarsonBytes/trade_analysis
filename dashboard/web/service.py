@@ -1551,14 +1551,18 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     now_ts = _t.time()
     env = usage_log._resolve_environment()
     fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], _position_keys())
+    sfp = board_scan.score_fingerprint(ranked, _position_keys())
     last_fp, _ = store.cache_get("llm_scan_fingerprint")
+    last_sfp, _ = store.cache_get("llm_score_fingerprint")
     last_scan_raw, _ = store.cache_get("llm_scan_ts")
     try:
         last_scan_ts = float(last_scan_raw) if last_scan_raw else None
     except (TypeError, ValueError):
         last_scan_ts = None
     if not force:
-        proceed, reason = board_scan.should_scan(fp, last_fp, last_scan_ts, now_ts)
+        proceed, reason = board_scan.should_scan(fp, last_fp, last_scan_ts, now_ts,
+                                                  score_only_fp=sfp,
+                                                  last_score_only_fp=last_sfp)
         if not proceed:
             status = f"skipped ({reason}) -- reusing last scan"
             STATE["last_status"] = status
@@ -1604,6 +1608,7 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         STATE["last_llm"] = _now()
         try:
             store.cache_set("llm_scan_fingerprint", fp)
+            store.cache_set("llm_score_fingerprint", sfp)
             store.cache_set("llm_scan_ts", now_ts)
         except Exception as e:
             log.warning("could not persist scan fingerprint: %s", e)

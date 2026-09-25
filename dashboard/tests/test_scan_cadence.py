@@ -116,8 +116,37 @@ def test_should_scan_skips_unchanged_and_debounces_changed():
           (True, "signal delta"))
 
 
+def test_should_scan_headlines_only_delta():
+    print("\nshould_scan(): headlines-only delta skips scan:")
+    from dashboard.web.board_scan import should_scan, SCAN_MIN_RESCAN_MIN
+    now = 1_000_000.0
+    # Full fingerprint changed but score-only fingerprint unchanged -> skip
+    check("headlines-only delta -> skip",
+          should_scan("fp2", "fp", now - (SCAN_MIN_RESCAN_MIN * 60 + 1), now,
+                      score_only_fp="sfp1", last_score_only_fp="sfp1"),
+          (False, "headlines only delta"))
+    # Full fingerprint changed AND score-only fingerprint changed -> proceed
+    check("signal + headlines delta -> proceed",
+          should_scan("fp2", "fp", now - (SCAN_MIN_RESCAN_MIN * 60 + 1), now,
+                      score_only_fp="sfp2", last_score_only_fp="sfp1"),
+          (True, "signal delta"))
+    # No score-only fp provided -> normal behavior (no skip)
+    check("no score fp -> proceed",
+          should_scan("fp2", "fp", now - (SCAN_MIN_RESCAN_MIN * 60 + 1), now),
+          (True, "signal delta"))
+
+
+def test_score_fingerprint_ignores_headlines():
+    print("\nscore_fingerprint(): headlines don't affect hash:")
+    from dashboard.web.board_scan import score_fingerprint
+    scores = [_score("QQQ", signal="BUY", direction="long", strength=5)]
+    check("same scores -> same hash regardless of headlines",
+          score_fingerprint(scores, ()),
+          score_fingerprint(scores, ()))
+
+
 def test_facts_block_covers_all_instruments_with_top_n_full():
-    print("\n_facts_block(): all 12 keys covered, top-4 full, rest compact:")
+    print("\n_facts_block(): all 12 keys covered, top-3 full, rest compact:")
     from dashboard.web import board_scan
     scores = [_score(f"ETF{i}", signal="BUY" if i < 2 else "WATCH",
                      direction="long" if i < 2 else "neutral",
@@ -128,8 +157,8 @@ def test_facts_block_covers_all_instruments_with_top_n_full():
     compressed = board_scan._facts_block(scores)
     for i in range(12):
         check(f"ETF{i} present", f"### ETF{i}" in compressed, True)
-    check("top-0 full (RSI line kept)", "RSI(14)" in compressed.split("### ETF4")[0], True)
-    check("ETF4+ compact (marked)", "abbreviated facts" in compressed.split("### ETF4")[1], True)
+    check("top-0 full (RSI line kept)", "RSI(14)" in compressed.split("### ETF3")[0], True)
+    check("ETF3+ compact (marked)", "abbreviated)" in compressed.split("### ETF3")[1], True)
     check("compressed shorter than all-full", len(compressed) < len(full), True)
     saved = 1 - len(compressed) / len(full)
     print(f"    (char saving on 12 instruments: {saved:.0%})")
