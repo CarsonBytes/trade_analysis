@@ -1535,6 +1535,26 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     explicit user click is always honoured, budget permitting.
     """
     cap = cap or STATE["cap"]
+    # T1: backoff-aware early exit -- if the provider is known-down (rate-limited
+    # or 7-day points exhausted), skip ALL work (fingerprint hashing, metrics
+    # logging, shared-cache reads) instead of falling through to run_board_scan()
+    # which would just return the same backoff message.  force=True (manual
+    # refresh) bypasses this too, same as the cadence gate below.
+    if not force:
+        backoff_raw, _ = store.cache_get(board_scan._RATE_LIMIT_BACKOFF_KEY)
+        if backoff_raw:
+            import datetime as _dt
+            try:
+                bo_dt = _dt.datetime.fromisoformat(backoff_raw)
+                if bo_dt.tzinfo is None:
+                    bo_dt = bo_dt.replace(tzinfo=_dt.timezone.utc)
+                if _dt.datetime.now(_dt.timezone.utc) < bo_dt:
+                    status = f"provider unavailable -- backing off until {backoff_raw[:16]}"
+                    STATE["last_status"] = status
+                    log.info("LLM board scan: %s", status)
+                    return status
+            except ValueError:
+                pass  # malformed -- proceed normally
     scores = list(STATE["scores"].values())
     if not scores:
         return "no data yet -- run a cheap refresh first"
@@ -1543,8 +1563,8 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     # pure function of (ranked signals, headlines, open positions) -- an
     # unchanged fingerprint means the LLM would re-read identical facts, so
     # skip the call and reuse the last scan. A CHANGED fingerprint is the
-    # event-driven trigger (debounced to >=5min between scans); an unchanged
-    # one still forces a fresh read at least every 2h. Every outcome -- scan,
+    # event-driven trigger (debounced to >=30min between scans); an unchanged
+    # one still forces a fresh read at least every 8h. Every outcome -- scan,
     # budget-block, or skip -- writes one scan_metrics row (the local ledger
     # for tok/call, calls/day, cost/day, agreement rate).
     import time as _t
@@ -1555,12 +1575,25 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     last_fp, _ = store.cache_get("llm_scan_fingerprint")
     last_sfp, _ = store.cache_get("llm_score_fingerprint")
     last_scan_raw, _ = store.cache_get("llm_scan_ts")
+    # T5: attempt timestamp -- updated on EVERY call to run_board_scan() (success
+    # or failure), not just success.  This lets should_scan() debounce failed
+    # attempts too, preventing the retry-storm pattern where fingerprint changes
+    # on every tick bypass the debounce because last_scan_ts (success-only) is stale.
+    last_attempt_raw, _ = store.cache_get("llm_scan_attempt_ts")
     try:
         last_scan_ts = float(last_scan_raw) if last_scan_raw else None
     except (TypeError, ValueError):
         last_scan_ts = None
+    try:
+        last_attempt_ts = float(last_attempt_raw) if last_attempt_raw else None
+    except (TypeError, ValueError):
+        last_attempt_ts = None
+    # Use the MORE RECENT of success and attempt timestamps for debounce.
+    effective_last_ts = last_scan_ts
+    if last_attempt_ts and (effective_last_ts is None or last_attempt_ts > effective_last_ts):
+        effective_last_ts = last_attempt_ts
     if not force:
-        proceed, reason = board_scan.should_scan(fp, last_fp, last_scan_ts, now_ts,
+        proceed, reason = board_scan.should_scan(fp, last_fp, effective_last_ts, now_ts,
                                                   score_only_fp=sfp,
                                                   last_score_only_fp=last_sfp)
         if not proceed:
@@ -1602,6 +1635,12 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
             result, status = run_board_scan(ranked, STATE["news"], cap=cap)
     else:
         result, status = run_board_scan(ranked, STATE["news"], cap=cap)
+    # T5: record attempt timestamp on EVERY call (success or failure) so
+    # should_scan() debounces failed attempts too.
+    try:
+        store.cache_set("llm_scan_attempt_ts", now_ts)
+    except Exception:
+        pass
     if result is not None:
         STATE["llm"] = {s.key: s for s in result.signals}
         STATE["macro_note"] = result.macro_note

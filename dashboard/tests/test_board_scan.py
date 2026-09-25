@@ -244,7 +244,7 @@ def test_max_instruments_is_small_enough_for_the_provider_tier():
     check("MAX_INSTRUMENTS <= 14 (the measured working size)",
           board_scan.MAX_INSTRUMENTS <= 14, True)
     check("MAX_INSTRUMENTS still big enough to cover the strong candidates",
-          board_scan.MAX_INSTRUMENTS >= 8, True)
+          board_scan.MAX_INSTRUMENTS >= 6, True)
 
 
 def test_truncated_response_retries_with_a_smaller_batch_instead_of_dying():
@@ -276,7 +276,7 @@ def test_truncated_response_retries_with_a_smaller_batch_instead_of_dying():
             result, status = board_scan.run_board_scan(scores, [])
 
         check("two attempts were made", len(sizes), 2)
-        check("first attempt used the full batch", sizes[0], 12)
+        check("first attempt used MAX_INSTRUMENTS", sizes[0], board_scan.MAX_INSTRUMENTS)
         check("retry used a SMALLER batch", sizes[1] < sizes[0], True)
         check("returned a usable result rather than raising", result is not None, True)
         check("no backoff was set -- the provider is fine",

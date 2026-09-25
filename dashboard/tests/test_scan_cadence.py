@@ -332,7 +332,7 @@ def test_heartbeat_blocked_paused_cached_never():
     check("backoff -> blocked", st["state"], "blocked")
     check("7-day inferred", st["reason"], "7-day free-points window exhausted")
     check("retry HKT present", bool(st["retry_hkt"]), True)
-    check("3h brain in hours -> stale", st["stale"], True)
+    check("3h brain in hours -> NOT stale (SCAN_MAX_IDLE_MIN=480)", st["stale"], False)
 
     st = llm_scan_status(now=now, latest=usable, latest_usable=usable,
                          board_scan_ts=None, backoff_until_iso=None,

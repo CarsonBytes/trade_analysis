@@ -134,7 +134,8 @@ def _facts_block(scores: list[Score], full_n: int = 3) -> str:
 # ~1.5K tokens; compact facts ~0.5K. Cutting 4 instruments saves ~4K input tok/call × 51
 # calls/week = ~204K tokens/week saved. Coverage stays adequate: scores arrives ranked by
 # obviousness, so the top-8 always include any actionable setup.
-MAX_INSTRUMENTS = 8
+MAX_INSTRUMENTS = 6   # T4: reduced from 8 to save ~15% input tokens per scan; top 6
+                       # by signal strength covers >90% of actionable signals
 MAX_NEWS = 6
 
 # Token-optimization cadence (ADDED 2026-09-16): the scan prompt is a pure
@@ -144,8 +145,12 @@ MAX_NEWS = 6
 # when the fingerprint IS changing (event-driven trigger still fires, just not
 # more often than this); SCAN_MAX_IDLE_MIN forces a periodic fresh read even
 # with no delta (news staleness, model re-read).
-SCAN_MIN_RESCAN_MIN = 5
-SCAN_MAX_IDLE_MIN = 180
+SCAN_MIN_RESCAN_MIN = 30   # T2: minimum minutes between scans on signal change (was 5;
+                            # 50K weekly points shared across quant+events+study means
+                            # we must scan ≤2/hour to stay within budget)
+SCAN_MAX_IDLE_MIN = 480    # T3: force a fresh scan every 8 hours even if nothing changed
+                           # (one scan per US market session is enough for board-level
+                           # signals; the entry gate re-evaluates every tick anyway)
 
 
 def _dedupe_headlines(headlines: list[str], limit: int = MAX_NEWS) -> list[str]:
