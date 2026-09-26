@@ -188,14 +188,14 @@ def test_seven_day_quota_exhaustion_backs_off_a_full_day_not_to_next_clock_reset
         cached = board_scan._rate_limited_until()
         cached_dt = _dt.datetime.fromisoformat(cached)
         gap_hours = (cached_dt - before).total_seconds() / 3600
-        check("backoff is roughly 24h out (not to the next 16:00 UTC boundary)",
-              23.9 <= gap_hours <= 24.1, True)
-        # Regression guard: a same-day 16:00 UTC backoff would be at most ~24h away too
-        # ONLY by coincidence right at the boundary -- assert it's measured from `now`,
-        # not the clock, by checking it tracks `before`/`after` rather than any fixed hour.
-        check("backoff instant is after 'before' + ~24h and before 'after' + ~24h",
-              before + _dt.timedelta(hours=23, minutes=59) <= cached_dt
-              <= after + _dt.timedelta(hours=24, minutes=1), True)
+        # 2026-09-26: exponential backoff for 7-day exhaustion: 4h -> 8h -> 16h -> 24h
+        # First failure (streak=0) results in 4h backoff
+        check("backoff is ~4h out (exponential, first failure)",
+              3.9 <= gap_hours <= 4.1, True)
+        # Regression guard: backoff tracks `before`/`after`, not any fixed clock hour
+        check("backoff instant is after 'before' + ~4h and before 'after' + ~4h",
+              before + _dt.timedelta(hours=3, minutes=59) <= cached_dt
+              <= after + _dt.timedelta(hours=4, minutes=1), True)
     finally:
         _restore_db(old, path)
 

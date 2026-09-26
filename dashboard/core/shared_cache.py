@@ -25,6 +25,7 @@ import time
 SCAN_KEY = "board_scan.json"
 USAGE_KEY = "supabase_usage.json"
 PROVIDER_KEY = "provider_decision.json"
+BACKOFF_KEY = "rate_limit_backoff.json"
 
 
 def shared_dir() -> str:

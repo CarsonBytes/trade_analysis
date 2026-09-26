@@ -249,17 +249,33 @@ SHARED_SCAN_ENV_FLAG = "SHARED_SCAN_ENABLE"
 # real, ongoing degradation (checked timestamps: every ~15-30s, matching the tick cadence)
 # during a routine response-time check for an unrelated change, not something invented.
 _RATE_LIMIT_BACKOFF_KEY = "llm_rate_limited_until"
+_RATE_LIMIT_7DAY_STREAK_KEY = "llm_7day_streak"
 _CST = __import__("datetime").timezone(__import__("datetime").timedelta(hours=8))
 
 
 def _rate_limited_until() -> str | None:
-    cached, _ = store.cache_get(_RATE_LIMIT_BACKOFF_KEY)
-    return cached
+    """Check both local DB and shared cache for rate-limit backoff.
+    Returns the earlier (more restrictive) backoff if both exist."""
+    local, _ = store.cache_get(_RATE_LIMIT_BACKOFF_KEY)
+    # ADDED 2026-09-26: check shared cache so paper+live coordinate.
+    # When one instance locks, the other immediately sees it instead of
+    # burning shared quota until it also hits the same 403.
+    try:
+        shared, _ = shared_cache.read(shared_cache.BACKOFF_KEY, 86400)  # 24h max
+        if isinstance(shared, dict) and shared.get("until"):
+            shared_until = shared["until"]
+            if not local or shared_until < local:
+                return shared_until
+    except Exception:
+        pass
+    return local
 
 
 def _clear_backoff() -> None:
     """Clear the backoff so the next run_board_scan() attempt is unrestricted."""
     store.cache_set(_RATE_LIMIT_BACKOFF_KEY, None)
+    store.cache_set(_RATE_LIMIT_7DAY_STREAK_KEY, 0)
+    shared_cache.write(shared_cache.BACKOFF_KEY, {"until": None, "streak": 0})
 
 
 def _set_rate_limit_backoff(long: bool = False) -> None:
@@ -277,13 +293,22 @@ def _set_rate_limit_backoff(long: bool = False) -> None:
     being caught, hundreds of wasted round-trips a day for zero chance of success.
     A 7-day exhaustion has no fixed reset instant to compute (points trickle back
     in as old high-usage days age out of the window, see the quant-vs-events-vs-
-    study token breakdown in HANDOFF.md), so `long=True` (passed by the caller when
-    the error text names the 7-day window) checks back once a day instead of
-    guessing a reset time that's usually wrong."""
+    study token breakdown in HANDOFF.md).
+
+    FIXED 2026-09-26: `long=True` used a fixed 24h backoff, which meant paper
+    retried every 24h, hit the same 403, set another 24h backoff -- infinite
+    loop. Now uses exponential backoff: 4h -> 8h -> 16h -> 24h (capped). This
+    way paper probes more frequently early on (points may have trickled back)
+    and backs off more aggressively if the window is still exhausted."""
     import datetime as _dt
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     if long:
-        until = now_utc + _dt.timedelta(hours=24)
+        streak_raw, _ = store.cache_get(_RATE_LIMIT_7DAY_STREAK_KEY)
+        streak = int(streak_raw) if streak_raw else 0
+        # Exponential: 4h * 2^streak, capped at 24h
+        hours = min(4 * (2 ** streak), 24)
+        until = now_utc + _dt.timedelta(hours=hours)
+        store.cache_set(_RATE_LIMIT_7DAY_STREAK_KEY, streak + 1)
     else:
         # Provider resets at 00:00 CST = 16:00 UTC
         # If it's already past 16:00 UTC today, the reset already happened; back off
@@ -294,7 +319,21 @@ def _set_rate_limit_backoff(long: bool = False) -> None:
             until = reset_today + _dt.timedelta(days=1)
         else:
             until = reset_today
+        # Clear 7-day streak on daily quota errors (different error class)
+        store.cache_set(_RATE_LIMIT_7DAY_STREAK_KEY, 0)
     store.cache_set(_RATE_LIMIT_BACKOFF_KEY, until.isoformat())
+    # ADDED 2026-09-26: write to shared cache so the other instance (paper/live)
+    # immediately sees the backoff instead of burning shared quota until it
+    # independently hits the same 403. The shared backoff is the earlier of
+    # both instances' local backoffs (see _rate_limited_until).
+    try:
+        streak_raw, _ = store.cache_get(_RATE_LIMIT_7DAY_STREAK_KEY)
+        shared_cache.write(shared_cache.BACKOFF_KEY, {
+            "until": until.isoformat(),
+            "streak": int(streak_raw) if streak_raw else 0,
+        })
+    except Exception:
+        pass
 
 
 def run_board_scan(scores: list[Score], headlines: list[str],
