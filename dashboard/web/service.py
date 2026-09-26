@@ -904,7 +904,9 @@ def refresh_cheap() -> None:
                                "held pending confirmation, not recorded yet", new_val, hist[-1][1])
             else:
                 store.cache_set("equity_pending_jump", None)  # back to normal: clear any pending
-                if not hist or now_s - hist[-1][0] >= 600:
+                _last_date = dt.datetime.fromtimestamp(hist[-1][0], tz=dt.timezone.utc).date() if hist else None
+                _today = dt.datetime.now(dt.timezone.utc).date()
+                if not hist or _last_date != _today:
                     hist.append([now_s, new_val, _ccy, _cash, _gpv])
                     store.cache_set("equity_history", hist[-3000:])
     except Exception as e:
@@ -1137,7 +1139,7 @@ def refresh_cheap() -> None:
                                           "cur_px": cached_spy["cur_px"]}
     except Exception as e:
         log.debug("spy_benchmark fetch error: %s", e)
-    # SGOV-value history for the dashboard chart (throttled ~10min, same cadence as equity)
+    # SGOV-value history for the dashboard chart (daily snapshots, same as equity)
     try:
         sv = (STATE.get("cash_sweep") or {}).get("sgov_value_base")
         if sv is not None:
@@ -1145,7 +1147,9 @@ def refresh_cheap() -> None:
             sh, _ = store.cache_get("sgov_history")
             sh = sh or []
             now2 = int(_t2.time())
-            if not sh or now2 - sh[-1][0] >= 600:
+            _last_sv_date = dt.datetime.fromtimestamp(sh[-1][0], tz=dt.timezone.utc).date() if sh else None
+            _today_sv = dt.datetime.now(dt.timezone.utc).date()
+            if not sh or _last_sv_date != _today_sv:
                 sh.append([now2, round(float(sv), 2)])
                 store.cache_set("sgov_history", sh[-3000:])
     except Exception as e:
