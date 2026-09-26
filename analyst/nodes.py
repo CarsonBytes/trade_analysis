@@ -15,7 +15,7 @@ import time
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from .state import (
-    AnalystState, RegimeView, TechnicalView, SentimentView, Decision, RiskAssessment,
+    AnalystState, AllAnalysts, RegimeView, TechnicalView, SentimentView, Decision, RiskAssessment,
 )
 from .llm import invoke_with_key_fallback, last_model_used, last_provider_used
 from .usage_log import log_usage
@@ -43,6 +43,43 @@ def _ask(structured_model, system: str, human: str, kind: str = "analyst"):
 
 
 # --- LLM analyst nodes ------------------------------------------------------
+
+def analysts_node(state: AnalystState) -> dict:
+    """Collapsed analyst node: regime + technical + sentiment in ONE LLM call.
+    ADDED 2026-09-26: saves ~2K input tokens/instrument (facts_text sent once
+    instead of 3 times) and reduces latency ~66%. The three roles are
+    independent (no cross-dependencies), so batching them in one structured
+    output is lossless — the model sees the same facts once and produces all
+    three views."""
+    news = state.get("news") or []
+    headlines_block = ""
+    if news:
+        headlines = "\n".join(f"- {h}" for h in news)
+        headlines_block = (
+            f"\n\nHeadlines for {state['symbol']} (for sentiment scoring; "
+            f"ignore if not relevant to this instrument):\n{headlines}"
+        )
+    result = _ask(
+        AllAnalysts,
+        "You are a trading desk with three analyst roles. Using ONLY the facts "
+        "given, produce all three views below. Do not invent numbers. Be "
+        "decisive but calibrate confidence.\n\n"
+        "1. REGIME: Classify market regime (trend_up/trend_down/range/high_vol), "
+        "confidence 0-1, 2-3 sentence rationale grounded in facts.\n"
+        "2. TECHNICAL: Direction (long/short/neutral), strength 1-5, key support "
+        "and resistance FROM THE FACTS (do not fabricate levels), rationale.\n"
+        "3. SENTIMENT: Score -10 (very bearish) to +10 (very bullish) based on "
+        "headlines. Only count headlines actually relevant to this instrument; "
+        "score 0 if nothing relevant. List key events that drove the score.",
+        f"Market facts for {state['symbol']}:\n{state['facts_text']}{headlines_block}",
+        kind="analysts",
+    )
+    return {
+        "regime": result.regime,
+        "technical": result.technical,
+        "sentiment": result.sentiment,
+    }
+
 
 def regime_node(state: AnalystState) -> dict:
     view = _ask(
@@ -89,9 +126,12 @@ def sentiment_node(state: AnalystState) -> dict:
 
 def decision_node(state: AnalystState) -> dict:
     regime, tech, sent = state["regime"], state["technical"], state["sentiment"]
+    # ADDED 2026-09-26: facts_text removed from decision prompt — it was already
+    # sent to the analysts node, so re-sending it here wastes ~500 input tokens
+    # per instrument with no new information (the decision is based on the
+    # analysts' interpretations, not raw facts).
     human = (
         f"Instrument: {state['symbol']}\n\n"
-        f"FACTS:\n{state['facts_text']}\n\n"
         f"REGIME AGENT: {regime.regime} (conf {regime.confidence:.2f}) - {regime.rationale}\n"
         f"TECHNICAL AGENT: {tech.direction} strength {tech.strength}/5, "
         f"support {tech.key_support:.5f} resistance {tech.key_resistance:.5f} - {tech.rationale}\n"

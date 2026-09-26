@@ -42,6 +42,17 @@ class Decision(BaseModel):
     disagreements: str = Field(description="Where the agents conflicted, and how you weighed it. '' if none.")
 
 
+class AllAnalysts(BaseModel):
+    """Combined output of all three analyst roles in a single LLM call.
+    ADDED 2026-09-26: collapses regime_node + technical_node + sentiment_node
+    (3 separate LLM calls) into one, saving ~2K input tokens per instrument
+    (facts_text is sent once instead of 3 times) and reducing latency by
+    ~2/3."""
+    regime: RegimeView
+    technical: TechnicalView
+    sentiment: SentimentView
+
+
 class RiskAssessment(BaseModel):
     final_action: Literal["BUY", "SELL", "WAIT"]
     vetoed: bool
