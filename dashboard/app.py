@@ -2468,25 +2468,20 @@ def today_pnl_panel() -> None:
 
 
 def _render_daily_pnl_chart(history: list, ccy: str) -> None:
-    """Render stacked bars (strategy / interest / FX) + total P&L line, ex-cash.
+    """Render daily P&L as green/red bars + cumulative P&L line.
 
     All values are stored as ABSOLUTE snapshots.  Deltas are computed at render time.
     Cash deposits/withdrawals are excluded from the NL delta by looking up the
-    cash_flows cache (keyed by date).  SGOV market-value delta is excluded (it is a
-    cash transfer, not P&L); SGOV yield shows in the Interest bar via AccruedCash.
-    FX residual = adjusted_NL_delta − strategy_delta − interest_delta."""
+    cash_flows cache (keyed by date)."""
     from nicegui import ui as _ui
     from dashboard.core import store as _store
     from datetime import date as _date
 
     rows = []
     for entry in history[-30:]:
-        ts = entry[0]
         date_str = entry[1]
-        strategy_abs = float(entry[2]) if len(entry) > 2 else 0.0
-        interest_abs = float(entry[4]) if len(entry) > 4 else 0.0
         nl_abs = float(entry[5]) if len(entry) > 5 else 0.0
-        rows.append((date_str, strategy_abs, interest_abs, nl_abs))
+        rows.append((date_str, nl_abs))
 
     # Map cash flows to date strings so we can exclude same-day deposits.
     flows_raw, _ = _store.cache_get("cash_flows")
@@ -2498,41 +2493,47 @@ def _render_daily_pnl_chart(history: list, ccy: str) -> None:
             continue
         cash_by_date[d] = cash_by_date.get(d, 0.0) + float(f[1])
 
-    dates, strategy_d, interest_d, fx_d, total_d = [], [], [], [], []
-    for i, (date_str, strat, intr, nl) in enumerate(rows):
+    dates, daily_pnl, cum_pnl = [], [], []
+    cum = 0.0
+    for i, (date_str, nl) in enumerate(rows):
         dates.append(date_str[-5:])
         if i == 0:
-            strategy_d.append(0.0)
-            interest_d.append(0.0)
-            fx_d.append(0.0)
-            total_d.append(0.0)
+            daily_pnl.append(0.0)
+            cum_pnl.append(0.0)
             continue
         prev = rows[i - 1]
-        strat_delta = strat - prev[1]
-        intr_delta = intr - prev[2]
-        nl_delta = nl - prev[3]
+        nl_delta = nl - prev[1]
         cash_today = cash_by_date.get(date_str, 0.0)
-        adj_nl_delta = nl_delta - cash_today
-        fx_resid = adj_nl_delta - strat_delta - intr_delta
-        strategy_d.append(round(strat_delta, 2))
-        interest_d.append(round(intr_delta, 2))
-        fx_d.append(round(fx_resid, 2))
-        total_d.append(round(adj_nl_delta, 2))
+        adj = nl_delta - cash_today
+        cum += adj
+        daily_pnl.append(round(adj, 2))
+        cum_pnl.append(round(cum, 2))
+
+    # Green for positive, red for negative
+    bar_colors = ["#22C55E" if v >= 0 else "#EF4444" for v in daily_pnl]
 
     option = {
-        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "legend": {"data": ["Strategy", "Interest", "FX", "Total"], "bottom": 0},
+        "tooltip": {
+            "trigger": "axis",
+            "axisPointer": {"type": "shadow"},
+            "formatter": (
+                "<b>{b}</b><br/>"
+                "Daily P&L: {c0} " + ccy + "<br/>"
+                "Cumulative: {c1} " + ccy
+            ),
+        },
+        "legend": {"data": ["Daily P&L", "Cumulative"], "bottom": 0},
         "grid": {"left": "3%", "right": "4%", "bottom": "15%", "top": "10%", "containLabel": True},
         "xAxis": {"type": "category", "data": dates},
-        "yAxis": {"type": "value", "name": f"{ccy} daily P&L"},
+        "yAxis": [
+            {"type": "value", "name": f"{ccy} daily"},
+            {"type": "value", "name": f"{ccy} cumulative", "position": "right"},
+        ],
         "series": [
-            {"name": "Strategy", "type": "bar", "stack": "total", "data": strategy_d,
-             "itemStyle": {"color": "#3B82F6"}},
-            {"name": "Interest", "type": "bar", "stack": "total", "data": interest_d,
-             "itemStyle": {"color": "#F59E0B"}},
-            {"name": "FX", "type": "bar", "stack": "total", "data": fx_d,
-             "itemStyle": {"color": "#8B5CF6"}},
-            {"name": "Total", "type": "line", "data": total_d,
+            {"name": "Daily P&L", "type": "bar", "data": [
+                {"value": v, "itemStyle": {"color": c}} for v, c in zip(daily_pnl, bar_colors)
+            ]},
+            {"name": "Cumulative", "type": "line", "yAxisIndex": 1, "data": cum_pnl,
              "itemStyle": {"color": "#1F2937"}, "lineStyle": {"width": 2},
              "symbol": "circle", "symbolSize": 4},
         ],
