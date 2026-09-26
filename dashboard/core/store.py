@@ -120,4 +120,6 @@ def cache_get(key: str):
         row = c.execute("SELECT v, ts FROM cache WHERE k=?", (key,)).fetchone()
         if not row:
             return None, None
+        if row[0] is None:
+            return None, row[1]
         return json.loads(row[0]), row[1]
