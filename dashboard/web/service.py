@@ -675,6 +675,60 @@ def _open_position_instruments() -> list:
     return out
 
 
+_FP_AUDIT_KEY = "llm_fp_audit"
+
+
+def _fp_audit_tick() -> None:
+    """FINGERPRINT-CHURN AUDIT (2026-09-29). After the llm_min tick-gate fix,
+    refresh_llm() only evaluates every ~30min, and its skip rows are throttled
+    to reason transitions -- so scan_metrics alone can no longer show WHEN
+    signals/headlines actually churned between evaluations. Called from
+    refresh_cheap() (~1/min): recomputes both scan fingerprints and updates ONE
+    in-place cache row -- zero table growth, unlike the per-tick journal rows
+    this replaced -- with per-UTC-day counters:
+
+      evals          fingerprint evaluations (one per cheap refresh)
+      deltas         full-fp changes (scan-triggering events, pre-debounce)
+      score_deltas   score-only fp changes  (deltas - score_deltas = churn
+                     caused by HEADLINES alone, which should_scan skips)
+      last_delta_ts  when churn was last DETECTED (<=1min sampling error)
+
+    Exposed on /status as fp_audit."""
+    try:
+        scores = list(STATE["scores"].values())
+        if not scores:
+            return
+        ranked = rank(scores)
+        fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [],
+                                         _position_keys())
+        sfp = board_scan.score_fingerprint(ranked, _position_keys())
+        a, _ = store.cache_get(_FP_AUDIT_KEY)
+        a = a if isinstance(a, dict) else {}
+        now = _now()
+        if a.get("day") != now.strftime("%Y-%m-%d"):
+            prev = ({k: a.get(k) for k in ("day", "evals", "deltas", "score_deltas")}
+                    if a.get("day") else None)
+            # carry fp/sfp across the rollover so midnight itself never counts
+            # as a delta; prev keeps yesterday's totals for inspection.
+            a = {"day": now.strftime("%Y-%m-%d"),
+                 "evals": 0, "deltas": 0, "score_deltas": 0,
+                 "fp": a.get("fp"), "sfp": a.get("sfp")}
+            if prev:
+                a["prev"] = prev
+        a["evals"] = int(a.get("evals") or 0) + 1
+        a["last_eval_ts"] = now.isoformat(timespec="seconds")
+        if a.get("fp") != fp:
+            a["deltas"] = int(a.get("deltas") or 0) + 1
+            a["last_delta_ts"] = a["last_eval_ts"]
+            a["fp"] = fp
+        if a.get("sfp") != sfp:
+            a["score_deltas"] = int(a.get("score_deltas") or 0) + 1
+            a["sfp"] = sfp
+        store.cache_set(_FP_AUDIT_KEY, a)
+    except Exception as e:
+        log.debug("fp audit: %s", e)
+
+
 def refresh_cheap() -> None:
     """Fetch prices + compute deterministic scores for every instrument."""
     # build into LOCAL dicts, then reassign atomically -- never mutate the live STATE
@@ -1170,6 +1224,9 @@ def refresh_cheap() -> None:
                 "broker_conn": STATE.get("broker_conn")})
     except Exception as e:
         log.debug("portfolio_snapshot save error: %s", e)
+    # fingerprint-churn audit counters (see _fp_audit_tick) -- runs LAST so it
+    # hashes the fully-refreshed scores/news/positions of this cycle.
+    _fp_audit_tick()
 
 
 def refresh_news() -> None:
@@ -1616,14 +1673,23 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         if not proceed:
             status = f"skipped ({reason}) -- reusing last scan"
             STATE["last_status"] = status
-            try:
-                journal.record_scan_metrics(
-                    environment=env, kind="board_scan",
-                    n_signals=len(STATE.get("llm") or {}), agreement=None,
-                    input_tokens=0, output_tokens=0, cost_usd=0.0, latency_ms=0,
-                    skipped=True, reason=reason)
-            except Exception as e:
-                log.warning("journal: could not record scan skip: %s", e)
+            # TRANSITION-ONLY skip journaling (2026-09-29). refresh_llm() evaluates
+            # ~48x/day per instance (llm_min gate), but the reason holds "no signal
+            # delta" for hours -- one row per evaluation is exactly the flooding
+            # shape the gate was added to kill (measured 969 rows/24h on live).
+            # Journal only when the reason CHANGES (plus the first skip after each
+            # success/restart), so the funnel keeps its boundaries at ~10 rows/day.
+            # fp_audit (refresh_cheap, ~1/min) covers churn between these rows.
+            if reason != STATE.get("_last_skip_reason"):
+                try:
+                    journal.record_scan_metrics(
+                        environment=env, kind="board_scan",
+                        n_signals=len(STATE.get("llm") or {}), agreement=None,
+                        input_tokens=0, output_tokens=0, cost_usd=0.0, latency_ms=0,
+                        skipped=True, reason=reason)
+                except Exception as e:
+                    log.warning("journal: could not record scan skip: %s", e)
+            STATE["_last_skip_reason"] = reason
             log.info("LLM board scan: %s", status)
             maybe_alert_scan_stale()
             return status
@@ -1662,6 +1728,8 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         STATE["llm"] = {s.key: s for s in result.signals}
         STATE["macro_note"] = result.macro_note
         STATE["last_llm"] = _now()
+        # a scan is a boundary: the next skip (whatever its reason) journals again
+        STATE["_last_skip_reason"] = None
         try:
             store.cache_set("llm_scan_fingerprint", fp)
             store.cache_set("llm_score_fingerprint", sfp)

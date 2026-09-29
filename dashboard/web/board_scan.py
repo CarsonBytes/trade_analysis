@@ -134,8 +134,13 @@ def _facts_block(scores: list[Score], full_n: int = 3) -> str:
 # ~1.5K tokens; compact facts ~0.5K. Cutting 4 instruments saves ~4K input tok/call × 51
 # calls/week = ~204K tokens/week saved. Coverage stays adequate: scores arrives ranked by
 # obviousness, so the top-8 always include any actionable setup.
-MAX_INSTRUMENTS = 6   # T4: reduced from 8 to save ~15% input tokens per scan; top 6
-                       # by signal strength covers >90% of actionable signals
+# T4 then cut 8→6 (2026-09-26). RAISED 6→9 (2026-09-29, user decision -- undoing T4's
+# coverage tradeoff without giving back all the quota savings): ranks 4+ get COMPACT facts
+# only (see _facts_block), so the marginal cost of ranks 7-9 is measured at ~137 input +
+# ~125 output tokens/instrument -- n=9 ≈ +34% per scan vs n=6, still far under the
+# 4096-prompt/2000-completion caps, and the shrink-and-retry below still backstops
+# truncation. Restores mid-ranked early-warning/consensus coverage n=6 gave up.
+MAX_INSTRUMENTS = 9
 MAX_NEWS = 6
 
 # Token-optimization cadence (ADDED 2026-09-16): the scan prompt is a pure

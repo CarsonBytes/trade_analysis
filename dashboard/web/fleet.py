@@ -43,6 +43,7 @@ def status_snapshot() -> dict:
         "tick_age_sec": None,
         "last_tick_duration_sec": None,
         "last_status": None,
+        "fp_audit": None,           # 2026-09-29: fingerprint-churn counters (see service._fp_audit_tick)
         "sleeve_enabled": None,
         "notify_configured": None,
         "db": os.environ.get("DASH_DB_NAME", "dashboard.db"),
@@ -85,6 +86,11 @@ def status_snapshot() -> dict:
             out["tick_age_sec"] = int((dt.datetime.now() - last_tick).total_seconds())
         out["last_tick_duration_sec"] = service.STATE.get("last_tick_duration_sec")
         out["last_status"] = service.STATE.get("last_status")
+        try:
+            # in-place churn counters written by service._fp_audit_tick (~1/min)
+            out["fp_audit"] = store.cache_get("llm_fp_audit")[0]
+        except Exception:                              # noqa: BLE001
+            out["fp_audit"] = None
 
         try:
             out["sleeve_enabled"] = bool(sleeve.sleeve_enabled())
