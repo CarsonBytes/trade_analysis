@@ -99,11 +99,29 @@ the 3 journal-OPEN trades mirror on the next US session).
 
 **Deploy note.** The first background rebuild of live for 6565cb9 left no log but DID land
 (`quant-dashboard-live-docker`: MAX_INSTRUMENTS=9, `_fp_audit_tick` x3 verified). This
-commit adds the room fix on top and needs one live rebuild. Paper deploys via push as usual.
+commit (room fix) is deployed to BOTH instances (paper via push, live via a foreground
+rebuild; `_strategy_deployed_usd` x7 verified in the live image).
 
-**Still pending:** fp_audit counters + skip-row thinning visible in `/status` after 30+ min
-on both instances; trades 155/160/161 should gain ib_mirror rows on the next US session
-(room > 0 now); live gateway 2FA (user).
+**Verified post-deploy:** paper room now reads **$143,132** (direct probe of the real
+`current_portfolio_room_usd()`; was $0); fp_audit accumulating on BOTH instances (paper
+evals 253 / deltas 158, live 32 / 16 at 2026-09-29 20:19 UTC); skip-journal thinned to
+transition-only (6 rows in 9h vs the old ~2,500/day flooding). The live gateway also
+reconnected on its own during this deploy's fresh login (it had been stuck on the 2FA
+dialog since 12:40 UTC -- resolved without user action).
+
+**Deploy infra notes.** (a) One paper deploy aborted on a ghcr.io TLS-handshake timeout;
+root cause was WSL's `eth0` MTU back at 1500 after a distro restart -- this project needs
+**1280** for ghcr.io pulls (set via `wsl -d Ubuntu -u root -- ip link set eth0 mtu 1280`,
+plain `sudo` prompts for a password). Pull then succeeded, deploy clean. (b) `nohup ... &
+` launched from `wsl -d Ubuntu -- bash -c "..."` died silently TWICE (no log file, no
+process) -- for live rebuilds run `docker compose -f docker-compose.live.yml up -d --build
+dashboard` in the FOREGROUND instead, same as the paper script does.
+
+**Still pending:** trades 155/160/161 should gain ib_mirror rows on the next US session
+(room > 0 now, execution-window gated); SGOV/cash rebalance to the 80% target next US
+session (cash was ~-HKD 30k after covering the shorts); fp_audit soak past UTC midnight
+(day-rollover path); confirm a placement actually sizes > 0 at the open (the real end-to-end
+proof the month-long block is over).
 
 ---
 
@@ -799,6 +817,19 @@ for the hang bug). Restored; all three entries must coexist:
 0 20 * * 1-5 /home/cap/quant/scripts/gateway-relogin.sh both scheduled >> /home/cap/gateway-restart.log 2>&1
 ```
 **Rule: always `crontab -l` first and append; never write a crontab from memory.**
+
+> **2026-09-30 update — that crontab has since changed (rule still stands):**
+> `docker-watchdog.sh` was superseded by `/home/cap/infra-watchdog.sh` on 2026-08-27 —
+> one script for all 9 monitored containers across every stack (quant paper/live
+> dashboards + gateways, event-radar ×2, study, saas dashboard, restart-proxy; HTTP +
+> health probes, `docker restart` after 3 failed minutes, Telegram push). Its crontab
+> line replaced docker-watchdog.sh's (the docker-watchdog.log stops 2026-08-27; the
+> file itself remains). Current `crontab -l`:
+> ```
+> * * * * * /home/cap/quant/scripts/gateway-login-watchdog.sh
+> 0 20 * * 1-5 /home/cap/quant/scripts/gateway-relogin.sh both scheduled >> /home/cap/gateway-restart.log 2>&1
+> * * * * * /home/cap/infra-watchdog.sh
+> ```
 
 **G. Dropped scratch files (2026-08-26).** Deleted as untracked clutter, recorded here so
 the intent isn't lost: `HANDOFF.txt` (a stale 2026-06-25 copy of this file),
