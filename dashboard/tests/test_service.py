@@ -324,11 +324,18 @@ def test_refresh_pending_ticks_fetches_only_for_pending_instruments():
                      "entry, sl, tp, rr, size_units, status) VALUES "
                      "(2,'2026-07-21T00:00:00','QQQ','long','ATR rr3.0',675.49,633.32,"
                      "686.65,3.0,1,'OPEN')")
+            # id=3 EIMI: OPEN, NOT funded -- UCITS/LSEETF key: its ib_exchange must be
+            # threaded through as primaryExchange (2026-09-29: without it every fetch
+            # threw IB error 200 -> red notable event -> Telegram push every cycle)
+            c.execute("INSERT INTO paper_trades (id, ts, instrument, direction, method, "
+                     "entry, sl, tp, rr, size_units, status) VALUES "
+                     "(3,'2026-09-29T00:00:00','EIMI','long','ATR rr3.0',55.04,53.86,"
+                     "58.57,3.0,1,'OPEN')")
 
         calls = []
 
-        def _fake_tick(symbol):
-            calls.append(symbol)
+        def _fake_tick(symbol, currency="USD", primary_exchange=""):
+            calls.append((symbol, primary_exchange))
             return {"bid": 664.0, "ask": 664.74, "mid": 664.37, "spread": 0.74}
 
         service.STATE["live"] = {"QQQ": {"price": 675.49, "src": "yfinance",
@@ -336,8 +343,13 @@ def test_refresh_pending_ticks_fetches_only_for_pending_instruments():
         with mock.patch("dashboard.data.ib_client.get_stock_tick", side_effect=_fake_tick):
             service._refresh_pending_ticks()
 
-        check("fetched exactly one tick", calls, ["QQQ"])
-        check("SPY (funded) got no fetch", "SPY" in calls, False)
+        check("fetched a tick for each unfunded instrument",
+              sorted(s for s, _ in calls), ["EIMI", "QQQ"])
+        check("SPY (funded) got no fetch", "SPY" in [s for s, _ in calls], False)
+        px = dict(calls)
+        check("UCITS key passes its ib_exchange as primaryExchange",
+              px.get("EIMI"), "LSEETF")
+        check("US ticker passes no primaryExchange", px.get("QQQ"), "")
         check("QQQ's stale weekly price replaced with the fresh tick",
               service.STATE["live"]["QQQ"]["price"], 664.37)
         check("marked with the ib-tick source", service.STATE["live"]["QQQ"]["src"], "ib-tick")

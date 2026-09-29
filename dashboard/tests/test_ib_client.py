@@ -246,6 +246,37 @@ def test_stock_contract_primary_exchange_kwarg():
           captured["args"], ("GLD", "SMART", "USD", {}))
 
 
+def test_get_stock_tick_primary_exchange_kwarg():
+    print("\nget_stock_tick(): primary_exchange threads through to "
+          "Stock(primaryExchange=...) (2026-09-29: WITHOUT it the pending-tick path "
+          "threw IB error 200 for EIMI on every cycle -> red notable event -> Telegram "
+          "push every ~85s):")
+    from dashboard.data import ib_client
+    captured = {}
+
+    class FakeStock:
+        def __init__(self, symbol, exchange, currency, **kwargs):
+            captured["args"] = (symbol, exchange, currency, kwargs)
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Stock = FakeStock
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", return_value=None):
+        ib_client.get_stock_tick("EIMI", primary_exchange="LSEETF")
+    check("primaryExchange kwarg passed when given",
+          captured["args"], ("EIMI", "SMART", "USD", {"primaryExchange": "LSEETF"}))
+
+    captured.clear()
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "_run", return_value=None):
+        ib_client.get_stock_tick("QQQ")
+    check("no primaryExchange kwarg when omitted (US tickers unchanged)",
+          captured["args"], ("QQQ", "SMART", "USD", {}))
+
+
 class _AV:
     """Minimal stand-in for ib_async's AccountValue rows."""
     def __init__(self, tag, value, currency):

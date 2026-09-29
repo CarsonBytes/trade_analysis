@@ -13,7 +13,9 @@ v3 (2026-08-26, "Alerts v3" spec) -- three changes driven by real usage:
 3. HUMANIZE: plain-language title/detail per event (humanize()); raw message always kept.
 
 Push policy (user-requested): ONLY red-tier alerts notify. A warning alone never buzzes
-the phone anymore.
+the phone anymore. A red GROUP pushes once when it first turns red -- repeats inside the
+dedupe window only bump the counter (2026-09-29: a persistent red used to re-push every
+occurrence). force_push=True sends regardless.
 
 Uses the SAME per-instance database as everything else (paper._DB).
 """
@@ -153,7 +155,9 @@ def record(message: str, level: str = "info", kind: str | None = None,
            symbol: str | None = None, force_push: bool = False) -> None:
     """Record an event (as UNREAD), classified into a tier, deduped by key within the
     window. Push policy: ONLY red-tier events notify Telegram/ntfy (user-requested
-    2026-08-26) -- yellow/white land in the local log only. Never raises."""
+    2026-08-26), and only when the dedupe GROUP turns red (first sighting or
+    escalation) or force_push=True -- yellow/white land in the local log only.
+    Never raises."""
     ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     try:
         ev_kind, ev_sym = _kind_symbol(message)
@@ -175,6 +179,7 @@ def record(message: str, level: str = "info", kind: str | None = None,
                 "WHERE dedupe_key=? AND last_ts>=? ORDER BY id DESC LIMIT 1",
                 (dedupe_key, window_cut.isoformat(timespec="seconds"))).fetchone()
             escalate = False
+            became_red = False
             if row:
                 rid, prev_count, prev_tier = row[0], row[1] or 1, row[2]
                 new_count = prev_count + 1
@@ -185,6 +190,13 @@ def record(message: str, level: str = "info", kind: str | None = None,
                     escalate = True
                 if tier == "red":
                     new_tier = "red"
+                # PUSH POLICY (fixed 2026-09-29): a repeat inside the dedupe window
+                # only bumps the counter -- the Telegram push fires the FIRST time
+                # the GROUP turns red (new insert, or yellow -> red escalation),
+                # not on every occurrence. Before this, a PERSISTENT red (EIMI's
+                # IB error 200 on every ~85s pending-tick cycle) re-pushed to
+                # Telegram every cycle for as long as the condition lasted.
+                became_red = new_tier == "red" and prev_tier != "red"
                 c.execute("UPDATE changelog SET count=?, last_ts=?, tier=? WHERE id=?",
                           (new_count, ts, new_tier, rid))
             else:
@@ -192,8 +204,9 @@ def record(message: str, level: str = "info", kind: str | None = None,
                     "INSERT INTO changelog(ts, level, message, kind, symbol, title, "
                     "dedupe_key, count, last_ts, tier) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (ts, level, message, kind, symbol, title, dedupe_key, 1, ts, tier))
+                became_red = tier == "red"
 
-        if tier == "red" or escalate:
+        if became_red or escalate or force_push:
             try:
                 from dashboard.core import notify
                 notify.send(f"{title}" + (f" -- {detail}" if detail else ""),

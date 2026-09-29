@@ -785,7 +785,12 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
     # cancel -- the trade row stays OPEN/unmirrored so the next mirror_new() cycle retries) if
     # the live spread is wider than SLEEVE_MAX_SPREAD_PCT of mid price. Logged either way for
     # audit ("skipped due to spread" is itself useful information, not just silence).
-    tick = ib_client.get_stock_tick(t["instrument"])
+    # primary_exchange threaded through so UCITS/LSEETF instruments qualify here too
+    # (same IB error 200 -> red-notable-event -> Telegram push every cycle as the
+    # pending-tick path; see ib_client.get_stock_tick's docstring).
+    _tick_inst = active_by_key(t["instrument"])
+    tick = ib_client.get_stock_tick(
+        t["instrument"], primary_exchange=(_tick_inst.ib_exchange if _tick_inst else ""))
     if tick and tick.get("mid"):
         spread_pct = tick["spread"] / tick["mid"] if tick["mid"] else 0.0
         if spread_pct > SLEEVE_MAX_SPREAD_PCT:

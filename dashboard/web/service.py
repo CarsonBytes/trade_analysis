@@ -624,11 +624,18 @@ def _refresh_pending_ticks() -> None:
     if not pending_keys:
         return
     from dashboard.data import ib_client
+    from dashboard.instruments import active_by_key
     _live = dict(STATE["live"])
     got = 0
     for key in pending_keys:
         try:
-            tick = ib_client.get_stock_tick(key)
+            # UCITS-swap instruments (EIMI/CSPX on LSEETF...) only qualify with
+            # primaryExchange, exactly like the order path's _stock_contract_for().
+            # Without it every cycle threw IB error 200 -> a RED notable event ->
+            # a Telegram push for each unfunded signal (~85s apart, all session).
+            inst = active_by_key(key)
+            tick = ib_client.get_stock_tick(
+                key, primary_exchange=(inst.ib_exchange if inst else ""))
         except Exception as e:
             log.debug("_refresh_pending_ticks: get_stock_tick(%s) failed: %s", key, e)
             continue

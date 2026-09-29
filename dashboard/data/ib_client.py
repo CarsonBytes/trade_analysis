@@ -618,18 +618,26 @@ def get_tick(spec: FutureSpec) -> dict | None:
                 "spread": ask - bid, "time": pd.Timestamp.now(tz="UTC"), "age_sec": 0.0}
 
 
-def get_stock_tick(symbol: str, currency: str = "USD") -> dict | None:
+def get_stock_tick(symbol: str, currency: str = "USD",
+                   primary_exchange: str = "") -> dict | None:
     """Latest ETF/stock quote: bid/ask/mid/spread. Mirrors get_tick() but for the
     SMART-routed Stock contract, not a future. Needs a real-time market-data
     subscription; returns None on delayed/empty/no-connection.
     NOTE: does its own inline qualify (not stock_contract()) since that function
-    takes _LOCK itself -- _LOCK is a plain, non-reentrant threading.Lock."""
+    takes _LOCK itself -- _LOCK is a plain, non-reentrant threading.Lock.
+    primary_exchange: same threading as stock_contract() -- non-US-listed tickers
+    (LSEETF etc.) don't qualify under bare SMART, which IB answers with error 200
+    "No security definition has been found for the request". On the pending-tick
+    path that was a REPEATED error: _refresh_pending_ticks() re-asks every cheap
+    cycle, so EIMI (EIMI on LSEETF) produced a red-tier notable event -- and a
+    Telegram push -- every ~85s for as long as its signal stayed unfunded."""
     with _LOCK:
         ib = _ensure_conn()
         if ib is None:
             return None
         ib_async = _mod()
-        c = ib_async.Stock(symbol, "SMART", currency)
+        kwargs = {"primaryExchange": primary_exchange} if primary_exchange else {}
+        c = ib_async.Stock(symbol, "SMART", currency, **kwargs)
         try:
             _run(ib.qualifyContractsAsync(c))
         except Exception as e:                         # noqa: BLE001

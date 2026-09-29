@@ -343,6 +343,61 @@ def test_recent_exposes_tier_key():
             pass
 
 
+def test_red_pushes_once_per_dedupe_group():
+    print("\nrecord(): PERSISTENT red pushes ONCE per dedupe group (2026-09-29: EIMI's "
+          "IB error 200 fired every ~85s on the pending-tick path, so a red event that "
+          "never resolved buzzed Telegram every cycle):")
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    old = os.environ.get("DASH_DB_NAME")
+    os.environ["DASH_DB_NAME"] = path
+    try:
+        from dashboard.core import notable_events, notify
+        msg = ("EIMI: broker error 200 -- No security definition has been found for "
+               "the request")
+        calls = []
+        with mock.patch.object(notify, "send",
+                               side_effect=lambda m, level="info": calls.append(m)):
+            for _ in range(5):
+                notable_events.record(msg, level="error", symbol="EIMI")
+        check("5 occurrences -> exactly 1 Telegram push", len(calls), 1)
+        rows = notable_events.recent(limit=10)
+        check("all 5 collapsed onto one group", rows[0]["count"], 5)
+        check("group stays red", rows[0]["tier"], "red")
+
+        calls.clear()
+        with mock.patch.object(notify, "send",
+                               side_effect=lambda m, level="info": calls.append(m)):
+            notable_events.record(msg, level="error", symbol="EIMI", force_push=True)
+        check("force_push still sends on a repeat", len(calls), 1)
+        check("repeat still counted", notable_events.recent(limit=1)[0]["count"], 6)
+
+        # yellow -> red (the escalation path) must still push when it flips
+        calls.clear()
+        mm = ("reconcile: broker/local position MISMATCH -- "
+              "only_local(ghost)=[QQQ] only_broker(untracked)=[]")
+        with mock.patch.object(notify, "send",
+                               side_effect=lambda m, level="info": calls.append(m)):
+            notable_events.record(mm, level="warning")
+            notable_events.record(mm, level="warning")
+            notable_events.record(mm, level="warning")   # MISMATCH_ESCALATE_AFTER
+            notable_events.record(mm, level="warning")
+        check("escalation pushes exactly once (then quiet)", len(calls), 1)
+        qqq = [r for r in notable_events.recent(limit=10) if r["symbol"] == "QQQ"]
+        check("all 4 occurrences counted on that group", qqq[0]["count"], 4)
+        check("escalated to red", qqq[0]["tier"], "red")
+    finally:
+        if old is None:
+            os.environ.pop("DASH_DB_NAME", None)
+        else:
+            os.environ["DASH_DB_NAME"] = old
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
