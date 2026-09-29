@@ -1,7 +1,52 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-12.
+Last updated 2026-09-29.
+
+---
+
+### 🔥 FIXED 2026-09-29: LLM silently blocked for 4 days (Sep 25-29) + skip-journal flooding at ~2,500 rows/day
+
+User ask: *"i see the llm request still blocked for 4 days, retro and debug"* and *"make sure
+in future the llm token usage should be optimized, fix"*.
+
+**Retro -- what actually happened.** Last healthy board scan was 2026-09-25 09:03 UTC. The
+chatanywhere free tier's rolling 7-day points window then exhausted (the same 403 documented
+under the 2026-09-03 entry below), arming the exponential backoff ladder (4h -> 8h -> 16h ->
+24h cap, key `llm_7day_streak`). The ladder worked exactly as designed: paper armed 8h at
+2026-09-28 11:00 (until 19:00), that probe re-failed and armed 16h (streak=3) -> 2026-09-29
+11:01 UTC, by which point points had trickled back -- scan succeeded, backoff + streak cleared
+automatically (`llm_rate_limited_until='null'`, `streak=0`). Live followed 32 min later (11:33)
+via the shared-cache coordination. **Zero tokens were wasted during the whole blockage** --
+backoff/debounce both gate before invocation -- and no manual clear-backoff was needed; both
+keys already returned HTTP 200 when tested directly at 2026-09-28 17:14 UTC, but the rolling
+window had not yet recovered points for a full scan prompt.
+
+**The three bugs this surfaced (all fixed, commit a5aad98):**
+
+1. **Tick gate keyed on SUCCESS only.** `STATE["last_llm"]` is only set when a scan succeeds,
+   and `_tick()`'s `llm_min=30` gate read it alone -- so during any outage the gate passed
+   EVERY tick (~35s), and each tick `refresh_llm()` journal+logged a skip row. Measured on
+   live: 969 identical rows in 24h during the backoff phase, and ~12 rows in 7 minutes
+   (~2,500/day) in the post-recovery "no signal delta" phase. Fixed by setting
+   `STATE["last_llm_attempt"]` at the top of `refresh_llm()` on EVERY entry (T1 exit, cadence
+   skip, real scan) and gating `_tick()` on `max(last_llm, last_llm_attempt)`.
+2. **T1 backoff early-exit read LOCAL cache only** (`store.cache_get`), missing the shared
+   backoff paper arms -- so live did full fingerprint/rank/journal work before discovering the
+   shared backoff inside `run_board_scan()`. Now reads `board_scan._rate_limited_until()`
+   (local + shared, earlier wins).
+3. **Stale message**: `should_scan()` still said "last scan <5min ago" after T2 raised
+   `SCAN_MIN_RESCAN_MIN` to 30 -- now interpolates the actual constant.
+
+**Token optimization verified live post-recovery** (paper scan 2026-09-29 11:01, n=6):
+**1,219 input + 808 output tokens, $0.0018** -- down from 2,038+1,557 at n=12 pre-T4, i.e.
+the T1-T5 measures (backoff early-exit, 30-min rescan debounce, `MAX_INSTRUMENTS=6`,
+attempt-ts debounce, shared-scan reuse) are intact and doing their job.
+
+**Deploy lesson.** `git push` fires `scripts/wsl2-docker-deploy.sh` in the background via the
+machine-local pre-push hook; running the same script manually 6s later made the two race --
+one died on a compose container-name conflict while the other finished OK (final state was
+good). Don't run manual deploys while a push-triggered one is in flight.
 
 ---
 
