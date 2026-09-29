@@ -1539,13 +1539,26 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     explicit user click is always honoured, budget permitting.
     """
     cap = cap or STATE["cap"]
+    # Every entry (T1 backoff exit, cadence skip, actual scan) marks an ATTEMPT so the
+    # _tick() llm_min gate throttles refresh_llm() itself. Previously only SUCCESS set
+    # STATE["last_llm"], so during a provider outage the gate passed every tick (~35s),
+    # and each tick journal+logged a skip row -- measured 969 identical rows in 24h on
+    # live during the 2026-09-25..28 chatanywhere outage.
+    STATE["last_llm_attempt"] = _now()
     # T1: backoff-aware early exit -- if the provider is known-down (rate-limited
     # or 7-day points exhausted), skip ALL work (fingerprint hashing, metrics
     # logging, shared-cache reads) instead of falling through to run_board_scan()
     # which would just return the same backoff message.  force=True (manual
     # refresh) bypasses this too, same as the cadence gate below.
+    # 2026-09-28: reads _rate_limited_until() (LOCAL + SHARED) instead of the local
+    # cache alone -- live's own backoff can be NULL while paper's shared backoff is
+    # armed; local-only checking made live do the full fingerprint/rank work before
+    # discovering the shared backoff inside run_board_scan().
     if not force:
-        backoff_raw, _ = store.cache_get(board_scan._RATE_LIMIT_BACKOFF_KEY)
+        try:
+            backoff_raw = board_scan._rate_limited_until()
+        except Exception:
+            backoff_raw = None
         if backoff_raw:
             import datetime as _dt
             try:

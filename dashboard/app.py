@@ -3128,7 +3128,14 @@ async def _tick() -> None:
                 await run.io_bound(service.refresh_news)
                 await _do_cheap()
             last_llm = service.STATE["last_llm"]
-            if last_llm is None or (now - last_llm).total_seconds() >= SETTINGS["llm_min"] * 60:
+            # 2026-09-28: gate on the last ATTEMPT too, not just last SUCCESS.
+            # During a provider outage last_llm never updates, which made this gate
+            # pass every tick and refresh_llm() journal+log a skip row ~969x/day.
+            last_attempt = service.STATE.get("last_llm_attempt")
+            llm_gate = last_llm
+            if last_attempt is not None and (llm_gate is None or last_attempt > llm_gate):
+                llm_gate = last_attempt
+            if llm_gate is None or (now - llm_gate).total_seconds() >= SETTINGS["llm_min"] * 60:
                 await _do_llm()
         await asyncio.wait_for(_do_tick_work(), timeout=_TICK_TIMEOUT_SEC)
     except asyncio.TimeoutError:

@@ -217,7 +217,8 @@ def should_scan(fingerprint: str, last_fingerprint: str | None,
                 and score_only_fp == last_score_only_fp):
             return False, "headlines only delta"
         if last_scan_ts and (now_ts - last_scan_ts) < SCAN_MIN_RESCAN_MIN * 60:
-            return False, "debounced: signal changed but last scan <5min ago"
+            return False, (f"debounced: signal changed but last scan "
+                           f"<{SCAN_MIN_RESCAN_MIN}min ago")
         return True, "signal delta"
     if not last_scan_ts or (now_ts - last_scan_ts) >= SCAN_MAX_IDLE_MIN * 60:
         return True, "max idle refresh"
