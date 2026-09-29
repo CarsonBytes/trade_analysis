@@ -1997,6 +1997,7 @@ def sweep_cash() -> dict:
     + SGOV) each cycle. Paper-guarded + opt-in (CASH_SWEEP=1). Returns a status dict
     for the dashboard. NB: IB *paper* may not credit the actual distribution -- this
     runs the MECHANICS; the real yield materialises on a funded account."""
+    import time as _time
     status = {"enabled": _sweep_on(), "ok": False, "sgov_qty": 0.0, "sgov_value_base": 0.0,
               "ccy": "", "log": ""}
     if not _sweep_on():
@@ -2082,7 +2083,7 @@ def sweep_cash() -> dict:
     # a new MARKET BUY that IB silently accepts but never fills (confirmed live: 160 identical
     # orders in one session). Check: (1) existing pending SGOV order, (2) cooldown timer.
     global _sweep_last_order_ts
-    now_mono = time.monotonic()
+    now_mono = _time.monotonic()
     if now_mono - _sweep_last_order_ts < CASH_SWEEP_COOLDOWN_SEC:
         remaining = int(CASH_SWEEP_COOLDOWN_SEC - (now_mono - _sweep_last_order_ts))
         status["log"] = f"cash-sweep: cooldown {remaining}s, skipping"
@@ -2110,7 +2111,7 @@ def sweep_cash() -> dict:
     except Exception as e:                         # noqa: BLE001
         status["log"] = f"cash-sweep: order failed ({e})"
         return status
-    _sweep_last_order_ts = time.monotonic()        # start cooldown after successful submission
+    _sweep_last_order_ts = _time.monotonic()   # start cooldown after successful submission
     status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
     status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
     status["log"] = (status["log"] + f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
