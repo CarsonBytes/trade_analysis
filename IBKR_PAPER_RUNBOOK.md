@@ -1,6 +1,6 @@
 # IBKR paper-trading runbook
 
-Operational guide for the `BROKER=ib` paper-trading phase (P6). Last updated 2026-06-21.
+Operational guide for the `BROKER=ib` paper-trading phase (P6). Last updated 2026-09-30.
 
 ## What's configured
 - **`analyst/.env` → `BROKER=ib`** (acct DUK968178, port 4002). The dashboard uses
@@ -114,3 +114,28 @@ adding a new deployment as a second consumer of the same account).
 - Periodically as a standing health check even with no migration planned — this bug class can
   recur any time `sync_closures()` (or an equivalent broker-side-close-detection function) has
   a gap, and reconcile's own status-only check will not catch it.
+
+## Unwinding unintended shorts
+
+Any short on a `BROKER=ib` deployment is unintended by definition (`paper.LONG_ONLY` is
+True — the strategy never intentionally shorts). Tool: `dashboard.ops.unwind_shorts`
+(incident write-up: HANDOFF.md 2026-09-29).
+
+```bash
+# dry run (always first) — prints the exact BUYs it would send
+docker exec -w /app -e PYTHONPATH=/app -e IB_CLIENT_ID=88 quant-dashboard-docker \
+    /app/.venv/bin/python -m dashboard.ops.unwind_shorts
+# same with -e APPLY=1 to actually send (US RTH only, or FORCE_RTH=1)
+```
+
+Gotchas confirmed live 2026-09-29:
+
+- **Margin rejections (Error 201):** covering a large short can exceed the init-margin
+  headroom while a big SGOV shield holds the cash — buying power alone is not sufficient.
+  SELL SGOV first to free cash/margin, then re-run (`sweep_cash()` rebalances the shield
+  back to its 80% target afterwards).
+- **Overshoot:** the tool re-reads the position only every 12s; slow partial fills of an
+  earlier DAY tranche can land after a later tranche was sized, flipping the short LONG.
+  After running, ALWAYS confirm flat: cancel any open orders
+  (`ib.cancelOrder(order)` — ib_async `Trade` has no `.cancel()`), then flatten any
+  residual with a manual SELL during RTH.

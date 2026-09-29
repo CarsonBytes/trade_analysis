@@ -618,8 +618,11 @@ def health_banner() -> None:
                 cap_colour = "text-red" if _cap_used_pct >= 0.98 else "text-orange"
                 cap_txt = f"{_cap_used_pct*100:.0f}% of PORTFOLIO_CAP committed"
                 cap_tooltip = (
-                    "Filled positions (GrossPositionValue) plus pending (not-yet-filled) "
-                    "broker orders, as a fraction of equity x PORTFOLIO_CAP. Only ~"
+                    "Strategy filled longs plus pending (not-yet-filled) broker orders, as "
+                    "a fraction of equity x PORTFOLIO_CAP. The SGOV cash-shield and any "
+                    "unintended short are excluded -- they are not strategy deployment "
+                    "(fixed 2026-09-29: GrossPositionValue used to count both, pinning room "
+                    "at $0). Only ~"
                     f"USD {_cap_room:,.0f} of room remains -- new signals will scale down or "
                     "get held back (see Active Trades' 'retrying' cards) until room frees up "
                     "or the cap changes. Informational; the hard gate already enforces this "

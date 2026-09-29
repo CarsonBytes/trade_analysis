@@ -128,7 +128,12 @@ the full project; the honest conclusions:
 - **Execution layer, hardened for real money:** `PORTFOLIO_CAP` accounts for BOTH filled
   positions and pending (not-yet-filled) broker orders (fixed 2026-07-13, after confirming
   live pending orders alone had reached ~125% of equity — `GrossPositionValue` alone only
-  sees fills, not pending commitment); orphaned real orders get cancelled if the paper side
+  sees fills, not pending commitment) — and since 2026-09-29 it counts only **strategy**
+  longs: the SGOV cash-shield (parked idle cash, which the backtest treats as not deployed)
+  and any unintended short are excluded (fixed after GPV-seeded room sat at literally $0
+  for weeks — shield + residual shorts exceeded equity — silently blocking every new entry
+  while the header showed "100% committed"); orphaned real orders get cancelled if the paper
+  side
   resolves a trade independently while the broker order is still unfilled; the entire
   trading/monitoring loop runs as a persistent background task, not tied to a browser tab
   being open (found and fixed 2026-07-12 — previously the whole system went silently dormant
@@ -463,7 +468,9 @@ cost of real operational overhead to keep it running correctly.
 A loop between two independently-correct repair functions placed a market order every
 refresh tick until a paper position reached **−6,336 shares short against a local record of
 +66 long**, pushing GrossPositionValue to 4.7× the account's own NAV. Nothing about it was
-specific to paper; the same code was live. The rules that came out of it:
+specific to paper; the same code was live. The rules that came out of it: (the residual
+HYD/CWB shorts from this incident sat until 2026-09-29, when they were unwound — the
+overshoots and SGOV funding needed for that are in `HANDOFF.md`):
 
 1. **An order that repairs state must only ever REDUCE exposure.** `manual_close_position()`
    now takes both side and size from the *real* broker position, never from the `ib_mirror`

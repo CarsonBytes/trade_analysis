@@ -16,8 +16,18 @@ SAFETY PROPERTIES (each enforced below, not merely intended):
   * DRY RUN unless APPLY=1. The dry run prints the exact orders it would send.
   * Only ever BUYS, and only against a position that is genuinely SHORT -- it can reduce
     |position| and nothing else. It can never open, extend, or flip a position long.
+    **CAVEAT (proven wrong 2026-09-29, see HANDOFF):** under slow partial fills the DAY
+    orders sent by an EARLIER tranche kept filling after the loop's 12s re-read had moved
+    on, so the next tranche was sized from a stale reading and HYD overshot from -4,502
+    short to +4,767 LONG (recovered manually: cancel all open orders via
+    ib.cancelOrder(order) -- ib_async Trade has no .cancel() -- then one flatten SELL).
+    Until the re-read below waits for TWO CONSECUTIVE identical position readings, treat
+    "can never flip long" as intent, not guarantee, and check the final state.
   * Every tranche is capped by BOTH the remaining short AND what buying power affords
     (with BP_SAFETY headroom), so it cannot submit an order the account can't cover.
+    NB: buying power alone is NOT sufficient -- IBKR can still reject with Error 201
+    (insufficient Available Funds for the init-margin change) while a large cash shield
+    sits parked; if that happens, sell SGOV first to free cash/margin, then re-run.
   * Position and buying power are RE-READ from the broker between tranches; the loop trusts
     broker truth each time rather than its own arithmetic.
   * Refuses to run outside US regular trading hours unless FORCE_RTH=1 -- a market order

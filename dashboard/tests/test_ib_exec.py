@@ -189,7 +189,7 @@ def test_current_portfolio_room_usd():
     with mock.patch.dict(os.environ, {"PORTFOLIO_CAP": "1.0"}), \
          mock.patch.object(ib_exec, "_guard", return_value=object()), \
          mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-         mock.patch.object(ib_exec, "_gpv_usd", return_value=80_000.0), \
+         mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=80_000.0), \
          mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=15_000.0):
         check("equity 100k, cap 100%, 80k filled + 15k pending -> 5k room left",
               ib_exec.current_portfolio_room_usd(), 5_000.0)
@@ -197,10 +197,56 @@ def test_current_portfolio_room_usd():
     with mock.patch.dict(os.environ, {"PORTFOLIO_CAP": "1.0"}), \
          mock.patch.object(ib_exec, "_guard", return_value=object()), \
          mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-         mock.patch.object(ib_exec, "_gpv_usd", return_value=90_000.0), \
+         mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=90_000.0), \
          mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=25_000.0):
         check("already OVER the cap -> room floors at 0.0, not negative",
               ib_exec.current_portfolio_room_usd(), 0.0)
+
+
+def test_strategy_deployed_usd():
+    print("\n_strategy_deployed_usd(): PORTFOLIO_CAP 'deployed' = strategy longs ONLY "
+          "(2026-09-29 fix: GPV-seeded room was pinned at 0.0 by the SGOV shield + "
+          "unintended shorts -- every entry skipped for weeks):")
+    import types
+    from dashboard.execution import ib_exec
+
+    def _item(sym, mv, ccy="USD", acct="DU1", pos=None):
+        it = types.SimpleNamespace(account=acct, marketValue=mv,
+                                   contract=types.SimpleNamespace(symbol=sym, currency=ccy))
+        if pos is not None:
+            it.position = pos
+        return it
+
+    def _run(items, acct="DU1", call_impl=None, fx=0.5):
+        fake_ib = types.SimpleNamespace(portfolio=lambda: items)
+        impl = call_impl or (lambda fn, timeout=20: fn())
+        with mock.patch.object(ib_exec.ib_client, "call", side_effect=impl), \
+             mock.patch.object(ib_exec.ib_client, "fx_to_usd", return_value=fx):
+            return ib_exec._strategy_deployed_usd(fake_ib, acct)
+
+    # the live 2026-09-29 book: SGOV 364k shield + unintended shorts, NO strategy longs
+    check("SGOV shield + shorts only -> 0.0 (nothing strategy-deployed)",
+          _run([_item("SGOV", 364_426.0), _item("HYD", -304_927.0),
+                _item("CWB", -5_067.0)]), 0.0)
+    # mixed book: strategy longs count, shield and shorts don't
+    check("longs count, SGOV/shorts excluded",
+          _run([_item("SGOV", 147_985.0), _item("HYD", -304_927.0),
+                _item("QQQ", 12_000.0), _item("VNQ", 3_500.0)]), 15_500.0)
+    check("empty portfolio -> 0.0", _run([]), 0.0)
+    # multi-account ghost (2026-07-17 class): other account's long must not count
+    check("other account's long filtered out",
+          _run([_item("QQQ", 9_999.0, acct="U20738951"),
+                _item("SPY", 1_000.0, acct="DU1")], acct="DU1"), 1_000.0)
+    # non-USD contract converts via fx_to_usd
+    check("non-USD contract converted to USD",
+          _run([_item("IBTA", 100_000.0, ccy="HKD")]), 50_000.0)
+    check("fx unavailable -> pegged 1.0 (never a raise)",
+          _run([_item("IBTA", 78_000.0, ccy="EUR")], fx=None), 78_000.0)
+    # broker read failure -> 0.0 fail-open (same convention as _gpv_usd)
+    def _boom(fn, timeout=20):
+        raise RuntimeError("ib down")
+    check("broker read failure -> 0.0 (fail open, never blocks entries)",
+          _run([_item("QQQ", 12_000.0)], call_impl=_boom), 0.0)
 
 
 def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
@@ -817,7 +863,7 @@ def test_mirror_new_cancels_stale_signal_instead_of_funding():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
@@ -878,7 +924,7 @@ def test_mirror_new_cancels_pending_signal_on_retired_instrument():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
@@ -1038,7 +1084,7 @@ def test_mirror_new_cancels_pending_tech_signal_when_paused():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "_place_etf_bracket",
@@ -1118,7 +1164,7 @@ def test_mirror_new_holds_entry_outside_execution_window():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=False), \
@@ -1169,7 +1215,7 @@ def test_mirror_new_places_entry_inside_execution_window():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
@@ -1218,7 +1264,7 @@ def test_mirror_new_lets_pending_sleeve_tech_signal_through_when_paused():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
@@ -1273,7 +1319,7 @@ def test_mirror_new_does_not_cancel_tech_signals_when_resumed():
              mock.patch.object(ib_exec, "_guard", return_value=object()), \
              mock.patch.object(ib_exec, "_mirrored_ids", return_value=set()), \
              mock.patch.object(ib_exec, "_equity_usd", return_value=100_000.0), \
-             mock.patch.object(ib_exec, "_gpv_usd", return_value=0.0), \
+             mock.patch.object(ib_exec, "_strategy_deployed_usd", return_value=0.0), \
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \

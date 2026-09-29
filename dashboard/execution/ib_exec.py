@@ -349,24 +349,27 @@ def mirror_new() -> list[str]:
     # drives the margin-debit interest cost, not the per-position cap itself. Backtested
     # hybrid (keep ETF_POS_CAP generous, cap the AGGREGATE too) strictly dominated every
     # pure-per-position-cap alternative tested (more CAGR AND better maxDD -- see HANDOFF).
-    # `deployed` is a running total seeded from the broker's real GrossPositionValue and
+    # `deployed` is a running total seeded from _strategy_deployed_usd() (strategy longs
+    # only -- SGOV shield + unintended shorts excluded, see that function's 2026-09-29
+    # live incident docstring; GPV seeding before that put room at 0.0 for weeks) and
     # incremented as each new position is placed THIS cycle, so multiple signals firing in
     # the same cycle can't collectively overshoot the cap (each only sees room actually left
     # after earlier ones in the same batch, same "walk the book chronologically" logic the
     # backtest itself uses).
-    # FIXED 2026-07-13: GrossPositionValue alone only counts FILLED positions -- a pending,
+    # FIXED 2026-07-13: filled positions alone only count FILLED positions -- a pending,
     # not-yet-filled order (e.g. placed outside market hours) contributed nothing here,
     # letting PORTFOLIO_CAP be silently breached (confirmed live: 6 pending orders already
     # totalled ~125% of equity before IBKR's OWN margin check, not this cap, cancelled the
     # 7th). _pending_entry_notional_usd() adds that missing commitment.
-    deployed = [_gpv_usd(ib) + _pending_entry_notional_usd()]
     # Error 435 "You must specify an account" (confirmed live 2026-07-10): IBKR requires an
     # explicit order.account whenever the login manages MORE than one account (this one does:
     # the real U12991898 + an unrelated empty U20738951) -- without it, orders get silently
     # cancelled. Fetched ONCE here (outside any call()/_run() closure -- account_id() does its
     # own loop-thread round-trip, so calling it FROM inside one would self-deadlock) and passed
-    # down to every order-placing helper below.
+    # down to every order-placing helper below. Also seeds _strategy_deployed_usd() so the
+    # portfolio room sum is account-filtered without a second round-trip.
     acct = ib_client.account_id()
+    deployed = [_strategy_deployed_usd(ib, acct) + _pending_entry_notional_usd()]
     # PHASE auto-switch: Phase 1 = core only; Phase 2 (equity >= PHASE2_NAV_USD) also runs the
     # panic-MR sleeve, IF ALSO explicitly enabled (sleeve.sleeve_enabled(), paper-only by
     # default -- see sleeve.py). Both gates independent so the sleeve never silently activates.
@@ -492,6 +495,44 @@ def _gpv_usd(ib) -> float:
     return 0.0
 
 
+def _strategy_deployed_usd(ib, acct: str | None = None) -> float:
+    """STRATEGY long notional in USD -- what PORTFOLIO_CAP's `deployed` must count.
+
+    Mirrors research.backtest's hybrid cap (HANDOFF 2026-07-11): the aggregate of the
+    strategy's OWN position notionals vs equity x cap. GrossPositionValue was the seed
+    since 2026-07-11 but is WRONG for this and was proven so live 2026-09-29: GPV also
+    counts (a) the SGOV cash-shield -- parked idle cash, which the backtest treats as
+    NOT deployed (its non-position capital is cash), and (b) any unintended short
+    (LONG_ONLY is True whenever BROKER=ib, so a short is by definition a bug, never
+    strategy deployment). Live, SGOV ~$364k + residual shorts ~$310k against ~$143k
+    equity put GPV-seeded room at 0.0 for weeks: every entry was sized to 0 and skipped
+    ("<1 share at the risk/cap budget") while the header showed "100% of
+    PORTFOLIO_CAP committed".
+
+    Sum signed ib.portfolio() market values: shorts drop out as negatives, SGOV is
+    excluded explicitly, everything else long counts (strategy + sleeve ETFs, futures).
+    Portfolio marketValue is in the CONTRACT's currency (US ETFs -> USD); non-USD
+    contracts convert via fx_to_usd. Fails open to 0.0 on any read error -- same
+    convention as _gpv_usd: an unavailable reading means "nothing deployed yet", it
+    never blocks entries."""
+    def _sum() -> float:
+        total = 0.0
+        for i in ib_client.filter_by_account(ib.portfolio() or [], acct):
+            mv = float(getattr(i, "marketValue", 0.0) or 0.0)
+            if mv <= 0:                                # shorts (signed negative) excluded
+                continue
+            if getattr(i.contract, "symbol", "") == SGOV_SYMBOL:
+                continue                               # cash-shield != strategy deployment
+            ccy = getattr(i.contract, "currency", "USD") or "USD"
+            rate = 1.0 if ccy == "USD" else (ib_client.fx_to_usd(ccy) or 1.0)
+            total += mv * rate
+        return total
+    try:
+        return float(ib_client.call(_sum, timeout=20))
+    except Exception:                                  # noqa: BLE001
+        return 0.0
+
+
 def _pending_entry_notional_usd() -> float:
     """Sum of entry notional (qty x entry price, USD -- US ETFs price in USD, no FX needed)
     for every symbol with a REAL order sitting at the broker that hasn't filled yet.
@@ -540,9 +581,11 @@ def current_equity_usd() -> float | None:
 
 
 def current_portfolio_room_usd() -> float | None:
-    """PUBLIC: USD notional still available under PORTFOLIO_CAP right now (filled +
-    pending commitment subtracted from equity x cap) -- None if not connected, or if
-    PORTFOLIO_CAP is disabled (0, meaning "no cap" -- there's no meaningful "room" to report).
+    """PUBLIC: USD notional still available under PORTFOLIO_CAP right now (strategy filled
+    longs + pending commitment subtracted from equity x cap; the SGOV cash-shield and any
+    unintended short are NOT committed -- see _strategy_deployed_usd) -- None if not
+    connected, or if PORTFOLIO_CAP is disabled (0, meaning "no cap" -- there's no
+    meaningful "room" to report).
     Added 2026-07-13 alongside app.py's _pending_reason() fix: a signal correctly held back
     by cap_qty_to_portfolio_room() (e.g. SPY/QQQ/IWM, confirmed live) used to show the same
     "awaiting the next mirror cycle" message as a signal about to place normally -- misleading,
@@ -554,7 +597,10 @@ def current_portfolio_room_usd() -> float | None:
     if portfolio_cap <= 0:
         return None
     equity = _equity_usd(ib)
-    deployed = _gpv_usd(ib) + _pending_entry_notional_usd()
+    # 2026-09-29: was _gpv_usd(ib) -- GrossPositionValue counted the SGOV cash-shield and
+    # unintended shorts as "committed", holding room at 0.0 while the header screamed
+    # "100% of PORTFOLIO_CAP committed". See _strategy_deployed_usd() for the full story.
+    deployed = _strategy_deployed_usd(ib) + _pending_entry_notional_usd()
     return max(equity * portfolio_cap - deployed, 0.0)
 
 

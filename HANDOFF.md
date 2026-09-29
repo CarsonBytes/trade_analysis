@@ -1,7 +1,109 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-29.
+Last updated 2026-09-30.
+
+---
+
+### 🔥 FIXED 2026-09-30: `[PAPER] EIMI: broker error 200` spammed Telegram every ~85s -- quote paths never threaded primaryExchange, and a persistent red re-pushed on EVERY occurrence (b551e54)
+
+User ask: *"keep the auto alert debugging on, also it keeps popping: [PAPER] EIMI: broker
+error 200 ..."*. The auto-debug listener was deliberately left ON per the user -- and it
+never fired for this anyway: quant `notify.send` writes Telegram only (no alert file), so
+the spam never spawned debug sessions.
+
+**Two bugs stacked:**
+1. `get_stock_tick()` built `Stock(symbol, "SMART", currency)` with NO `primaryExchange`.
+   UCITS/LSEETF tickers don't qualify under bare SMART, so IB answered error 200 "No
+   security definition has been found for the request" on EVERY `_refresh_pending_ticks()`
+   cheap cycle (~85s) for as long as EIMI's signal stayed unfunded -- i.e. the spam only
+   lasted as long as the room-$0 bug below kept entries from filling. The order path
+   already threaded `inst.ib_exchange` via `_stock_contract_for()`; BOTH quote paths did
+   not.
+2. `notable_events.record()` pushed a RED event on EVERY occurrence inside the 30-min
+   dedupe window -- the counter collapsed the rows but the phone still buzzed each cycle.
+   Push now fires only when the group FIRST turns red (new insert, or yellow->red
+   escalation), or with `force_push=True` (previously read by no caller at all).
+
+**Fix (b551e54):** `get_stock_tick(primary_exchange=...)` threaded from
+`service._refresh_pending_ticks()` (via `active_by_key().ib_exchange`) and `ib_exec`'s
+sleeve spread guard; `became_red` push policy in `core/notable_events.py`. Tests:
+`test_get_stock_tick_primary_exchange_kwarg`, `test_red_pushes_once_per_dedupe_group`
+(5 repeats -> 1 push, escalation exactly once, force_push still sends), service fixture
+gained an EIMI row asserting LSEETF is threaded. Full suite green (25 modules -- caveat: a
+batch loop matching `\d+ FAILED` false-positives on log lines like "gw:4004 failed"; re-run
+per-module with `& "D:\quant\.venv\Scripts\python.exe" -m dashboard.tests.<mod>` to
+confirm green before trusting a batch FAIL).
+
+**Verified live post-deploy (03:42:58 HKT -- first deploy in a while ending with
+"gateway login confirmed"):** zero error-200 / `No security definition` lines and
+`pending-tick refresh: 3/3 instrument(s) got a fresh IB quote (DBC, EIMI, QQQ)` every
+cycle -- EIMI now qualifies.
+
+---
+
+### 🔥 FIXED 2026-09-29: PORTFOLIO_CAP room pinned at $0 for weeks (every entry skipped) -- GPV counted the SGOV shield AND the unintended shorts as "committed"
+
+User ask: *"paper account has not enough space for new trades, why so, i suppose sgov could be
+dynamically adjusted?!"*
+
+**Symptom.** Header showed "100% of PORTFOLIO_CAP committed ... Only ~USD 0 of room remains";
+pending cards said "Needs ~USD X/share, ~USD 0 of room left"; every placement attempt logged
+`<1 share at the risk/cap budget, SKIP` (live example: DBC+QQQ at 18:00:44). The journal kept
+opening trades 155/160/161 that never reached the broker -- no `ib_mirror` rows since
+paper_id 152 (2026-08-25), i.e. **broker replication had been silently dead for a month**.
+
+**Root cause.** `deployed` was seeded from GrossPositionValue at BOTH sites
+(`_place_brackets` and `current_portfolio_room_usd`): room = equity x cap - GPV - pending.
+Live book at diagnosis: equity ~$143k but GPV ~$674k = (a) **SGOV shield $364k** -- parked
+idle cash, which the backtest's PORTFOLIO_CAP (its non-position capital is cash) treats as
+NOT deployed -- plus (b) **unintended shorts HYD -6,402 / CWB -50 (~$310k)**, residue of the
+2026-09-01 duplicate-bracket over-sell, never unwound (reconcile had been warning
+`only_broker(untracked)=['CWB','HYD']` every 10min). So `room` clamped to 0.0 permanently.
+SGOV only exceeded equity because the short proceeds funded it: the sweep's
+`investable = cash + SGOV` happily "parks" short-sale proceeds. The user's SGOV intuition was
+half right: the dynamic SGOV mechanism ALREADY exists (sweep_cash()'s 20% cash buffer auto
+top-up sells SGOV back down whenever strategy buying drains cash) -- it just could never
+matter while room was 0 first, and selling ALL SGOV still would not have freed room while the
+shorts counted against GPV.
+
+**Fix.** New `_strategy_deployed_usd(ib, acct)` in ib_exec: signed `ib.portfolio()` long
+market values only (shorts drop out as negatives), SGOV excluded explicitly, non-USD
+contracts converted, account-filtered, fails open to 0.0 on any read error (same convention
+as `_gpv_usd`). It now seeds BOTH `deployed` sites (placement loop fetches `acct` first so
+the sum needs no second round-trip); the room docs/tooltip in app.py were rewritten to stop
+saying "GrossPositionValue". Tests: `test_strategy_deployed_usd` (7 cases, including the
+exact live 2026-09-29 book: shield+shorts only -> 0.0) plus the 7 flow-test patches
+retargeted from `_gpv_usd`. Post-fix room = full ~$143k (strategy holds zero filled longs;
+the 3 journal-OPEN trades mirror on the next US session).
+
+**Unwind of the unintended shorts (user-approved, dry-run first, APPLY during RTH).**
+1. `dashboard.ops.unwind_shorts` dry-run validated: single tranche BUY 6,402 HYD (~$305k)
+   + BUY 50 CWB, BP $363k affords both.
+2. APPLY flattened CWB immediately; HYD then hit repeated **Error 201 margin rejections**
+   (covering a $305k short needs init-margin headroom while HKD 2.84m sat in SGOV) and
+   stalled at -4,502 after MAX_TRANCHES.
+3. **Sold 2,150 SGOV (~$216k, filled @100.67) to fund the rest** -- exactly the
+   "dynamically adjust SGOV" the user suggested.
+4. Re-run exposed a **gap in the unwind tool**: its DAY buys kept partially filling after
+   each 12s re-read, so the -4,502 short over-shot to **+4,767 LONG**. Recovered by
+   cancelling every open HYD order (`ib.cancelOrder(order)` -- note ib_async `Trade` has NO
+   `.cancel()`) and flattening the residual with one SELL -- **flat 19:51:57 UTC, before the
+   16:00 ET close**. FOLLOW-UP: the tool's docstring invariant "can never flip a position
+   long" does NOT hold under slow partial fills -- it must re-read until two consecutive
+   identical position readings before each tranche (and the overshoot path needs a
+   flatten), see the updated caveat in the module docstring.
+5. Final book: no shorts, no HYD/CWB; SGOV 1,470 sh (~$148k); cash briefly ~-HKD 30k from
+   the covering -- sweep_cash() rebalances to its 80% target next US session; reconcile's
+   untracked warnings stop now that positions are flat.
+
+**Deploy note.** The first background rebuild of live for 6565cb9 left no log but DID land
+(`quant-dashboard-live-docker`: MAX_INSTRUMENTS=9, `_fp_audit_tick` x3 verified). This
+commit adds the room fix on top and needs one live rebuild. Paper deploys via push as usual.
+
+**Still pending:** fp_audit counters + skip-row thinning visible in `/status` after 30+ min
+on both instances; trades 155/160/161 should gain ib_mirror rows on the next US session
+(room > 0 now); live gateway 2FA (user).
 
 ---
 
