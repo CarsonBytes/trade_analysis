@@ -165,20 +165,39 @@ def test_hist_cash_gpv():
 def test_detect_external_cash_flow():
     print("\ndetect_external_cash_flow():")
     # THE REAL 2026-07-27 INCIDENT, reproduced exactly from the live snapshot
-    got = detect_external_cash_flow(-31.38, 102079.0, 29968.62, 102079.0, 132047.86)
-    approx("real deposit case: cash -31.38 -> 29968.62, gpv unchanged -> +30000", got, 30000.0, tol=0.01)
-    check("withdrawal: cash drops, gpv unchanged -> negative flow",
-          detect_external_cash_flow(30000.0, 102000.0, 10000.0, 102000.0, 112000.0), -20000.0)
-    check("buy fill: cash down, gpv up by the same amount -> None (not an external flow)",
-          detect_external_cash_flow(30000.0, 102000.0, 10000.0, 122000.0, 132000.0), None)
-    check("sell fill: cash up, gpv down by the same amount -> None",
-          detect_external_cash_flow(10000.0, 122000.0, 30000.0, 102000.0, 132000.0), None)
+    # (prev_nl/prev_cash and new_nl/new_cash derive from the same cash+positions numbers).
+    got = detect_external_cash_flow(102047.62, -31.38, 132047.62, 29968.62, 132047.62)
+    approx("real deposit case: cash -31.38 -> 29968.62, positions untouched -> +30000",
+           got, 30000.0, tol=0.01)
+    check("withdrawal: cash drops with equity by the same amount -> negative flow",
+          detect_external_cash_flow(132000.0, 30000.0, 112000.0, 10000.0, 112000.0), -20000.0)
+    check("buy fill: cash down, equity unchanged -> None (money moved into positions)",
+          detect_external_cash_flow(132000.0, 30000.0, 132000.0, 10000.0, 132000.0), None)
+    check("sell fill: cash up, equity unchanged -> None",
+          detect_external_cash_flow(132000.0, 10000.0, 132000.0, 30000.0, 132000.0), None)
     check("market move only: cash untouched -> None (this IS trading P&L)",
-          detect_external_cash_flow(29968.0, 102000.0, 29968.0, 104040.0, 134008.0), None)
+          detect_external_cash_flow(131968.0, 29968.0, 134008.0, 29968.0, 134008.0), None)
     check("small dividend-sized cash bump -> None (below the noise floor, stays in P&L)",
-          detect_external_cash_flow(29968.0, 102000.0, 30468.0, 102000.0, 132468.0), None)
-    check("legacy entry (cash/gpv unknown) -> None (caller must fall back to the magnitude check)",
-          detect_external_cash_flow(None, None, 29968.62, 102079.0, 132047.86), None)
+          detect_external_cash_flow(131968.0, 29968.0, 132468.0, 30468.0, 132468.0), None)
+    check("legacy entry (prev cash unknown) -> None (caller falls back to magnitude check)",
+          detect_external_cash_flow(None, None, 132047.86, 29968.62, 132047.86), None)
+    # ---- THE 2026-09-29 INCIDENT (the old d_cash+d_gpv version booked these as flows) ----
+    # Actual equity_history rows from the HYD/CWB short unwind: cash swung by >1.4M HKD per
+    # window while NetLiq barely moved (short-covering is equity-neutral; the old version
+    # used IBKR's ABSOLUTE GrossPositionValue, so abs-GPV shrank WITH cash and the residual
+    # looked like a withdrawal -- 3 phantom rows, -4.87M HKD total).
+    check("short-cover window (the 19:41 row): cash -1.42M, equity +5.4k -> None",
+          detect_external_cash_flow(1119381.48, 706882.94, 1124741.66, -714965.33,
+                                    1124741.66), None)
+    check("short-cover window (the 19:44 row): cash -975k, equity -173 -> None",
+          detect_external_cash_flow(1124741.66, -714965.33, 1124568.37, -1689538.78,
+                                    1124568.37), None)
+    check("flatten window (the 19:46 row): cash +1.59M, equity -151 -> None",
+          detect_external_cash_flow(1124568.37, -1689538.78, 1124417.75, -103568.66,
+                                    1124417.75), None)
+    check("short CREATION (the 2026-09-01 oversell class): cash +X, equity ~flat -> None",
+          detect_external_cash_flow(1100000.0, 200000.0, 1100000.0, 1600000.0,
+                                    1100000.0), None)
     # Documents WHY layer 1 exists: the OLD magnitude-only heuristic really did miss this.
     check("regression check: the pre-existing magnitude heuristic missed this exact deposit",
           is_equity_jump_implausible(132101.90, 102119.95, 90000.0), False)
@@ -446,6 +465,138 @@ def test_open_position_instruments_includes_retired_but_open_keys():
         else: os.environ["BROKER"] = old_broker
         if old_uni is None: os.environ.pop("UNIVERSE", None)
         else: os.environ["UNIVERSE"] = old_uni
+
+
+# ---- compute_today_pnl() regressions (2026-09-30) ------------------------------------
+# THE 2026-09-29 INCIDENT: on the short-unwind day this panel showed strategy -2.45M (the
+# removed gpv-estimate fallback, fooled by ABS GPV + shorts), SGOV -1.69M (a share SALE
+# priced as a loss), FX +2.4M, total +740,803 -- while equity actually rose +3,713. Three
+# independent bugs, one per formula; each has its own assertion below.
+def _today_pnl_env(hist, cash_flows, sgov_hist, account, positions, sweep):
+    """Install a controlled STATE/cache world for one compute_today_pnl() call.
+    Returns (service, store, saved_keys) for cleanup in finally."""
+    from dashboard.core import store
+    from dashboard.web import service
+    saved = {k: service.STATE.get(k) for k in
+             ("account", "positions", "cash_sweep", "fx_usd_per_base", "tbill_rate")}
+    service.STATE["account"] = account
+    service.STATE["positions"] = positions
+    service.STATE["cash_sweep"] = sweep
+    service.STATE["fx_usd_per_base"] = None
+    service.STATE["tbill_rate"] = None
+    store.cache_set("equity_history", hist)
+    store.cache_set("cash_flows", cash_flows)
+    store.cache_set("sgov_history", sgov_hist)
+    store.cache_set("interest_history", [])
+    store.cache_set("position_day_open", None)
+    store.cache_set("daily_pnl_history", [])
+    return service, store, saved
+
+
+def _today_pnl_restore(saved):
+    from dashboard.core import store
+    from dashboard.web import service
+    for k, v in saved.items():
+        if v is None:
+            service.STATE.pop(k, None)
+        else:
+            service.STATE[k] = v
+    for k in ("equity_history", "cash_flows", "sgov_history", "interest_history",
+              "position_day_open", "daily_pnl_history"):
+        store.cache_set(k, [] if k != "position_day_open" else None)
+
+
+def test_today_pnl_total_excludes_only_recorded_flows():
+    print("\ncompute_today_pnl() -- total: subtracts only RECORDED external flows, never "
+          "internal cash<->positions moves (the +740,803 incident):")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        import time as _t
+        from dashboard.core import paper
+        from dashboard.execution import ib_exec   # creates ib_mirror
+        with paper._LOCK, paper._conn():
+            pass
+        now = _t.time()
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        ts_start = now - 3600
+        hist = [[ts_start, 1119381.48, "HKD", 706882.94, 5298025.29]]
+        # equity now 1,123,094.33; cash crashed to -30,207 (the SGOV sale, an INTERNAL
+        # move the old formula wrongly subtracted: it showed 3712.85 - (-737090) = +740,803)
+        account = {"NetLiquidation": 1123094.33, "_ccy": "HKD",
+                   "TotalCashValue": -30207.0, "GrossPositionValue": 1161231.0,
+                   "AccruedCash": 0.0}
+        # flat strategy book -- old gpv-estimate branch would have seen abs-GPV 5.3M ->
+        # 1.16M and reported a fake -2.45M "strategy loss"
+        service, store, saved = _today_pnl_env(hist, [], [], account, {}, {"enabled": False})
+        try:
+            out = service.compute_today_pnl()
+            approx("total == real equity change (+3,712.85), not +740,803",
+                   out["total"]["pnl"], 3712.85, tol=0.01)
+            check("flat book => strategy 0.0 (gpv-estimate branch removed)",
+                  out["strategy"]["total"], 0.0)
+            check("strategy source is broker", out["strategy"]["source"], "broker")
+            # now WITH a genuine recorded deposit of +10,000 today
+            store.cache_set("cash_flows", [[now - 600, 10000.0, "HKD"]])
+            out2 = service.compute_today_pnl()
+            approx("recorded +10,000 deposit IS excluded: 3,712.85 - 10,000",
+                   out2["total"]["pnl"], -6287.15, tol=0.01)
+        finally:
+            _today_pnl_restore(saved)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
+
+
+def test_today_pnl_sgov_share_aware():
+    print("\ncompute_today_pnl() -- SGOV: a share SALE is not a loss; only price/yield "
+          "movement on held shares counts (the -1.69M 'SGOV yield' incident):")
+    old, path = _isolated_db()
+    old_broker = os.environ.get("BROKER")
+    os.environ["BROKER"] = "ib"
+    try:
+        import time as _t
+        from dashboard.core import paper
+        from dashboard.execution import ib_exec
+        with paper._LOCK, paper._conn():
+            pass
+        now = _t.time()
+        ts_start = now - 3600
+        # start of day: 3,620 sh @ 785.187 HKD = 2,842,378.04 (row WITH qty, post-fix)
+        hist = [[ts_start, 1119381.48, "HKD", 706882.94, 5298025.29]]
+        sgov_hist = [[ts_start, 2842378.04, 3620.0]]
+        # now: 1,470 sh after selling 2,150 to fund the unwind; px walked up to 785.287
+        # (+0.10 HKD/sh = the day's yield) => true pnl = 3620 * 0.10 ~= +362
+        sweep = {"enabled": True, "sgov_value_base": 1154371.90, "sgov_qty": 1470.0}
+        account = {"NetLiquidation": 1123094.33, "_ccy": "HKD", "AccruedCash": 0.0}
+        service, store, saved = _today_pnl_env(hist, [], sgov_hist, account, {}, sweep)
+        try:
+            out = service.compute_today_pnl()
+            approx("share-aware pnl ~= +361 (yield on held shares), NOT -1.69M",
+                   out["sgov"]["pnl"], 360.91, tol=1.0)
+            # legacy row (no qty field) -> falls back to the raw value delta (documents
+            # WHY the repair backfills qty: without it a sale day reads as a loss)
+            store.cache_set("sgov_history", [[ts_start, 2842378.04]])
+            out2 = service.compute_today_pnl()
+            approx("legacy no-qty row falls back to value delta",
+                   out2["sgov"]["pnl"], 1154371.90 - 2842378.04, tol=0.01)
+            # shares unchanged (normal day): plain value delta IS the yield -- exercise the
+            # sh_start == sh_now branch with a qty-bearing row on both sides
+            store.cache_set("sgov_history", [[ts_start, 2842378.04, 3620.0]])
+            sweep["sgov_qty"] = 3620.0
+            sweep["sgov_value_base"] = 2842740.00
+            service.STATE["cash_sweep"] = sweep
+            out3 = service.compute_today_pnl()
+            approx("unchanged shares: value delta == yield",
+                   out3["sgov"]["pnl"], 2842740.00 - 2842378.04, tol=0.01)
+        finally:
+            _today_pnl_restore(saved)
+    finally:
+        if old_broker is None: os.environ.pop("BROKER", None)
+        else: os.environ["BROKER"] = old_broker
+        _restore_db(old, path)
 
 
 if __name__ == "__main__":

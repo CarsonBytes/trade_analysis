@@ -5,6 +5,67 @@ Last updated 2026-09-30.
 
 ---
 
+### 🔥 FIXED 2026-09-30: Paper P&L corrupted -- 3 phantom cash flows (−4,872,560.77 HKD) from an abs-GPV identity + 3 broken "today" panel lines (user: *"check p&l for paper account, its mistakenly calculated?"*)
+
+**Symptom.** Portfolio card: "Total trading P&L **up HKD 4,955,669 (−129.30%)**" while the
+book was flat; deposit-adjusted equity chart +30d bar jumped ~4.87M; today panel showed a
+fake **−2.45M strategy loss**, a **−1.69M SGOV "yield"** on the day the shield was sold, and
+**+740,803 trading P&L** when equity actually moved +3,713; Layer-2 crosscheck DIVERGED with
+gap **+4,964,724** vs tol 56k (the canary — correctly alarmed).
+
+**Root cause.** `detect_external_cash_flow()` used the identity `NL = cash + GPV`, but
+IBKR's GrossPositionValue is the sum of ABSOLUTE values, so the identity dies whenever
+shorts exist. Every short-cover window during the 2026-09-29 HYD/CWB unwind computed a
+large negative residual and booked a withdrawal: `19:41:32 −2,848,666.82`,
+`19:44:18 −1,948,973.61`, `19:46:42 −74,920.34` (d_nl was only ±5k each time). Today-panel
+had 3 more bugs: (a) a gpv-estimate strategy fallback (abs-GPV again → phantom −2.45M loss
+while flat); (b) SGOV value-diff on a share-sale day (−1,692k of the 2,150-sh sale read as
+"yield"); (c) `trading_change = ΔNL − Δcash`, which swallows every internal cash↔positions
+conversion (the +740,803).
+
+**Code fix (`dashboard/web/service.py`):**
+1. Detector rewritten: `detect_external_cash_flow(prev_nl, prev_cash, new_nl, new_cash,
+   netliq, tol=None)` — NL/cash structural check, **never GPV**: `d_cash≈0` → None
+   (market), `d_nl≈d_cash` → d_cash (deposit/withdrawal), `d_nl≈0` → None (fill),
+   else mixed → d_nl. Case-table comment documents the incident. Shorts-proof: the
+   position term cancels out of `d_nl − d_cash` long or short.
+2. `compute_today_pnl`: gpv-estimate branch REMOVED (strategy = broker mirror truth;
+   `live_positions() = {}` means flat, a real 0.0); SGOV now share-aware
+   (`pnl = value_now − value_start − (sh_now − sh_start) × px_now`; legacy rows without
+   qty assume shares unchanged — correct for every day pre-2026-09-30); `trading_change =
+   ΔNL − flows_today` (recorded flows only — same basis as the card); `sgov_history`
+   writer now appends qty as 3rd field `[ts, value, qty]`.
+
+**Data repair (run in `quant-dashboard-docker`, not code):** removed the 3 phantom rows
+from `cash_flows` (4 → 1); backfilled qty into `sgov_history` (3,620 for all pre-sale
+rows; the Sep 30 post-sale row got 1,470 after a blanket backfill first mislabeled it
+3,620 — shares sold 2,150 on 2026-09-29 19:0x–19:4x leaving 1,470). Sep 2's −9,223.03
+row was LEFT (predates the visible history window, excluded from the card by inception
+anyway) — flagged to the user to confirm/delete via the Cash flows dialog.
+
+**Tests:** `test_detect_external_cash_flow` rewritten for the new signature + the 4
+incident rows as regressions; new `test_today_pnl_total_excludes_only_recorded_flows`,
+`test_today_pnl_sgov_share_aware`. Full suite **283 passed / 0 failed**.
+
+**Verified post-repair (probe 2026-09-30 09:16 UTC):** card **+82,786.79 HKD (+7.96%)**
+(was +4,955,669 / −129.30%); today panel total −168.00 (quiet overnight), strategy 0.00,
+SGOV +114.77, interest +371.84, FX residual −654.61 (peg-vs-real-fx bucket by design);
+crosscheck gap back to **+90,687** vs tol 56,140.
+
+**NOT a bug — pre-existing & left as-is:** the ~90k crosscheck gap is real and predates
+the phantom incident (event log id 209, 18:00 UTC — *before* the first phantom at 19:41 —
+already showed +86,938 DIVERGED): equity +83k since inception vs journal realized −7.7k
+HKD. The journal never saw the shorts/oversell-era P&L (mirror rows dead since paper_id
+152) nor SGOV yield — Layer 2 is truthfully saying the journal doesn't explain the equity
+growth. YELLOW tier, log-only (only RED pushes to Telegram/ntfy). Investigating means
+rebuilding trade history, not touching the monitor.
+
+**Lesson:** IBKR GrossPositionValue is an ABSOLUTE sum — never use it in NL identities or
+"what's committed" math while shorts can exist (same bug class as the PORTFOLIO_CAP room
+$0: GPV counted the shield + shorts as deployed).
+
+---
+
 ### 🔥 FIXED 2026-09-30: `[PAPER] EIMI: broker error 200` spammed Telegram every ~85s -- quote paths never threaded primaryExchange, and a persistent red re-pushed on EVERY occurrence (b551e54)
 
 User ask: *"keep the auto alert debugging on, also it keeps popping: [PAPER] EIMI: broker

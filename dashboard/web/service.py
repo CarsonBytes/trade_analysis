@@ -183,20 +183,20 @@ def is_equity_jump_implausible(new_val: float, prev_val: float, gpv: float | Non
 # CANNOT work here -- with positions open, a 29% deposit and a 29% market move are
 # indistinguishable by size.
 #
-# The structural signature is unambiguous, because NetLiq = cash + GPV holds exactly
-# (verified against the live account: 102,095.55 + 29,968.62 = 132,064.17):
+# Structural signature (REVISED 2026-09-30, see the incident note in the function):
+# NetLiq = cash + position_value_signed, so the position term cancels out of
+# (d_NL - d_cash):
 #
-#   event         | d_cash | d_gpv  | discriminator
-#   --------------|--------|--------|----------------------------------------
-#   deposit       |  +X    |  ~0    | cash moves, positions don't
-#   withdrawal    |  -X    |  ~0    | cash moves, positions don't
-#   buy fill      |  -X    |  +X    | cash <-> positions, they cancel
-#   sell fill     |  +X    |  -X    | cash <-> positions, they cancel
-#   market move   |   0    |  +/-   | cash untouched
+#   event         | d_nl | d_cash | discriminator
+#   --------------|------|--------|-------------------------------------------------
+#   deposit       | +X   | +X     | positions unchanged: d_nl == d_cash
+#   withdrawal    | -X   | -X     | ...and the cash delta IS the outside money
+#   buy/sell fill | ~0   | -/+X   | equity didn't move: money moved cash <-> positions
+#   market move   | +/-P | ~0     | cash untouched: that IS trading P&L
 #
-# So: cash must move materially (rules out market moves), AND the move must not be
-# cancelled by an opposite GPV move (rules out our own fills). Size-independent -- catches
-# a 3k deposit as reliably as a 30k one.
+# Cash must move materially (rules out market moves), and the move must not be explained
+# by positions absorbing it (rules out our own fills). Size-independent -- catches a 3k
+# deposit as reliably as a 30k one.
 CASH_FLOW_MIN_ABS = 1000.0    # floor: below this it's dividends/interest/commission noise,
 CASH_FLOW_MIN_PCT = 0.005     # ...or 0.5% of NetLiq, whichever is LARGER. Deliberately set
                               # above a plausible quarterly dividend credit (~500 HKD on a
@@ -215,30 +215,43 @@ def hist_cash_gpv(entry) -> tuple[float | None, float | None]:
     return None, None
 
 
-def detect_external_cash_flow(prev_cash, prev_gpv, new_cash, new_gpv, netliq,
+def detect_external_cash_flow(prev_nl, prev_cash, new_nl, new_cash, netliq,
                               tol: float | None = None) -> float | None:
     """The signed external flow (+deposit / -withdrawal) between two account snapshots, or
     None if this looks like ordinary trading/market movement. See the case table above.
 
-    Returns the CASH delta (not the NetLiq delta) when no simultaneous fill is detected, so
-    the amount excludes market drift on open positions -- verified on the 2026-07-27 deposit:
-    cash-derived gives exactly 30,000.00, while the NetLiq delta gives 29,981.95 (the -18.05
-    difference is real position drift over the 10-min snapshot window, which belongs in P&L,
+    REVISED 2026-09-30 -- never looks at GPV. The original version used
+    `d_cash + d_gpv` on the identity "NetLiq = cash + GPV", but IBKR's
+    GrossPositionValue is the sum of ABSOLUTE values, so that identity only holds when
+    there are no shorts. The unintended HYD/CWB shorts were covered on 2026-09-29 and
+    every short-covering window computed `d_cash + d_gpv` as a large NEGATIVE residual
+    (abs-GPV shrank together with cash), booking three phantom withdrawals totalling
+    -4,872,560.77 HKD: the portfolio card read "up HKD 4,955,669 (-129.30%)", the
+    deposit-adjusted equity chart jumped ~4.87M, and Layer 2 raised a DIVERGED alert
+    (gap 4.96M vs tolerance 56k -- correctly, it was the canary). Shorts-proof now: the
+    position term cancels out of (d_NL - d_cash) whether it is long or short.
+
+    Returns the CASH delta (not the NetLiq delta) when positions didn't move, so the
+    amount excludes market drift on open positions -- verified on the 2026-07-27 deposit:
+    cash-derived gives exactly 30,000.00, while the NetLiq delta gives 29,981.95 (the
+    -18.05 is real position drift over the 10-min snapshot window, which belongs in P&L,
     not folded into the deposit)."""
-    if None in (prev_cash, prev_gpv, new_cash, new_gpv):
+    if None in (prev_nl, prev_cash, new_nl, new_cash):
         return None                       # legacy entry / broker didn't report the fields
     if tol is None:
         tol = max(CASH_FLOW_MIN_ABS, abs(netliq or 0.0) * CASH_FLOW_MIN_PCT)
+    d_nl = new_nl - prev_nl
     d_cash = new_cash - prev_cash
-    d_gpv = new_gpv - prev_gpv
     if abs(d_cash) <= tol:
-        return None                       # market-only move: cash untouched
-    if abs(d_gpv) <= tol:
-        return d_cash                     # no fill -- the cash change IS the external money
-    external = d_cash + d_gpv             # a fill moves cash and GPV opposite ways; they
-    if abs(external) <= tol:              # cancel, leaving only outside money behind
-        return None                       # ...nothing left over: it was purely a trade
-    return external
+        return None                       # cash untouched: market-only move
+    if abs(d_nl - d_cash) <= tol:
+        return d_cash                     # positions unchanged: the cash delta IS the
+                                          # outside money (deposit/withdrawal)
+    if abs(d_nl) <= tol:
+        return None                       # equity unchanged: cash merely moved into/out
+                                          # of positions (a fill, not outside money)
+    return d_nl                           # mixed window (flow + fill together): the
+                                          # equity delta is the best available estimate
 
 
 # ---- Layer 2: independent P&L cross-check ---------------------------------
@@ -330,8 +343,6 @@ def compute_today_pnl() -> dict:
         hist = hist or []
         today_start_ts = None
         equity_start = None
-        gpv_start = None
-        cash_start = None
         now_ts = _time.time()
         today_date = dt.datetime.now(dt.timezone.utc).date()
 
@@ -341,44 +352,25 @@ def compute_today_pnl() -> dict:
             if entry_date == today_date:
                 today_start_ts = entry_ts
                 equity_start = entry[1]
-                cash_start = entry[3] if len(entry) > 3 else None
-                gpv_start = entry[4] if len(entry) > 4 else None
             elif entry_date < today_date:
                 break
 
         if equity_start is None and hist:
             equity_start = hist[-1][1]
             today_start_ts = hist[-1][0]
-            cash_start = hist[-1][3] if len(hist[-1]) > 3 else None
-            gpv_start = hist[-1][4] if len(hist[-1]) > 4 else None
-
-        # current values (HKD)
-        cash_now = acct.get("TotalCashValue")
-        gpv_now = acct.get("GrossPositionValue")
 
         # --- strategy P&L ---
-        # Try broker positions first (real-time USD profit field)
+        # Broker truth for STRATEGY positions only (mirror-matched; the SGOV shield is not
+        # a mirror position and is broken out below). An empty dict means genuinely flat,
+        # which is a real 0.0 -- so the old "gpv-estimate" fallback that fired in that case
+        # is REMOVED (2026-09-30): it derived strategy value from IBKR's GrossPositionValue,
+        # an ABSOLUTE sum, so any shorts in the account made it book phantom strategy
+        # losses (the 2026-09-29 unwind showed a fake -2.45M HKD strategy loss on a day the
+        # book was flat). Flat is flat; connection failures keep last-good STATE["positions"].
         positions = STATE.get("positions") or {}
         unrealized_usd = sum(p.get("profit", 0.0) for p in positions.values())
-
-        # If broker positions are unavailable (gateway disconnected), estimate from
-        # equity_history's GPV column. GPV includes SGOV, so subtract SGOV to get
-        # pure strategy position value.
-        strategy_pnl_hkd = 0.0
+        strategy_pnl_hkd = unrealized_usd * usd_to_base
         strategy_source = "broker"
-        if positions:
-            strategy_pnl_hkd = unrealized_usd * usd_to_base
-        elif gpv_start is not None and gpv_now is not None:
-            # Estimate strategy position change from GPV (ex-SGOV)
-            sweep = STATE.get("cash_sweep") or {}
-            sgov_now_val = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
-            sgov_hist_local, _ = store.cache_get("sgov_history")
-            sgov_hist_local = sgov_hist_local or []
-            sgov_start_val = sgov_hist_local[-1][1] if sgov_hist_local else sgov_now_val
-            strategy_gpv_start = gpv_start - sgov_start_val
-            strategy_gpv_now = gpv_now - sgov_now_val
-            strategy_pnl_hkd = strategy_gpv_now - strategy_gpv_start
-            strategy_source = "gpv-estimate"
 
         with paper._LOCK, paper._conn() as c:
             risk_by_id = dict(c.execute(
@@ -403,26 +395,43 @@ def compute_today_pnl() -> dict:
         }
 
         # --- SGOV P&L ---
+        # Share-aware since 2026-09-30: value_now - value_start is only "yield" while the
+        # share count is unchanged -- a share SALE is a cash conversion, not a loss. On
+        # 2026-09-29 the short-unwind funding sold 2,150 SGOV mid-day and the panel showed
+        # a -1.69M HKD "SGOV yield". Decompose instead: pnl = value delta minus the share
+        # delta priced at today's value/share == sh_start * (px_now - px_start). Rows
+        # written before 2026-09-30 carry no qty field; without qty evidence assume shares
+        # unchanged (correct for every day up to that fix).
         sweep = STATE.get("cash_sweep") or {}
         sgov_now = float(sweep.get("sgov_value_base", 0.0)) if sweep.get("enabled") else 0.0
+        sh_now = float(sweep.get("sgov_qty") or 0.0) if sweep.get("enabled") else 0.0
         _tb = STATE.get("tbill_rate")
         sgov_rate = (_tb - 0.07) if _tb else None
 
         sgov_hist, _ = store.cache_get("sgov_history")
         sgov_hist = sgov_hist or []
         sgov_start = None
+        sh_start = None
         for entry in reversed(sgov_hist):
             entry_ts = entry[0]
             entry_date = dt.datetime.fromtimestamp(entry_ts, tz=dt.timezone.utc).date()
             if entry_date == today_date:
                 sgov_start = entry[1]
+                sh_start = entry[2] if len(entry) > 2 else None
             elif entry_date < today_date:
                 break
 
         if sgov_start is None and sgov_hist:
             sgov_start = sgov_hist[-1][1]
+            sh_start = sgov_hist[-1][2] if len(sgov_hist[-1]) > 2 else None
 
-        sgov_pnl = (sgov_now - sgov_start) if sgov_start is not None else 0.0
+        if sgov_start is None:
+            sgov_pnl = 0.0
+        elif sh_start and sh_now and sh_start != sh_now:
+            px_now = sgov_now / sh_now
+            sgov_pnl = sgov_now - sgov_start - (sh_now - sh_start) * px_now
+        else:
+            sgov_pnl = sgov_now - sgov_start
         out["sgov"] = {
             "value_now": round(sgov_now, 2),
             "value_start": round(sgov_start, 2) if sgov_start is not None else 0.0,
@@ -455,20 +464,29 @@ def compute_today_pnl() -> dict:
         # --- FX impact ---
         # For an HKD account trading USD ETFs, FX effects are real: position values
         # fluctuate with USD/HKD. The equity_history records HKD values, so:
-        #   equity_change = strategy(HKD) + SGOV + interest + cash_change + FX
-        # FX = equity_change - strategy - SGOV - interest - cash_change(ex-deposits)
-        # When strategy is estimated from GPV, the FX residual should be near-zero
-        # (GPV already captures USD->HKD conversion at current rates).
+        #   equity_change = strategy(HKD) + SGOV + interest + FX + (unexplained)
+        # FX is the residual after removing strategy + SGOV + interest from the trading
+        # change -- anything the journal can't see (e.g. a manual flatten that was never a
+        # journal trade) also lands here, so it stays small or the cross-check complains.
         total_equity_change = (nl - equity_start) if equity_start is not None else 0.0
-        cash_change = 0.0
-        if cash_now is not None and cash_start is not None:
-            cash_change = cash_now - cash_start
-        # Exclude cash deposits/withdrawals from P&L -- only trading performance counts.
-        trading_change = total_equity_change - cash_change
+        # Exclude deposits/withdrawals from P&L -- only trading performance counts.
+        # REVISED 2026-09-30: this used to subtract the whole CASH delta
+        # (total_equity_change - cash_change), which also swallowed every internal
+        # cash<->positions conversion: on 2026-09-29 (SGOV sale + short unwind) it showed
+        # a fake +740,803 HKD "trading P&L" on a day equity actually rose +3,713. Subtract
+        # only what the cash_flows log recorded as outside money -- the same basis the
+        # Total P&L card (nl - base0 - net_flows) already uses.
+        flows_today = 0.0
+        for _f in (store.cache_get("cash_flows")[0] or []):
+            try:
+                if dt.datetime.fromtimestamp(int(_f[0]),
+                                              tz=dt.timezone.utc).date() == today_date:
+                    flows_today += float(_f[1])
+            except Exception:                              # noqa: BLE001
+                continue
+        trading_change = total_equity_change - flows_today
         # FX = residual after removing strategy + SGOV + interest from the trading change
         fx_impact = trading_change - strategy_total - sgov_pnl - interest_daily
-        # If we used GPV-estimate for strategy, FX should be near-zero (GPV is already in HKD)
-        # If we used broker positions (USD->HKD), FX reflects actual currency fluctuation
         out["fx"] = {"impact": round(fx_impact, 2)}
 
         # --- total (excludes cash deposits/withdrawals) ---
@@ -927,8 +945,11 @@ def refresh_cheap() -> None:
             # recorded, and for any broker that doesn't report those fields.
             _ccy = acct.get("_ccy", "")
             _cash, _gpv = acct.get("TotalCashValue"), acct.get("GrossPositionValue")
-            _prev_cash, _prev_gpv = hist_cash_gpv(hist[-1]) if hist else (None, None)
-            ext_flow = (detect_external_cash_flow(_prev_cash, _prev_gpv, _cash, _gpv, new_val)
+            _prev_cash = hist_cash_gpv(hist[-1])[0] if hist else None
+            # prev_nl = the previous row's NetLiq (always present, legacy rows too);
+            # 2026-09-30: detector now works on (NL, cash) only -- see its docstring.
+            ext_flow = (detect_external_cash_flow(hist[-1][1], _prev_cash, new_val, _cash,
+                                                  new_val)
                         if hist else None)
             implausible = bool(hist) and (
                 ext_flow is not None
@@ -1200,7 +1221,9 @@ def refresh_cheap() -> None:
                                           "cur_px": cached_spy["cur_px"]}
     except Exception as e:
         log.debug("spy_benchmark fetch error: %s", e)
-    # SGOV-value history for the dashboard chart (daily snapshots, same as equity)
+    # SGOV-value history for the dashboard chart (daily snapshots, same as equity).
+    # 2026-09-30: also store the SHARE count (3rd field) -- compute_today_pnl() needs it to
+    # separate yield from a share sale (value delta alone can't: value = qty x price).
     try:
         sv = (STATE.get("cash_sweep") or {}).get("sgov_value_base")
         if sv is not None:
@@ -1211,7 +1234,9 @@ def refresh_cheap() -> None:
             _last_sv_date = dt.datetime.fromtimestamp(sh[-1][0], tz=dt.timezone.utc).date() if sh else None
             _today_sv = dt.datetime.now(dt.timezone.utc).date()
             if not sh or _last_sv_date != _today_sv:
-                sh.append([now2, round(float(sv), 2)])
+                _qty = float((STATE.get("cash_sweep") or {}).get("sgov_qty") or 0.0)
+                sh.append([now2, round(float(sv), 2), round(_qty, 4)] if _qty
+                          else [now2, round(float(sv), 2)])
                 store.cache_set("sgov_history", sh[-3000:])
     except Exception as e:
         log.debug("sgov_history error: %s", e)
