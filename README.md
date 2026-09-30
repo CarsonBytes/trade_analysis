@@ -441,7 +441,11 @@ cost of real operational overhead to keep it running correctly.
   Some hostnames sit behind Cloudflare Access — a 200 serving a sign-in page does NOT
   prove the origin is up; verify with `/status`.
 - **Watchdog stack (inside WSL2 cron unless noted):**
-  - `docker-watchdog.sh` (every min) — restarts unhealthy dashboard containers.
+  - `infra-watchdog.sh` (every min, `/home/cap/`) — one script for all 9 monitored
+    containers across every stack (quant paper/live dashboards + gateways, event-radar
+    ×2, study, saas dashboard, restart-proxy): HTTP/health probes, `docker restart`
+    after 3 failed minutes, Telegram push. Superseded the quant-only
+    `docker-watchdog.sh` on 2026-08-27 (file kept, log stops there).
   - `scripts/gateway-login-watchdog.sh` (every min) — NEW 2026-08-26: detects a gateway
     stuck mid-login (its own API port closed) and auto-cycles bounded fresh login/2FA
     attempts with pushed notifications; escalates to MANUAL-ACTION-NEEDED after 3
