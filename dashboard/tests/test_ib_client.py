@@ -435,6 +435,38 @@ def test_fx_to_usd_uses_usd_base_first_for_hkd():
           round(rate, 6), round(1.0 / 7.80, 6))
 
 
+def test_fx_to_usd_inverted_pair_never_requests_dead_ccyusd():
+    print("fx_to_usd(): REGRESSION for the 2026-09-30 '[LIVE] HKD: broker error 200' "
+          "Telegram spam -- for _INVERTED_FX currencies the {ccy}USD convention does not "
+          "exist on IDEALPRO, so when the USD-base bars fail it must give up (peg/None) "
+          "instead of requesting Forex('HKDUSD'): every attempt was error 200 -> a RED "
+          "notable event -> one Telegram push per dedupe window:")
+    from dashboard.data import ib_client
+
+    requested = []
+
+    class FakeForex:
+        def __init__(self, symbol):
+            requested.append(symbol)
+
+    fake_mod = mock.MagicMock()
+    fake_mod.Forex = FakeForex
+
+    with mock.patch.object(ib_client, "_mod", return_value=fake_mod), \
+         mock.patch.object(ib_client, "_ensure_conn", return_value=mock.MagicMock()), \
+         mock.patch.object(ib_client, "fx_rate_from_account", return_value=None), \
+         mock.patch.object(ib_client, "_run", side_effect=Exception("empty bars / no entitlement")):
+        rate_hkd = ib_client.fx_to_usd("HKD")
+        rate_cny = ib_client.fx_to_usd("CNY")
+
+    check("only the USD-base pair was ever requested for each inverted ccy",
+          requested, ["USDHKD", "USDCNY"])
+    check("HKD (pegged) -> pegged constant, never None",
+          round(rate_hkd, 6), round(1.0 / 7.80, 6))
+    check("CNY (no peg) -> None, callers apply their own fallback",
+          rate_cny, None)
+
+
 def test_fx_to_usd_uses_ccy_base_pair_directly_when_it_exists():
     print("fx_to_usd(): a currency whose CCY-base pair DOES exist (e.g. EUR -> EURUSD, the "
           "IBKR-standard convention for majors) must use that close directly, not invert:")

@@ -95,6 +95,11 @@ def send(message: str, level: str = "info") -> bool:
             emoji = {"warning": "⚠️", "error": "\U0001f6a8"}.get(level, "ℹ️")
             mode = os.environ.get("DASH_FIXED_MODE", "?").upper()
             text = f"{emoji} [{mode}] {message}"
+            # MIRROR 2026-09-30: record every outbound push where an operator can see it.
+            # Telegram's getUpdates only returns INBOUND messages, so bot->user alerts are
+            # structurally invisible to any polling check -- `docker logs | grep TG-PUSH`
+            # (the tg_check poller mirrors these as `out:` lines) is the outbound record.
+            log.info("notify: TG-PUSH [%s/%s] %s", mode, level, text)
             resp = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json={"chat_id": chat_id, "text": text},

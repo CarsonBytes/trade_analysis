@@ -438,8 +438,10 @@ _PEG_USD_PER = {"HKD": 1.0 / 7.80}
 
 # Currencies quoted as USD/CCY on IBKR (not CCY/USD) — requesting the wrong
 # convention generates error 200 "No security definition" every single call.
-# Try the correct pair first to avoid the spam; still fall back to the other
-# convention in case the set is incomplete.
+# FIXED 2026-09-30: this set is BY DEFINITION the "wrong convention" set, so the
+# {ccy}USD leg is no longer tried at all after the USD-base leg fails (see the
+# pairs block in fx_to_usd) -- it always returned error 200, which became a RED
+# notable event and one Telegram push per dedupe window ([LIVE] HKD spam).
 _INVERTED_FX = frozenset({"HKD", "CNY", "TWD", "INR", "THB", "PHP", "KRW",
                           "IDR", "MYR", "VND", "CLP", "COP", "ARS", "PLN",
                           "HUF", "CZK", "TRY", "ZAR", "MXN"})
@@ -499,7 +501,13 @@ def fx_to_usd(ccy: str) -> float | None:
     FIXED 2026-08-28: prefer the account's own ExchangeRate (see fx_rate_from_account) --
     the historical-bars route needs a market-data entitlement and returns error 162
     whenever the same IBKR login is active from another IP, which was making this fall
-    all the way through to the pegged constant on every single call."""
+    all the way through to the pegged constant on every single call.
+    FIXED 2026-09-30: for inverted pairs the dead {ccy}USD leg is now REMOVED outright
+    (was only deprioritized). On live, the account-route read has been returning falsy
+    after today's dashboard/gateway restarts, the USDHKD bars come back empty (no FX
+    entitlement), and the loop therefore fell into the dead HKDUSD leg every cheap
+    refresh -- error 200 -> RED notable event -> a Telegram push per dedupe window
+    ("[LIVE] HKD: broker error 200" spam). Now: USD-base attempt, then the peg (or None)."""
     ccy = (ccy or "USD").upper()
     if ccy == "USD":
         return 1.0
@@ -513,9 +521,12 @@ def fx_to_usd(ccy: str) -> float | None:
             if rate:
                 return rate
             ib_async = _mod()
-            # Known inverted pairs go first (USDHKD); others try CCYUSD first (EURUSD)
+            # Known inverted pairs: ONLY the USD-base convention exists on IDEALPRO for
+            # them, so exactly one pair is tried (2026-09-30: the {ccy}USD leg was
+            # removed -- see _INVERTED_FX). Others try CCYUSD first (EURUSD) and keep
+            # the USD-base leg as the fallback in case the set is incomplete.
             if ccy in _INVERTED_FX:
-                pairs = ((f"USD{ccy}", True), (f"{ccy}USD", False))
+                pairs = ((f"USD{ccy}", True),)
             else:
                 pairs = ((f"{ccy}USD", False), (f"USD{ccy}", True))
             for symbol, invert in pairs:

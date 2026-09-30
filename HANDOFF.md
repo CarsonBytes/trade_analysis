@@ -5,6 +5,59 @@ Last updated 2026-09-30.
 
 ---
 
+### 🔥 FIXED 2026-09-30: `[LIVE] HKD: broker error 200` on every cheap refresh (fx_to_usd dead-pair leg) + outbound-Telegram mirror so bot→user alerts stop being invisible
+
+User ask: *"did you need to check the last ones"* (pasting the 17:35 gateway-2FA and 17:37
+`[LIVE] HKD: broker error 200` bot messages) -- why didn't the TG poller surface them.
+
+**Answer (by design):** Telegram's `getUpdates` only returns INBOUND messages; bot→user
+alert pushes never appear there, so the inbound poller (PID 9972, `tg_check.ps1 -Loop -60s`,
+`tg_updates.log`) can never see them. **Mirror added:** `notify.send()` now logs every
+outbound push as `notify: TG-PUSH [mode/level] text` (dashboard/core/notify.py), and the
+poller pulls those lines out of BOTH quant containers' docker logs each cycle into
+`tg_updates.log` as `out-paper:` / `out-live:` entries (`tg_docker_since.txt` RFC3339
+watermark). Ops check is now: read `tg_updates.log` (in + out in one place).
+
+**The HKD spam itself.** Since the live dashboard rebuild at 17:24 HKT (acfc515 deploy),
+`Error 200 ... Forex('HKDUSD', exchange='IDEALPRO')` fired every ~60s → `EVENT[red]: HKD`
+each time → one Telegram push per 30-min dedupe group (b551e54's push-once held; it was
+log-line spam, not push-per-occurrence). Paper: 0 such errors.
+
+**Root cause.** Live is an HKD-base account, so every refresh calls `fx_to_usd("HKD")`
+(service.py:835 / ib_exec equity paths). Three-stage failure:
+1. account-route (`fx_rate_from_account`) returns falsy **in-app** -- see open question below;
+2. USDHKD historical bars come back **empty** (no FX market-data entitlement) -- silently;
+3. the loop then tried the `_INVERTED_FX` fallback leg `HKDUSD`, which **does not exist on
+   IDEALPRO by definition** → error 200 → red event → TG push; peg (1/7.80) was returned
+   anyway, so the number was never wrong -- only noisy.
+
+**Probe evidence (read-only, clientId 45 on the live gateway):** a fresh session reads the
+account's `ExchangeRate` rows fine (`USD 7.8464852`, `fx_to_usd("HKD") = 0.1274466` via the
+account route, zero bar requests) -- the data is there; the long-lived in-app path is not
+reaching it after today's dashboard restart (17:24) + gateway restart (20:11). **OPEN
+follow-up (non-fatal, masked by this fix):** why the in-app account route yields falsy while
+a fresh session on the same gateway succeeds instantly.
+
+**Fix (this commit).** `fx_to_usd` no longer requests the dead `{ccy}USD` leg for ANY
+`_INVERTED_FX` currency (that set *is* the "wrong convention" set -- the leg can only ever
+return error 200): pairs = USD-base only, then peg/None. New regression test
+`test_fx_to_usd_inverted_pair_never_requests_dead_ccyusd` locks it; all test_ib_client +
+test_notify tests pass. When the in-app account route recovers, the accurate live rate
+(7.846) is preferred again with no behavior change.
+
+**Deploy:** paper via push (pre-push hook → wsl2-docker-deploy.sh); live via the
+dashboard-only foreground rebuild per a5eb717's lessons
+(`rsync` + `docker compose -f docker-compose.live.yml -p quant-live up -d --build dashboard`
+-- **gateway untouched, no 2FA cycle**, unlike scripts/wsl2-docker-deploy-live.sh which also
+invokes gateway-login-live.sh).
+
+**Verified:** (paper) error-200 count 0 over soak; (live) `Forex('HKDUSD')` request rate →0
+after rebuild, no new `EVENT[red]: HKD`, gateway session undisturbed (container StartedAt
+unchanged, port 4003 open, sweep still trading); a plumbing probe line
+`notify: TG-PUSH [TEST]` shows up in `tg_updates.log` as `out-live:`.
+
+---
+
 ### 🔥 FIXED 2026-09-30: Paper P&L corrupted -- 3 phantom cash flows (−4,872,560.77 HKD) from an abs-GPV identity + 3 broken "today" panel lines (user: *"check p&l for paper account, its mistakenly calculated?"*)
 
 **Symptom.** Portfolio card: "Total trading P&L **up HKD 4,955,669 (−129.30%)**" while the
