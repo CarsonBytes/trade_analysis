@@ -255,6 +255,10 @@ def test_log_usage_posts_resolved_environment():
          mock.patch("httpx.post", side_effect=_fake_post), \
          mock.patch.dict(_os.environ, {}, clear=False):
         _os.environ.pop("DASH_FIXED_MODE", None)
+        # conftest.py sets LLM_LEDGER_DISABLED=1 session-wide (3.3); this test
+        # deliberately exercises the real POST path (httpx.post itself is the
+        # mock), so it must opt back out of the kill switch.
+        _os.environ.pop("LLM_LEDGER_DISABLED", None)
         with mock.patch.object(usage_log, "_mode_db_path", return_value="/nonexistent/path.db"):
             usage_log.log_usage(kind="board_scan", model="gpt-5-mini",
                                 input_tokens=100, output_tokens=50, latency_ms=10)

@@ -28,20 +28,30 @@ class InstrumentSignal(BaseModel):
     bias: Literal["bullish", "bearish", "neutral"]
     action: Literal["BUY", "SELL", "WAIT"]
     confidence: float = Field(ge=0, le=1)
-    rationale: str = Field(description="1-2 sentences grounded in the provided facts/news.")
+    # S5 (2026-09-30 token spec): completion tokens are 44% of quant's ledger
+    # usage (154,980 of 353,500 over 14d) and the per-instrument text fields
+    # are where they go. Word budgets are enforced in the prompt too; the
+    # scoring/decision fields (bias/action/confidence/invalidation) are
+    # deliberately untouched -- only the prose is tightened, and every field
+    # still has to be filled (macro_linkage's CPER-incident rule below stays).
+    rationale: str = Field(description=(
+        "ONE sentence, at most 20 words, grounded in the provided facts/news -- "
+        "no preamble, no restating the deterministic signal."))
     macro_linkage: str = Field(description=
         "Does any theme from YOUR OWN macro_note actually apply to THIS instrument "
         "specifically (e.g. a USD-strength headwind on metals, a shared commodity-complex "
-        "driver, risk-off FX flows)? One short sentence, and be concrete about the "
-        "MECHANISM (not just 'macro is risk-on') -- e.g. copper isn't necessarily bearish "
+        "driver, risk-off FX flows)? One short clause, concrete about the MECHANISM "
+        "(not just 'macro is risk-on') -- e.g. copper isn't necessarily bearish "
         "just because oil spiked on a supply shock, but IS exposed if that same shock is "
         "driving safe-haven USD strength. Say 'none material' if nothing genuinely "
         "connects -- don't force a link that isn't really there.")
-    invalidation: str = Field(description="specific price/condition that proves this wrong.")
+    invalidation: str = Field(description=(
+        "the specific price/condition that proves this wrong, in one clause "
+        "(e.g. 'closes below 412.50')."))
 
 
 class BoardScan(BaseModel):
-    macro_note: str = Field(description="2-3 sentences on the overall macro/risk backdrop.")
+    macro_note: str = Field(description="TWO sentences max on the overall macro/risk backdrop.")
     signals: list[InstrumentSignal]
 
 
@@ -58,11 +68,16 @@ SYSTEM = (
     "You are the head analyst on a trading desk. You get pre-computed factual "
     "indicators per instrument (top ones in full, the rest abbreviated) plus "
     "recent headlines. Do NOT invent numbers; reason only from the facts given. "
-    "First write macro_note (2-3 sentences on the backdrop). THEN, for EACH "
-    "instrument: bias, action (BUY/SELL/WAIT), calibrated confidence, one-line "
-    "rationale, macro_linkage (does any theme from your OWN macro_note apply to "
-    "THIS instrument, through what mechanism -- or genuinely nothing? Say so "
-    "either way, never skip), and the explicit invalidation level. "
+    "Be terse: short clauses, no preamble, no hedging filler -- the token budget "
+    "for this scan is deliberately small (S5) and every word must carry "
+    "information a trader would act on. "
+    "First write macro_note (TWO sentences max on the backdrop). THEN, for EACH "
+    "instrument: bias, action (BUY/SELL/WAIT), calibrated confidence, ONE "
+    "sentence of at most 20 words as the rationale, macro_linkage (does any "
+    "theme from your OWN macro_note apply to THIS instrument, through what "
+    "mechanism -- or genuinely nothing? Say so either way, never skip; one "
+    "clause, 'none material' when there is no real link), and the explicit "
+    "invalidation level as one clause. "
     "WAIT is correct when signals conflict or a trend is overextended. Only "
     "count headlines actually relevant to an instrument. You advise a human who "
     "makes the final call -- never overstate confidence."
@@ -433,7 +448,8 @@ def run_board_scan(scores: list[Score], headlines: list[str],
             log.warning("board scan: response truncated at %d instruments -- retrying with "
                         "%d (see MAX_INSTRUMENTS' 2026-09-03 note)", len(top), len(smaller))
             top = smaller
-            raw_result = _invoke(_human_for(top))
+            human = _human_for(top)      # keep the logged prompt_text honest on the retry path
+            raw_result = _invoke(human)
         result = raw_result["parsed"]
     except Exception as e:                      # noqa: BLE001
         # WIDENED 2026-07-25: this used to only special-case 429/RateLimitError -- the
@@ -483,6 +499,7 @@ def run_board_scan(scores: list[Score], headlines: list[str],
             output_tokens=_telemetry["output_tokens"],
             latency_ms=_telemetry["latency_ms"],
             provider=_telemetry["provider"],
+            prompt_text=f"{SYSTEM}\n{human}",   # S1: our own count of what we sent
         )
     except Exception:
         pass                                       # telemetry only -- never affects the scan result

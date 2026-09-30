@@ -36,6 +36,7 @@ def _ask(structured_model, system: str, human: str, kind: str = "analyst"):
             output_tokens=usage.get("output_tokens", 0),
             latency_ms=int((time.perf_counter() - start) * 1000),
             provider=last_provider_used(),
+            prompt_text=f"{system}\n{human}",   # S1: our own count of what we sent
         )
     except Exception:
         pass  # telemetry only -- never let this affect analysis or trading

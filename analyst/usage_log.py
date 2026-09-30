@@ -5,6 +5,7 @@ key is visible in one place. Never raises: a logging hiccup must never
 affect analysis or trading decisions.
 """
 import datetime as dt
+import math
 import os
 import pathlib
 import sqlite3
@@ -95,8 +96,64 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
                  + (output_tokens / 1_000_000) * out_price, 6)
 
 
+def ledger_disabled() -> bool:
+    """Test/hermetic kill switch: when LLM_LEDGER_DISABLED is truthy, log_usage()
+    becomes a no-op so a test run can never POST rows into the shared prod
+    `llm_calls` ledger (3.3 -- dashboard/tests/* exercise board_scan/service
+    paths with invoke_with_key_fallback mocked, which still reached this POST
+    with zero tokens). Set by dashboard/tests/conftest.py (pytest) and
+    dashboard/tests/hermetic.py (script-style `python -m dashboard.tests.X`)."""
+    return os.environ.get("LLM_LEDGER_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- token truth (S1/S2, 2026-09-30 token-usage spec) ------------------------------
+# Same constants as event-radar's llm_logging.py: measured directly against
+# api.deepseek.com on 2026-09-30 (deepseek-v4-pro tokenizer) -- 6.29 chars per
+# ASCII token, 5.09 per CJK token -- rounded DOWN so the estimate never
+# under-reports. The provider's own prompt_tokens is kept as-is (it is what
+# chatanywhere enforces quota against) but it is not trusted: measured on the
+# same day, that proxy reported 0.34 tok/char on ASCII rerank batches and up
+# to 2.7 tok/char on CJK ones (~5.8x reality), plus four impossible
+# "1,000,000 tokens in 200ms" embedding rows -- hence is_suspect_usage().
+CJK_CHARS_PER_TOKEN = 4.8
+ASCII_CHARS_PER_TOKEN = 6.0
+SUSPECT_MAX_PROMPT_TOKENS = 200_000   # no single chat/embedding call is this big
+SUSPECT_TOKENS_PER_MS = 50            # 50,000 tok/s; the real ceiling is ~10K
+
+
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return (0x3400 <= o <= 0x4DBF      # CJK ext A
+            or 0x4E00 <= o <= 0x9FFF   # CJK unified
+            or 0xF900 <= o <= 0xFAFF   # compat ideographs
+            or 0x3040 <= o <= 0x30FF   # kana
+            or 0xAC00 <= o <= 0xD7AF)  # hangul
+
+
+def estimate_prompt_tokens(text: str | None) -> int | None:
+    """S1: CJK-aware count of the prompt we actually sent. None means "the
+    caller had no prompt text", which the ledger keeps distinct from 0."""
+    if text is None:
+        return None
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    other = len(text) - cjk
+    return math.ceil(cjk / CJK_CHARS_PER_TOKEN + other / ASCII_CHARS_PER_TOKEN)
+
+
+def is_suspect_usage(prompt_tokens: int, latency_ms: int) -> bool:
+    """S2: provider-reported usage that cannot be physically real (size or
+    throughput) -- flag it, never rewrite it."""
+    if prompt_tokens > SUSPECT_MAX_PROMPT_TOKENS:
+        return True
+    if latency_ms > 0 and prompt_tokens / latency_ms > SUSPECT_TOKENS_PER_MS:
+        return True
+    return False
+
+
 def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, latency_ms: int,
-             provider: str = "chatanywhere") -> None:
+             provider: str = "chatanywhere", prompt_text: str | None = None) -> None:
+    if ledger_disabled():
+        return
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
     try:
@@ -124,6 +181,8 @@ def log_usage(kind: str, model: str, input_tokens: int, output_tokens: int, late
                 "environment": _resolve_environment(),
                 "model": model,
                 "prompt_tokens": input_tokens,
+                "prompt_tokens_est": estimate_prompt_tokens(prompt_text),
+                "suspect": is_suspect_usage(input_tokens, latency_ms),
                 "completion_tokens": output_tokens,
                 "cost_usd": round(cost_usd, 6),
                 "latency_ms": latency_ms,

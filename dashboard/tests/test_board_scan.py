@@ -30,6 +30,11 @@ import os
 import tempfile
 from unittest import mock
 
+from dashboard.tests import hermetic  # noqa: F401  (3.3: LLM_LEDGER_DISABLED=1
+# + a throwaway DASH_DB_NAME, so this module's script-style run can never POST
+# a 0-token row into the prod llm_calls ledger or touch dashboard/dashboard.db;
+# for pytest, conftest.py already did this)
+
 _fails = []
 
 
