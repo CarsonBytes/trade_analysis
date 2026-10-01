@@ -177,12 +177,22 @@ recall/sweep split, and the boundary conditions.
 
 ## 5. Build order (smallest provable increments)
 
-1. **S2** — two lines + test; deploy paper, then live. *Highest value per line.*
+Priority rule, set with the user 2026-10-01: **maximise performance subject to safe order
+placement.** Measured on live, deploying the currently-idle $26,404 is worth ~$1,200/yr expected
+while every cash-shield tuning knob together is worth ~$147/yr — and the deployment gap is
+blocked by *this* doc, not by cash policy. So order-reliability work comes first and cash
+policy must not gate it.
+
+1. **S2** — two lines + test; deploy paper, then live. *Highest value per line anywhere.*
 2. **S4** — orphan sweep (removes live short risk) + qty cap. Deploy.
 3. **S1** — the confirmation helper + `order_exec_log`; adopt in sweep first, then brackets.
 4. **S3** — sweep failure budget, ceiling, ratio stat.
 5. **S5** — `--no-deps` deploys + `trading_ready` gate (coordinate with the watchdog owner).
 6. **S6** — policy numbers, after the user picks the target ratio.
+
+Deferred behind real fills on live: tightening the cash float, widening the sweep window,
+currency-posture work. See `IBKR_CASH_SHIELD_SPEC.md` §0 for the numbers and §8 for the
+resolved decisions.
 
 ---
 

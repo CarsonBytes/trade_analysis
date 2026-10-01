@@ -93,8 +93,31 @@ recall — live is margin, buying power ≫ NL); `keep_cash_usd` is a second cas
 **Sequencing (§6 there):** cannot ship before the execution spec — S2+S1 first (orders must be
 *known* to work; live currently discards them), then **shadow mode** (compute + log + display
 the target, place nothing, 5 sessions), then recall, then surplus sweep, then the dashboard
-panel. Open questions: float size (3%/$1.5k vs flat $2-3k), margin-account confirmation,
-currency-vs-amount scope, whether the sweep gets a wider window than entries.
+panel.
+
+**Open questions ANSWERED 2026-10-01** (rationale in the spec's §8; a "performance vs safety
+priority" section was added as §0 of both specs). Priority rule the user set: **maximise
+performance subject to safe order placement.** Measured on live: deploying the idle $26,404 is
+worth **~$1,200/yr expected** (strategy ~8.9% on deployed vs SGOV 4.3%) while **every shield
+knob combined is worth ~$147/yr** (float ~$21 + sweep window ~$126) — and the deployment gap is
+blocked by the execution spec's order failures, **not** by cash policy. They don't even compete
+for the same dollars: `_strategy_deployed_usd()` excludes SGOV from PORTFOLIO_CAP (ib_exec.py:524).
+**Decisions:** keep float `3%/$1,500` (don't tighten prematurely — it guards the still-unproven
+order path); margin **confirmed** at `BuyingPower/NL ≈ 6.4x` ($208.6k on $32.4k) but assert
+post-recall **affordability** (`AvailableFunds + SGOV proceeds ≥ entry notional + Σ commitments`)
+instead of account type; **amount-only** currency scope until live's −HKD 31.3k deficit is
+measured to actually cost anything (`AccruedCash` read 0.0 at 12:35 UTC, paper read −8,794);
+surplus sweep **widened to full RTH** (SGOV spreads ~1-2bp all session, so the ETF spread
+rationale behind the 10:00-15:30 gate doesn't transfer) — but deferred anyway; reservation TTL
+60 → **90 min** to outlast a full entry window plus `GHOST_ENTRY_GRACE_MIN`. Interim option
+flagged: IBKR USD cash (~2-4%, tiered) instead of SGOV has zero sell friction and no dependence
+on the order path that currently discards orders.
+
+**Also recorded:** live's journal reads 1 WIN / 17 LOSS, but most LOSSes are
+`signal only -- never funded` (paper-side resolution with nothing filled) — so the live track
+record is **unmeasured**, not bad. "Max performance" is not well-defined until a few dozen
+trades genuinely fill; interim objective is to make performance measurable and stop leaking
+orders.
 
 ---
 
