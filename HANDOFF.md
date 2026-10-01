@@ -124,8 +124,9 @@ orders.
 ### 🔥 FIXED 2026-10-01: S2 -- MKT bracket parent carried `tif="GTC"`, so IBKR discarded every entry and cascade-killed its TP/SL (the real cause of "no trades since 2026-09-22")
 
 Implementation of S2 in `IBKR_EXECUTION_SPEC.md`; the investigation that found it is the
-INVESTIGATED entry below. Tests: `test_bracket_parent_tif_is_day_children_gtc`. **Not yet
-deployed** — spec + code only at commit time.
+INVESTIGATED entry below. Tests: `test_bracket_parent_tif_is_day_children_gtc`.
+**DEPLOYED both instances 2026-10-01** (commit `77d14f8`, push-triggered paper deploy, then a
+foreground live rebuild).
 
 **The bug.** All three bracket builders did `for o in bracket: o.tif = "GTC"` — including the
 parent, which they had just forced to `orderType = "MKT"`. A market order must be DAY. IBKR
@@ -146,9 +147,20 @@ not in the original two-line estimate. Children stay GTC (that's correct for res
 legs). Test asserts per builder, including a guard that the order actually went out so the test
 can't pass vacuously. Full suite **292 passed**.
 
-**Next:** deploy paper then live; V-2 (an entry reaching `Submitted` within 5s) is the real test.
+**Deployed & verified 2026-10-01:** paper rebuilt 21:56 (push hook), live rebuilt 14:0x
+(foreground). Both containers healthy; `grep` =3 for the fix in *both* deployed images; the S2
+regression test **passes inside each container** (not just on the dev box); no tracebacks on
+either. Live's gateway was recreated again (RC-5 — `up --build dashboard` pulls in
+`ib-gateway-live`) and 2FA self-resolved in ~80s (`Login has completed` 14:02:22), after which
+the dashboard reconnected (`connected ib-gateway-live:4003 clientId=41`, `acct_age_sec: 229`,
+NL 252,754, positions 2). Lesson repeated and worth remembering: **check container state AFTER
+the deploy converges** — a grep taken mid-rebuild showed `0` and looked like a failed deploy.
+
+**Next:** V-2 (an entry reaching `Submitted` within 5s) is the real test and needs market hours.
 This removes a *local* cause only — **RC-2, the live environment discarding orders outright, is
-still open**, so S1 + RC-2 diagnosis remain the gates on trading.
+still open**, so S1 + RC-2 diagnosis remain the gates on trading. Note live is currently US
+pre-market/closed at deploy time (14:0x UTC = 10:0x ET, inside the 10:00-15:30 ET entry window
+but with thin pre-open liquidity).
 
 ---
 
