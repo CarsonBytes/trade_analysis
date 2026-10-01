@@ -5,6 +5,63 @@ Last updated 2026-10-01.
 
 ---
 
+---
+
+### 🔍 INVESTIGATED 2026-10-01: live SGOV stuck at 18.6% of NAV + ZERO live fills since 2026-09-22 -- root-caused, spec proposed (`IBKR_EXECUTION_SPEC.md`)
+
+User ask: *"check .md and code to understand the sgov logic, i am wondering why live quant still
+has low ratio of sgov, also no trades in recent days, retro and suggest spec"*. Broker-level
+investigation of U12991898 (read-only probes 12:35-12:59 UTC 2026-10-01, two tiny cancelled
+probe orders). **No code changed yet** -- proposal awaiting the user's answers to §6 of the spec.
+
+**What live actually holds:** NL HKD 252,913 (~US$32.4k); idle cash ~$20.3k (USD 24,161, net of
+a −HKD 31.3k HKD-side margin debit); SGOV **60 sh = $6,024 = 18.6% of NAV**; strategy = QQQ 8
+($5,953) + EEM 1 ($67). Twelve working orders, ALL SELL legs of long-resolved trades. The sweep's
+own formula (0.80 × idle) wants ~209 shares. **Paper, same code, same day: SGOV $115.1k of
+$143.4k NAV = 80.2%** -- it sold 324 shares today to clear its own USD margin debit. So the
+shield *design* works; on live the orders never reach the book.
+
+**Root causes (evidence + numbers in the spec):**
+1. **MKT parent carries `tif="GTC"`** -- `_place_etf_bracket` (ib_exec.py ~750) and
+   `_place_bracket` (~631) set `o.tif = "GTC"` on *every* leg including the MKT parent. IBKR
+   discards the parent and cascade-cancels the children: the event log's
+   `broker error 202 -- Order Canceled - reason:` (reason EMPTY) at **age 0.2-0.7s** on
+   DIA/AMLP/CPER/EFA, 11+ times since 2026-09-22, and every live entry since then resolved
+   `entry never filled at the broker (30min...)` → CANCELLED. The parent-side rejection code
+   (10349/135) is **not in our handled set** (`110,200,201,202,10197`), so only the children
+   ever surfaced.
+2. **The live IBKR environment discards API orders ~40ms after submission.** Reproduced twice
+   from a fresh client: `LMT@50` and `MKT DAY` both `PendingSubmit → PreSubmitted → Inactive
+   → 202 "Order was discarded."` — while fully authenticated (2FA auto-approved in 8s at
+   12:00:23, "Bypass Order Precautions for API Orders" on, Read-Only API off, trading-mode
+   live). **Paper accepts the identical code path**, so this is live-environment specific;
+   the exact IBKR-side reason is still open (md-farm flaps 2108/2119/2104 seen adjacent to the
+   submission; IBKR Client Portal → Orders will name it).
+3. **Nothing confirms an order reached the broker.** 2026-09-30 18:01-19:29 UTC: 17 × `BUY 149
+   SGOV` submissions (300s cooldown apart), zero fills, zero working SGOV order, **zero alerts**.
+   Entries were journalled first and ghost-cancelled 30 min later. "Submitted" was logged and
+   believed -- for five weeks.
+4. **Deploys recreate the gateway** (`docker compose up -d --build dashboard` recreates
+   `ib-gateway-live` as a dependency) → fresh login + 2FA + empty order snapshot. Sep 30 alone:
+   **693 consecutive `broker unreachable` cycles** (15:34 → Oct 1 09:41, ~18h). Journal trade
+   #138 was opened 07:00 UTC Oct 1 with no broker reachable.
+5. **Orphan sibling legs = live short risk**: CPER SELL 84, AMLP SELL 21, SPY SELL 4 rest with
+   NO broker position (IBKR bracket children aren't OCA-linked after the parent fills, so one
+   leg filling does not cancel the other); QQQ carries 9 SELL legs against 8 shares.
+6. `keep_cash_usd`'s HKD leg was erroring (`HKD: broker error 200`) — see the entry below, fixed
+   2026-09-30 by the parallel session.
+
+**Confirmed NOT bugs:** the sweep's sizing basis is correct (`TotalCashValue` HKD 158,269 is the
+*net* of the USD 24,161 line and the HKD-side debit); paper's broker book is clean (SGOV 1,146 +
+$28.9k cash, no orphans, no open orders).
+
+**Proposed build order (§5):** S2 TIF fix (2 lines) → S4 orphan-leg sweep + qty cap → S1
+submit-and-confirm helper + `order_exec_log` → S3 sweep failure budget + SGOV-ratio stat → S5
+`--no-deps` deploys + `trading_ready` gate → S6 policy (needs user decision). Still deferred:
+`unwind_shorts.py` two-consecutive-readings hardening.
+
+---
+
 ### 🔥 FIXED 2026-09-30: `[LIVE] HKD: broker error 200` on every cheap refresh (fx_to_usd dead-pair leg) + outbound-Telegram mirror so bot→user alerts stop being invisible
 
 User ask: *"did you need to check the last ones"* (pasting the 17:35 gateway-2FA and 17:37
