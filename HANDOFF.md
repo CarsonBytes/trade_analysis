@@ -1,7 +1,7 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-09-30.
+Last updated 2026-10-01.
 
 ---
 
@@ -11,7 +11,7 @@ User ask: *"did you need to check the last ones"* (pasting the 17:35 gateway-2FA
 `[LIVE] HKD: broker error 200` bot messages) -- why didn't the TG poller surface them.
 
 **Answer (by design):** Telegram's `getUpdates` only returns INBOUND messages; bot→user
-alert pushes never appear there, so the inbound poller (PID 9972, `tg_check.ps1 -Loop -60s`,
+alert pushes never appear there, so the inbound poller (`tg_check.ps1 -Loop -60s`,
 `tg_updates.log`) can never see them. **Mirror added:** `notify.send()` now logs every
 outbound push as `notify: TG-PUSH [mode/level] text` (dashboard/core/notify.py), and the
 poller pulls those lines out of BOTH quant containers' docker logs each cycle into
@@ -47,14 +47,26 @@ test_notify tests pass. When the in-app account route recovers, the accurate liv
 
 **Deploy:** paper via push (pre-push hook → wsl2-docker-deploy.sh); live via the
 dashboard-only foreground rebuild per a5eb717's lessons
-(`rsync` + `docker compose -f docker-compose.live.yml -p quant-live up -d --build dashboard`
--- **gateway untouched, no 2FA cycle**, unlike scripts/wsl2-docker-deploy-live.sh which also
-invokes gateway-login-live.sh).
+(`rsync` + `docker compose -f docker-compose.live.yml -p quant-live up -d --build dashboard`).
+**CORRECTION (learned the hard way):** that command STILL rebuilt/recreated the
+`ib-gateway-live` container (compose rebuilds the shared image and recreates dependents) --
+the "gateway untouched, no 2FA" expectation in the original entry was WRONG. Result: 2FA
+relogin required, repeated STUCK login cycles overnight (broker-unreachable loop visible in
+`docker logs` 16:39→17:42 HKT 2026-10-01), resolved only after the user approved 2FA on
+their phone: watchdog `LOGIN OK 17:42:00`, dashboard connected `clientId=41` 17:42:54 HKT.
 
-**Verified:** (paper) error-200 count 0 over soak; (live) `Forex('HKDUSD')` request rate →0
-after rebuild, no new `EVENT[red]: HKD`, gateway session undisturbed (container StartedAt
-unchanged, port 4003 open, sweep still trading); a plumbing probe line
-`notify: TG-PUSH [TEST]` shows up in `tg_updates.log` as `out-live:`.
+**Verified (2026-10-01):**
+- live fix: `No security definition` count 0 over 15m+ while connected, 0 `EVENT[red]: HKD`,
+  cheap-refresh + cash-sweep + reconcile cycles all green post-login;
+- mirror E2E: the two REAL overnight pushes (`2026-09-30 18:10:57 DIA broker error 202` and
+  `18:35:08 Records disagree (DIA)`) were ingested as `out-live:` entries in `tg_updates.log`
+  at 18:11:22 HKT (UTC→HKT conversion correct), and subsequent cycles re-ingest nothing;
+- mirror plumbing lesson: `docker exec` stdout does NOT reach `docker logs` (probe lines are
+  invisible to the mirror) -- verify with real pushes only. Also: `wsl.exe` ignores the
+  PowerShell stdout pipe for docker output (capture always empty, output floods the console),
+  so `Poll-Outbound` has bash redirect to `tg_docker_raw.txt` under /mnt/c and reads that
+  file; the RFC3339 watermark only advances when both queries exit 0, so a transient wsl
+  failure can't skip past real pushes.
 
 ---
 
