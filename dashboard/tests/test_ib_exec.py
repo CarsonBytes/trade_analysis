@@ -12,7 +12,9 @@ Run:  uv run python -m dashboard.tests.test_ib_exec
 from __future__ import annotations
 
 import os
+import sys
 import json
+import sqlite3
 import tempfile
 import datetime as dt
 from unittest import mock
@@ -1481,6 +1483,233 @@ def test_bracket_parent_tif_is_day_children_gtc():
     _run("_place_sleeve_bracket", _Bracket(),
          lambda ib: ib_exec._place_sleeve_bracket(ib=ib, t=t_sleeve, equity_usd=50000.0,
                                                   acct="U123"))
+
+
+# ADDED 2026-10-01 (S1 in IBKR_EXECUTION_SPEC.md): "placeOrder() returned" is NOT "the order is
+# working". Live's 2026-09-30 log proves the cost -- the sweep logged `BUY 149 SGOV` 17 times in
+# 85 minutes while SGOV never left 60 shares and nothing alerted, and a fresh-client probe got
+# `PreSubmitted -> Inactive -> 202 "Order was discarded."` 40ms after submit. These cover the
+# three verdicts the confirmation helper must distinguish, and the sibling-cancel rule that stops
+# a dead parent from leaving protective SELL legs resting on a position that doesn't exist.
+def test_s1_confirm_order_distinguishes_verdicts():
+    print("\nS1 confirm_order(): reads the BROKER's verdict instead of assuming success --")
+    from dashboard.execution import ib_exec
+
+    def _trade(status, filled=0.0, message="", order_id=7):
+        return type("T", (), {
+            "order": type("O", (), {"orderId": order_id, "permId": 99})(),
+            "orderStatus": type("S", (), {"status": status, "filled": filled,
+                                          "message": message})()})()
+
+    r = ib_exec.confirm_order(None, _trade("Submitted"), "DIA", "BUY", 15, timeout=0.6)
+    check("Submitted -> ok (the order is working)", r["ok"], True)
+    check("Submitted -> status preserved", r["status"], "Submitted")
+    check("Submitted -> orderId captured", r["order_id"], 7)
+
+    r = ib_exec.confirm_order(None, _trade("Inactive", message="Order was discarded."),
+                              "SGOV", "BUY", 149, timeout=0.6)
+    check("Inactive -> NOT ok (this is the silent killer)", r["ok"], False)
+    check("Inactive -> broker status preserved", r["status"], "Inactive")
+    check("Inactive -> broker message preserved", r["message"], "Order was discarded.")
+
+    r = ib_exec.confirm_order(None, _trade("Cancelled"), "DIA", "BUY", 15, timeout=0.6)
+    check("Cancelled -> NOT ok", r["ok"], False)
+    r = ib_exec.confirm_order(None, _trade("Rejected"), "DIA", "BUY", 15, timeout=0.6)
+    check("Rejected -> NOT ok", r["ok"], False)
+
+    r = ib_exec.confirm_order(None, _trade("Filled", filled=15.0), "DIA", "BUY", 15, timeout=0.6)
+    check("Filled -> ok", r["ok"], True)
+
+    # no status at all inside the window -> 'unconfirmed', explicitly NOT ok: absence of a
+    # verdict is not proof of success, and the caller must not mirror the trade on it.
+    r = ib_exec.confirm_order(None, _trade(""), "DIA", "BUY", 15, timeout=0.6)
+    check("no status -> unconfirmed", r["status"], "unconfirmed")
+    check("no status -> NOT ok", r["ok"], False)
+
+    r = ib_exec.confirm_order(None, None, "DIA", "BUY", 15, timeout=0.6)
+    check("no submission at all -> nosubmit, NOT ok", (r["status"], r["ok"]), ("nosubmit", False))
+
+
+def test_s1_dead_bracket_parent_cancels_its_children():
+    print("\nS1 confirm_bracket(): a dead parent must take its TP/SL children down with it -- "
+          "orphan SELL legs against a position that doesn't exist are the latent-short hazard "
+          "(live 2026-10-01: CPER 84 / AMLP 21 / SPY 4 shares resting with NO position):")
+    from dashboard.execution import ib_exec
+
+    cancelled = []
+
+    class _IB:
+        def cancelOrder(self, order):
+            cancelled.append(getattr(order, "orderId", None))
+
+    def _trade(order_id, status):
+        return type("T", (), {
+            "order": type("O", (), {"orderId": order_id, "permId": order_id})(),
+            "orderStatus": type("S", (), {"status": status, "filled": 0.0,
+                                          "message": ""})()})()
+
+    # parent dies, children are alive -> children MUST be cancelled
+    res = ib_exec.confirm_bracket(_IB(), [_trade(1, "Inactive"), _trade(2, "PreSubmitted"),
+                                           _trade(3, "PreSubmitted")],
+                                  "DIA", "BUY", 15, timeout=0.6)
+    check("dead parent -> NOT ok", res["ok"], False)
+    check("both sibling legs cancelled", cancelled, [2, 3])
+    check("message notes the sibling cancel", "cancelled 2 sibling leg(s)" in res["message"], True)
+
+    # parent works -> children must be LEFT ALONE (they are the position's protection)
+    cancelled.clear()
+    res = ib_exec.confirm_bracket(_IB(), [_trade(1, "Submitted"), _trade(2, "PreSubmitted"),
+                                           _trade(3, "PreSubmitted")],
+                                  "DIA", "BUY", 15, timeout=0.6)
+    check("working parent -> ok", res["ok"], True)
+    check("children NOT cancelled when parent works", cancelled, [])
+
+    # unconfirmed is not failure: don't kill protection on missing information
+    cancelled.clear()
+    res = ib_exec.confirm_bracket(_IB(), [_trade(1, ""), _trade(2, "PreSubmitted"),
+                                           _trade(3, "PreSubmitted")],
+                                  "DIA", "BUY", 15, timeout=0.6)
+    check("unconfirmed parent -> NOT ok", res["ok"], False)
+    check("unconfirmed -> children left alone (no action on missing info)", cancelled, [])
+
+
+def test_s1_unconfirmed_entry_is_never_mirrored():
+    print("\nS1 wiring: a trade whose entry did NOT reach the broker must not be written to "
+          "ib_mirror as OPEN -- that local row is what makes an unfunded trade look live for the "
+          "next 30min until the ghost-cancel grace period catches it:")
+    from dashboard.execution import ib_exec
+
+    class _Leg:
+        def __init__(self):
+            self.orderType, self.lmtPrice, self.tif, self.orderRef, self.account = (
+                "LMT", 0.0, None, None, None)
+
+    class _Bracket(list):
+        def __init__(self):
+            self.parent = _Leg()
+            super().__init__([self.parent, _Leg(), _Leg()])
+
+    bracket = _Bracket()
+
+    class _Trade:
+        def __init__(self, order):
+            self.order = order
+            self.orderStatus = type("S", (), {"status": "Inactive", "filled": 0.0,
+                                              "message": "Order was discarded."})()
+
+    class _IB:
+        def bracketOrder(self, *a, **k):
+            return bracket
+
+        def placeOrder(self, contract, o):
+            return _Trade(o)
+
+        def cancelOrder(self, order):
+            pass
+
+    t = {"id": 27, "instrument": "EEM", "direction": "long", "entry": 63.98,
+         "sl": 60.63, "tp": 74.87}
+    recorded = []
+    with mock.patch.object(ib_exec, "_stock_contract_for", return_value=object()), \
+         mock.patch.object(ib_exec.ib_client, "call",
+                           side_effect=lambda fn, timeout=None: fn()), \
+         mock.patch.object(ib_exec, "record_order_exec",
+                           side_effect=lambda *a, **k: recorded.append(a)), \
+         mock.patch.object(ib_exec, "alert_order_failure", return_value="alerted") as _alert:
+        msg = ib_exec._place_etf_bracket(ib=_IB(), t=t, equity_usd=50000.0, acct="U123")
+
+    check("placement refused", bool(msg) and "NOT working at broker" in msg, True)
+    check("failure surfaced through alert_order_failure", _alert.called, True)
+    check("alert carries the broker's status (Inactive) for the operator",
+          "Inactive" in str(_alert.call_args), True)
+    # record_order_exec is only reached on the SUCCESS path; alert_order_failure (stubbed here,
+    # covered on its own below) is what logs a rejected attempt. No success row, either way.
+    check("no success row written for a rejected entry", recorded, [])
+
+    # The mirror row must NOT exist for a paper trade that was never funded. Use an id that
+    # cannot collide with real history in whatever dev DB this runs against.
+    from dashboard.core import paper as _paper
+    t["id"] = 999999                     # no real ib_mirror row will ever carry this
+    with mock.patch.object(ib_exec, "_stock_contract_for", return_value=object()), \
+         mock.patch.object(ib_exec.ib_client, "call",
+                           side_effect=lambda fn, timeout=None: fn()), \
+         mock.patch.object(ib_exec, "alert_order_failure", return_value="alerted"):
+        ib_exec._place_etf_bracket(ib=_IB(), t=t, equity_usd=50000.0, acct="U123")
+    row = None
+    try:
+        with sqlite3.connect(_paper._DB) as c:
+            row = c.execute("SELECT status FROM ib_mirror WHERE paper_id=?",
+                            (t["id"],)).fetchone()
+    except sqlite3.Error:
+        pass
+    check("no ib_mirror row written at all for the rejected entry", row, None)
+
+
+def test_s1_sweep_failure_streak_alerts_once():
+    print("\nS1 sweep failure budget: N consecutive unconfirmed sweep orders raise ONE notable "
+          "event (the alert whose absence let the shield fail silently for a week):")
+    from dashboard.execution import ib_exec
+
+    recorded = []
+    with mock.patch.object(ib_exec, "ORDER_EXEC_LOG_KEY", "test_sweep_exec_log"), \
+         mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
+         mock.patch.object(ib_exec.store, "cache_set", side_effect=lambda k, v: None), \
+         mock.patch.dict(sys.modules, {"dashboard.core.notable_events": mock.MagicMock(
+             record=lambda *a, **k: recorded.append(a))}):
+        import dashboard.core.notable_events as _ne_real
+        with mock.patch.object(_ne_real, "record",
+                               side_effect=lambda *a, **k: recorded.append(a)):
+            ib_exec._sweep_fail_streak = 0
+            for i in range(2):
+                ib_exec._sweep_note_failure(f"attempt {i}")
+            check("below threshold -> no alert", len(recorded), 0)
+            ib_exec._sweep_note_failure("attempt 2")
+            check("at threshold -> exactly one alert", len(recorded), 1)
+            check("alert names the shield", "cash shield NOT executing" in recorded[0][0], True)
+            ib_exec._sweep_note_failure("attempt 3")
+            check("streep continues but re-alerting is deduped upstream (symbol-keyed)",
+                  len(recorded), 2)
+            ib_exec._sweep_note_success()
+            check("a confirmed order resets the streak", ib_exec._sweep_fail_streak, 0)
+
+
+def test_sweep_failure_log_and_success_reset_are_pure():
+    print("\nS1 helpers: record_order_exec() caps its ring at ORDER_EXEC_LOG_MAX so the store "
+          "key can't grow without bound, and never raises on a store failure:")
+    from dashboard.execution import ib_exec
+
+    written = []
+
+    class _Store:
+        @staticmethod
+        def cache_get(_k):
+            return ([{"ts": "x", "sym": "OLD", "action": "", "qty": 0,
+                      "status": "Filled", "note": ""}], "ts")
+
+        @staticmethod
+        def cache_set(k, v):
+            written.append((k, v))
+
+    with mock.patch.object(ib_exec, "store", _Store):
+        ib_exec.record_order_exec("DIA", "BUY", 15, "Submitted", "working")
+    key, rows = written[-1]
+    check("written under the exec-log key", key, "order_exec_log")
+    check("ring capped at max", len(rows) <= ib_exec.ORDER_EXEC_LOG_MAX, True)
+    check("newest row is the order just placed", rows[-1]["sym"], "DIA")
+    check("status recorded", rows[-1]["status"], "Submitted")
+
+    class _Broken:
+        @staticmethod
+        def cache_get(_k):
+            raise sqlite3.OperationalError("db gone")
+
+        @staticmethod
+        def cache_set(_k, _v):
+            raise sqlite3.OperationalError("db gone")
+
+    with mock.patch.object(ib_exec, "store", _Broken):
+        ib_exec.record_order_exec("DIA", "BUY", 15, "Submitted", "x")   # must not raise
+    check("store failure never propagates", True, True)
 
 
 # ADDED 2026-07-30: live_positions() now reports the broker's own live mark as

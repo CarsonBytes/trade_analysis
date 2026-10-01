@@ -27,6 +27,7 @@ from dashboard.core import net  # noqa: F401
 
 import os
 import math
+import time
 import sqlite3
 import datetime as dt
 
@@ -170,6 +171,144 @@ def cap_qty_to_portfolio_room(qty: int, price: float, equity_usd: float,
 def is_paper() -> bool:
     """True only when the connected IB account is a paper account."""
     return ib_client.is_paper()
+
+
+# ---- S1: order confirmation (2026-10-01, IBKR_EXECUTION_SPEC.md) --------------------
+# WHY THIS EXISTS. Every placement path used to treat "placeOrder() returned" as "the order is
+# working". It isn't: IBKR can accept a submission and kill it milliseconds later. Live's log
+# from 2026-09-30 18:01-19:29 UTC shows the cost -- the sweep logged
+# `cash-sweep: BUY 149 SGOV` seventeen times in 85 minutes, SGOV never moved off 60 shares, and
+# NOT ONE alert fired, because nothing ever asked the broker what happened to the order.
+# Separately, a fresh-client probe reproduced a hard IBKR-side rejection:
+# `PreSubmitted -> Inactive -> 202 "Order was discarded."` 40ms after submit, from a fully
+# authenticated session (bypass-precautions on, read-only off). Whether or not S2 fixed that
+# particular case, "submitted" must never again be mistaken for "working".
+#
+# The contract: submit -> wait up to ORDER_CONFIRM_SEC for the broker's own status -> treat
+# Inactive/Cancelled/Rejected as FAILURE (cancel any siblings so a bracket can't leave orphan
+# protection on nothing), record the verdict, and alert ONCE per (symbol, reason) so a
+# systematic broker rejection can't spam.
+ORDER_CONFIRM_SEC = 5.0
+_ORDER_ACCEPTED = {"pendingsubmit", "presubmitted", "submitted", "apipending",
+                   "active", "partiallyfilled"}
+# 'Filled' is deliberately in the ACCEPTED set, not the failed one: a completed fill is the best
+# possible outcome, and treating it as anything but success would refuse to mirror a trade that
+# actually funded. 'PendingCancel' is in-flight-with-a-whip coming, not dead, so it waits for a
+# real terminal status rather than being reported as a failure on a maybe.
+_ORDER_SUCCESS = {"filled"}
+_ORDER_FAILED = {"inactive", "cancelled", "apicancelled", "rejected"}
+ORDER_EXEC_LOG_KEY = "order_exec_log"
+ORDER_EXEC_LOG_MAX = 100
+
+
+def record_order_exec(symbol: str, action: str, qty, status: str, note: str = "") -> None:
+    """Append one order verdict to the `order_exec_log` store key (capped ring). Forensic
+    record so 'why did nothing fill?' never again requires digging through docker logs."""
+    try:
+        prev, _ts = store.cache_get(ORDER_EXEC_LOG_KEY)
+        rows = list(prev or [])
+        rows.append({
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "sym": symbol, "action": action, "qty": qty,
+            "status": status, "note": note[:200],
+        })
+        store.cache_set(ORDER_EXEC_LOG_KEY, rows[-ORDER_EXEC_LOG_MAX:])
+    except Exception:                                       # noqa: BLE001
+        log.debug("order_exec_log write failed", exc_info=True)
+
+
+def confirm_order(ib, trade, symbol: str, action: str = "", qty=None,
+                  timeout: float = ORDER_CONFIRM_SEC) -> dict:
+    """Wait for IBKR's own verdict on a just-submitted order. Returns
+    {"ok": bool, "status": str, "order_id": int, "message": str, "filled": float}.
+
+    ok=True only for statuses that mean the order is genuinely working at the broker. Anything
+    terminal-and-dead is ok=False. Deliberately never raises: a monitoring helper must not be
+    able to break a placement path.
+    """
+    out = {"ok": False, "status": "", "order_id": 0, "message": "", "filled": 0.0}
+    if trade is None:
+        out["status"] = "nosubmit"
+        return out
+    order = getattr(trade, "order", trade)
+    out["order_id"] = int(getattr(order, "orderId", 0) or 0)
+    deadline = time.monotonic() + max(0.5, timeout)
+    st = getattr(trade, "orderStatus", None)
+    while True:
+        st = getattr(trade, "orderStatus", None)
+        status = str(getattr(st, "status", "") or "").strip()
+        filled = float(getattr(st, "filled", 0.0) or 0.0)
+        if status:
+            out["status"], out["filled"] = status, filled
+            out["message"] = str(getattr(st, "message", "") or "")
+            if status.lower() in _ORDER_FAILED:
+                return out
+            if status.lower() in _ORDER_SUCCESS:
+                out["ok"] = True
+                return out
+            # A fast fill, or a clean 'Submitted', is enough; anything else still in flight keeps
+            # waiting until the window closes (then reports 'unconfirmed', never a false ok).
+            if status.lower() in _ORDER_ACCEPTED and (filled > 0
+                                                      or time.monotonic() >= deadline
+                                                      or status.lower() == "submitted"):
+                out["ok"] = True
+                return out
+        if time.monotonic() >= deadline:
+            out["status"] = out["status"] or "unconfirmed"
+            # No terminal status inside the window: NOT proof of failure (the order may still be
+            # working), so don't call it ok -- report unconfirmed and let the caller decide.
+            return out
+        time.sleep(0.25)
+
+
+def confirm_bracket(ib, trades, symbol: str, action: str = "", qty=None,
+                    timeout: float = ORDER_CONFIRM_SEC) -> dict:
+    """S1 for a bracket: confirm the PARENT (it's the one that must reach the book), and if it
+    died, cancel the children client-side immediately.
+
+    Leaving the children alive after a dead parent is how this codebase ends up with protective
+    SELL legs resting against a position that doesn't exist -- the latent-short hazard measured
+    live on 2026-10-01 (CPER 84 / AMLP 21 / SPY 4 shares with no position at all).
+    """
+    trades = list(trades or [])
+    if not trades:
+        return {"ok": False, "status": "nosubmit", "order_id": 0, "message": "", "filled": 0.0}
+    parent_trade = trades[0]
+    parent_order = getattr(parent_trade, "order", parent_trade)
+    if getattr(parent_order, "orderType", "") != "MKT" and getattr(parent_order, "parentId", 0):
+        parent_trade = trades[-1]              # defensive: pick the one that isn't a child
+    res = confirm_order(ib, parent_trade, symbol, action, qty, timeout)
+    if not res["ok"] and res["status"] != "unconfirmed":
+        cancelled = 0
+        for t in trades[1:]:
+            try:
+                ib.cancelOrder(getattr(t, "order", t))
+                cancelled += 1
+            except Exception:                   # noqa: BLE001
+                log.debug("S1: sibling cancel failed", exc_info=True)
+        if cancelled:
+            res["message"] = (f"{res['message']} (cancelled {cancelled} sibling leg(s))").strip()
+    res["symbol"] = symbol
+    return res
+
+
+def alert_order_failure(res: dict, context: str = "") -> str:
+    """Record a failed order verdict and raise ONE notable event per (symbol, reason).
+    notable_events dedupes by symbol, and its push policy only fires when a group FIRST turns
+    red (b551e54), so a systematic broker-side rejection alerts once rather than every cycle."""
+    sym = res.get("symbol") or "order"
+    status = res.get("status", "")
+    msg = (f"{sym}: order NOT working at broker (status {status or 'unknown'})"
+           f"{' -- ' + res['message'] if res.get('message') else ''}"
+           f"{' [' + context + ']' if context else ''}")
+    record_order_exec(sym, "", None, status, msg)
+    try:
+        from dashboard.core import notable_events
+        notable_events.record(msg, level="error", kind="order-rejected", symbol=sym)
+    except Exception:                           # noqa: BLE001
+        log.debug("S1: notable_events.record failed", exc_info=True)
+    log.error("ib_exec: %s", msg)
+    return msg
 
 
 def _guard():
@@ -649,6 +788,14 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
         trades = ib_client.call(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
+    # S1: the broker's own verdict, BEFORE we write a mirror row or report a placement.
+    _conf = confirm_bracket(ib, trades, t["instrument"], action, qty)
+    if not _conf["ok"]:
+        alert_order_failure(_conf, f"futures bracket trade #{t['id']}")
+        return (f"{t['instrument']}: order NOT working at broker (status "
+                f"{_conf['status'] or 'unknown'}) -- NOT mirrored, retry next cycle")
+    record_order_exec(t["instrument"], action, qty, _conf["status"],
+                      f"orderId={_conf['order_id']} working")
     parent = trades[0].order
     perm_id = getattr(parent, "permId", 0)
     with paper._LOCK, _conn() as c:
@@ -773,17 +920,18 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
         trades = ib_client.call(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
+    # S1: ask the broker whether the parent is actually working, and refuse to mirror a trade
+    # whose entry never reached the book. Replaces the 2026-08-26 immediate-status peek below,
+    # which only caught statuses already visible at submit time (IBKR kills these 40ms LATER --
+    # that gap is why the 2026-09-30 log showed 17 sweep BUYs and zero alerts).
+    _conf = confirm_bracket(ib, trades, t["instrument"], action, qty)
+    if not _conf["ok"]:
+        alert_order_failure(_conf, f"ETF bracket trade #{t['id']}")
+        return (f"{t['instrument']}: order NOT working at broker (status "
+                f"{_conf['status'] or 'unknown'}) -- NOT mirrored, retry next cycle")
+    record_order_exec(t["instrument"], action, qty, _conf["status"],
+                      f"orderId={_conf['order_id']} working")
     perm_id = getattr(trades[0].order, "permId", 0)
-    # ADDED 2026-08-26 (traceability): if the parent order is immediately Inactive/
-    # Cancelled/Rejected at the broker, say so NOW with the broker's own status -- instead
-    # of only discovering a "ghost, never filled" 31min later via the grace-period cleanup.
-    _st = getattr(trades[0].orderStatus, "status", "") or ""
-    if _st.lower() in ("inactive", "cancelled", "apicancelled", "rejected"):
-        from dashboard.core import notable_events
-        notable_events.record(
-            f"{t['instrument']}: order NOT accepted by broker (status {_st}) -- "
-            "it will be auto-cancelled unless it starts working",
-            level="warning", kind="order-cancelled", symbol=t["instrument"])
     with paper._LOCK, _conn() as c:
         c.execute("INSERT OR IGNORE INTO ib_mirror VALUES (?,?,?,?,?,?,?,?,?,?)",
                   (t["id"], perm_id, getattr(contract, "conId", 0), t["instrument"],
@@ -889,6 +1037,15 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
         trades = ib_client.call(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: sleeve order send failed ({e}), retry"
+    # S1: confirm the parent is really working before mirroring (same contract as the core ETF
+    # path). A sleeve trade that never reached the broker must not look OPEN locally.
+    _conf = confirm_bracket(ib, trades, t["instrument"], action, qty)
+    if not _conf["ok"]:
+        alert_order_failure(_conf, f"sleeve bracket trade #{t['id']}")
+        return (f"{t['instrument']}: sleeve order NOT working at broker (status "
+                f"{_conf['status'] or 'unknown'}) -- NOT mirrored, retry next cycle")
+    record_order_exec(t["instrument"], action, qty, _conf["status"],
+                      f"orderId={_conf['order_id']} working (sleeve)")
     perm_id = getattr(trades[0].order, "permId", 0)
     with paper._LOCK, _conn() as c:
         c.execute("INSERT OR IGNORE INTO ib_mirror VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -2037,6 +2194,36 @@ CASH_SWEEP_COOLDOWN_SEC = 300  # 5 min cooldown between sweep order submissions 
                                # order flood -- confirmed live: 160 identical BUY orders placed
                                # every ~65s because no pending-order guard existed)
 _sweep_last_order_ts: float = 0.0   # monotonic timestamp of last sweep order submission
+_sweep_fail_streak: int = 0           # consecutive UNCONFIRMED sweep orders (S1, 2026-10-01)
+CASH_SWEEP_ALERT_AFTER = 3            # consecutive failures before we shout -- this is the alert
+                                      # whose absence let the sweep fail silently for a week
+
+
+def _sweep_note_success() -> None:
+    global _sweep_fail_streak
+    _sweep_fail_streak = 0
+
+
+def _sweep_note_failure(why: str) -> None:
+    """Count consecutive unconfirmed sweep orders and raise ONE notable event once the streak
+    reaches CASH_SWEEP_ALERT_AFTER. The alert is deduped by symbol and only pushes when the
+    group first turns red (b551e54), so a broker that rejects every sweep order alerts once,
+    not every 5 minutes for the rest of the session."""
+    global _sweep_fail_streak
+    _sweep_fail_streak += 1
+    if _sweep_fail_streak < CASH_SWEEP_ALERT_AFTER:
+        log.warning("cash-sweep: order not working (%d/%d consecutive): %s",
+                    _sweep_fail_streak, CASH_SWEEP_ALERT_AFTER, why)
+        return
+    try:
+        from dashboard.core import notable_events
+        notable_events.record(
+            f"{SGOV_SYMBOL}: cash shield NOT executing -- {_sweep_fail_streak} consecutive "
+            f"orders never reached the book ({why}). Idle cash is not being parked; check "
+            f"order_exec_log for the broker's status.",
+            level="error", kind="cash-sweep-failed", symbol=SGOV_SYMBOL)
+    except Exception:                                    # noqa: BLE001
+        log.debug("cash-sweep alert failed", exc_info=True)
 CASH_SWEEP_MIN_NAV_USD = 10_000   # LOWERED 2026-08-06 (was 75_000): the ORIGINAL "T+1
                                   # settlement friction isn't worth it" reasoning turned out
                                   # to rest on a premise that doesn't hold for this account --
@@ -2174,11 +2361,27 @@ def sweep_cash() -> dict:
             o.account = acct
         return ib.placeOrder(contract, o)
     try:
-        ib_client.call(_send)
+        trade = ib_client.call(_send)
     except Exception as e:                         # noqa: BLE001
         status["log"] = f"cash-sweep: order failed ({e})"
+        _sweep_note_failure(f"send raised: {e}")
         return status
-    _sweep_last_order_ts = _time.monotonic()   # start cooldown after successful submission
+    # S1 (2026-10-01): CONFIRM before claiming the sweep ran. This is the exact spot that logged
+    # `BUY 149 SGOV` 17x on 2026-09-30 while SGOV never left 60 shares and nothing alerted --
+    # placeOrder() returning was treated as the order working. IBKR can discard a submission
+    # milliseconds later ("Order was discarded."), so the verdict has to be read, not assumed.
+    _conf = confirm_order(ib, trade, SGOV_SYMBOL, action, qty, timeout=ORDER_CONFIRM_SEC)
+    if not _conf["ok"]:
+        status["log"] = (f"cash-sweep: {action} {qty} SGOV NOT working at broker "
+                         f"(status {_conf['status'] or 'unconfirmed'}"
+                         f"{' -- ' + _conf['message'] if _conf['message'] else ''})")
+        _sweep_note_failure(status["log"])
+        log.warning("ib_exec: %s", status["log"])
+        return status
+    _sweep_note_success()
+    record_order_exec(SGOV_SYMBOL, action, qty, _conf["status"],
+                      f"orderId={_conf['order_id']} cash-sweep")
+    _sweep_last_order_ts = _time.monotonic()   # start cooldown after a CONFIRMED submission
     status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
     status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
     status["log"] = (status["log"] + f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
