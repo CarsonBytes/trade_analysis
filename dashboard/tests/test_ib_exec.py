@@ -12,10 +12,12 @@ Run:  uv run python -m dashboard.tests.test_ib_exec
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import datetime as dt
 from unittest import mock
 
+from dashboard.data import contracts
 from dashboard.execution.ib_exec import (cap_qty_to_portfolio_room, commission_estimate_usd,
                                          is_commission_viable)
 
@@ -1409,6 +1411,76 @@ def test_place_etf_bracket_skips_commission_not_viable_crumb():
     check("no order was sent", fake_call.called, False)
     check("message explains the commission-not-viable skip", "commission" in (msg or ""), True)
     check("deployed room was NOT reserved for a skipped order", deployed[0], 12900.0 - 64.0)
+
+
+# ADDED 2026-10-01 (S2 in IBKR_EXECUTION_SPEC.md): a MKT parent must carry tif="DAY". The code
+# set tif="GTC" on every leg of the bracket, which IBKR rejects for a market order -- it
+# discards the parent and cascade-cancels the TP/SL children, which is the exact log signature
+# (`broker error 202 -- Order Canceled - reason:` with an EMPTY reason at age 0.2-0.7s) that
+# killed every live ETF entry from 2026-09-22 onward. The parent-side rejection code isn't in
+# ib_client's handled set (110/200/201/202/10197), so only the children's cancellation surfaced
+# and the real cause stayed invisible. Protective children legitimately rest GTC.
+def test_bracket_parent_tif_is_day_children_gtc():
+    print("\nS2 (2026-10-01): every bracket builder sends its MKT parent with tif=DAY and only "
+          "the TP/SL children GTC -- a GTC market order is discarded by IBKR and takes the "
+          "children with it:")
+    from dashboard.execution import ib_exec
+
+    class _Leg:
+        def __init__(self, kind):
+            self.orderType, self.lmtPrice, self.tif, self.orderRef, self.account = (
+                "LMT", 0.0, None, None, None)
+
+    class _Bracket(list):
+        def __init__(self):
+            self.parent = _Leg("parent")
+            super().__init__([self.parent, _Leg("tp"), _Leg("sl")])
+
+    t = {"id": 27, "instrument": "EEM", "direction": "long", "entry": 63.98,
+         "sl": 60.63, "tp": 74.87}
+    # sleeve reads its own risk_pct out of entry_facts
+    t_sleeve = dict(t, entry_facts=json.dumps({"risk_pct": 0.005}))
+    # positional: (key, symbol, exchange, currency, multiplier, tick_size, asset_class)
+    spec = contracts.FutureSpec("MES", "MES", "CME", "USD", 5.0, 0.25, "index")
+
+    def _run(label, bracket, invoke):
+        class _Trade:
+            def __init__(self, order):
+                self.order = order
+                self.orderStatus = type("S", (), {"status": "Submitted", "filled": 0.0,
+                                                  "message": None})()
+
+        class _IB:
+            def bracketOrder(self, *a, **k):
+                return bracket
+
+            def placeOrder(self, contract, o):
+                return _Trade(o)
+
+        with mock.patch.object(ib_exec, "_stock_contract_for", return_value=object()), \
+             mock.patch.object(ib_exec.ib_client, "front_future", return_value=object()), \
+             mock.patch.object(ib_exec.ib_client, "get_stock_tick",
+                               return_value={"bid": 63.97, "ask": 63.99}), \
+             mock.patch.object(ib_exec.ib_client, "call",
+                               side_effect=lambda fn, timeout=None: fn()):
+            msg = invoke(_IB())
+        check(f"{label}: order actually sent (guard: msg is a placement)",
+              "placed" in (msg or ""), True)
+        check(f"{label}: parent is MKT", bracket.parent.orderType, "MKT")
+        check(f"{label}: parent tif=DAY (NOT GTC -- the 2026-09-22 entry killer)",
+              bracket.parent.tif, "DAY")
+        check(f"{label}: children tif=GTC",
+              [leg.tif for leg in list(bracket)[1:]], ["GTC", "GTC"])
+        check(f"{label}: parent lmtPrice cleared for MKT", bracket.parent.lmtPrice, 0.0)
+
+    _run("_place_etf_bracket", _Bracket(),
+         lambda ib: ib_exec._place_etf_bracket(ib=ib, t=t, equity_usd=50000.0, acct="U123"))
+    _run("_place_bracket", _Bracket(),
+         lambda ib: ib_exec._place_bracket(ib=ib, t=t, spec=spec, equity=50000.0,
+                                           acct="U123"))
+    _run("_place_sleeve_bracket", _Bracket(),
+         lambda ib: ib_exec._place_sleeve_bracket(ib=ib, t=t_sleeve, equity_usd=50000.0,
+                                                  acct="U123"))
 
 
 # ADDED 2026-07-30: live_positions() now reports the broker's own live mark as

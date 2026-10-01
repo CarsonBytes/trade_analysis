@@ -123,10 +123,17 @@ bracket, sweep, keep-cash-usd, exits, reprotect):
   reached the broker.
 Tests: fake IB object with scripted status callbacks covering accept, discard, parent-death.
 
-### S2 — Fix the TIF bug (S1's first victim)
-`o.tif = "DAY"` on the MKT parent; `GTC` only on the TP/SL children. Two lines in
-`_place_etf_bracket` and `_place_bracket`. Test asserts parent `DAY` + children `GTC`, and
-that a parent-death cancels children client-side.
+### S2 — Fix the TIF bug (S1's first victim) — **DONE 2026-10-01, commit pending**
+`o.tif = "DAY"` on the MKT parent; `GTC` only on the TP/SL children. Applied in **all three**
+bracket builders — `_place_bracket` (futures), `_place_etf_bracket`, and `_place_sleeve_bracket`
+(the sleeve path had the same bug and was not in the original two-line estimate). Regression
+test `test_bracket_parent_tif_is_day_children_gtc` asserts, per builder, that the order actually
+went out (guards against a vacuous pass), parent is MKT with `lmtPrice=0`, parent `tif=DAY`, and
+both children `GTC`. Full suite 292 passed.
+
+**Still unverified against the broker:** this removes a *local* cause; RC-2 (the live environment
+discarding orders outright) is separate and open. Deploy and watch whether entries reach
+`Submitted` — that is the real test.
 
 ### S3 — Sweep hardening
 - use S1; count consecutive failures; **3 in a row → RED alert** "cash shield not executing"
@@ -183,7 +190,8 @@ while every cash-shield tuning knob together is worth ~$147/yr — and the deplo
 blocked by *this* doc, not by cash policy. So order-reliability work comes first and cash
 policy must not gate it.
 
-1. **S2** — two lines + test; deploy paper, then live. *Highest value per line anywhere.*
+1. **S2** — ✅ **DONE 2026-10-01** (all three bracket builders + regression test, 292 passed).
+   Deploy paper, then live; entries reaching `Submitted` is the real verification.
 2. **S4** — orphan sweep (removes live short risk) + qty cap. Deploy.
 3. **S1** — the confirmation helper + `order_exec_log`; adopt in sweep first, then brackets.
 4. **S3** — sweep failure budget, ceiling, ratio stat.

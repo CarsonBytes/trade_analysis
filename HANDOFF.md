@@ -121,6 +121,37 @@ orders.
 
 ---
 
+### 🔥 FIXED 2026-10-01: S2 -- MKT bracket parent carried `tif="GTC"`, so IBKR discarded every entry and cascade-killed its TP/SL (the real cause of "no trades since 2026-09-22")
+
+Implementation of S2 in `IBKR_EXECUTION_SPEC.md`; the investigation that found it is the
+INVESTIGATED entry below. Tests: `test_bracket_parent_tif_is_day_children_gtc`. **Not yet
+deployed** — spec + code only at commit time.
+
+**The bug.** All three bracket builders did `for o in bracket: o.tif = "GTC"` — including the
+parent, which they had just forced to `orderType = "MKT"`. A market order must be DAY. IBKR
+discards a GTC market order and cascade-cancels the children it was bracketed to, so the whole
+entry died in under a second. Live's event log had been showing exactly this for a week and it
+read as a mystery: `broker error 202 -- Order Canceled - reason:` with an **empty reason** at
+**age 0.2-0.7s**, always on a TP/SL leg (DIA ×11, AMLP, CPER, EFA).
+
+**Why it stayed invisible.** The parent's own rejection carries a code outside
+`ib_client._ensure_conn`'s handled set (`110, 200, 201, 202, 10197` — IBKR uses 10349/135 for
+TIF discards), so only the children's cancellation ever surfaced. And because nothing confirms
+an order reached the broker (S1), "submitted" was logged and believed — which is why the sweep
+could log 17× `BUY 149 SGOV` with zero fills and zero alerts.
+
+**Fix.** `o.tif = "DAY" if o is bracket.parent else "GTC"` in `_place_bracket`,
+`_place_etf_bracket`, and `_place_sleeve_bracket` — the sleeve path carried the same bug and was
+not in the original two-line estimate. Children stay GTC (that's correct for resting protective
+legs). Test asserts per builder, including a guard that the order actually went out so the test
+can't pass vacuously. Full suite **292 passed**.
+
+**Next:** deploy paper then live; V-2 (an entry reaching `Submitted` within 5s) is the real test.
+This removes a *local* cause only — **RC-2, the live environment discarding orders outright, is
+still open**, so S1 + RC-2 diagnosis remain the gates on trading.
+
+---
+
 ### 🔥 FIXED 2026-09-30: `[LIVE] HKD: broker error 200` on every cheap refresh (fx_to_usd dead-pair leg) + outbound-Telegram mirror so bot→user alerts stop being invisible
 
 User ask: *"did you need to check the last ones"* (pasting the 17:35 gateway-2FA and 17:37

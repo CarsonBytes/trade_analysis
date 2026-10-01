@@ -630,8 +630,17 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
         # parent as MARKET (bracketOrder makes a LMT parent by default)
         bracket.parent.orderType = "MKT"
         bracket.parent.lmtPrice = 0.0
+        # FIXED 2026-10-01 (S2 in IBKR_EXECUTION_SPEC.md): the loop below used to set tif="GTC"
+        # on EVERY leg -- including this MKT parent, which is invalid. IBKR discards a
+        # market order that isn't DAY, then cascade-cancels the children it was bracketed to,
+        # so the whole entry died with the log's signature
+        # `broker error 202 -- Order Canceled - reason:` (reason EMPTY) at age 0.2-0.7s on the
+        # TP/SL legs only -- the parent's own rejection carries a code this app doesn't handle
+        # (ib_client's error hook only records 110/200/201/202/10197), so the parent-side cause
+        # was invisible and every entry since 2026-09-22 ghost-cancelled. Parent is now DAY;
+        # only the protective children rest GTC.
         for o in bracket:
-            o.tif = "GTC"
+            o.tif = "DAY" if o is bracket.parent else "GTC"
             o.orderRef = f"quant#{t['id']}"
             if acct:
                 o.account = acct
@@ -749,8 +758,13 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
                                   stopLossPrice=sl_px)
         bracket.parent.orderType = "MKT"
         bracket.parent.lmtPrice = 0.0
+        # FIXED 2026-10-01 (S2 in IBKR_EXECUTION_SPEC.md): was tif="GTC" on EVERY leg. A MARKET
+        # order must be DAY -- IBKR discards it otherwise and cascade-cancels the children, which
+        # is exactly how every live ETF entry died at age 0.2-0.7s since 2026-09-22 (parent-side
+        # rejection code isn't in ib_client's handled set, so only the children's error 202 with
+        # an empty reason ever surfaced). See _place_bracket() for the long version.
         for o in bracket:
-            o.tif = "GTC"
+            o.tif = "DAY" if o is bracket.parent else "GTC"
             o.orderRef = f"quant#{t['id']}"
             if acct:
                 o.account = acct
@@ -863,8 +877,10 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
                                   takeProfitPrice=tp_px, stopLossPrice=sl_px)
         bracket.parent.orderType = "MKT"
         bracket.parent.lmtPrice = 0.0
+        # FIXED 2026-10-01 (S2): parent must be DAY, not GTC -- a MKT order with GTC is
+        # discarded by IBKR and takes its children down with it. See _place_bracket().
         for o in bracket:
-            o.tif = "GTC"
+            o.tif = "DAY" if o is bracket.parent else "GTC"
             o.orderRef = f"sleeve#{t['id']}"
             if acct:
                 o.account = acct
