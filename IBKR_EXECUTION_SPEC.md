@@ -1,3 +1,7 @@
+> **Companion doc:** the dynamic version of §S6 below (static 80% target → reservation-based
+> target with on-demand SGOV recall) is specced in **`IBKR_CASH_SHIELD_SPEC.md`**. Read that
+> one for the cash question; this doc owns order reliability.
+
 # Execution & cash-shield spec — why live stopped trading and why SGOV sits at 19%
 
 **Status:** PROPOSAL (no code changed). Written 2026-10-01 after a broker-level
@@ -151,9 +155,11 @@ that a parent-death cancels children client-side.
 - the infra watchdog must not restart a gateway whose session is healthy; if it must, it
   waits for `trading_ready` and notifies.
 
-### S6 — Cash-shield policy (needs the user's decision, see §6)
-Make the target explicit in NAV terms (e.g. "SGOV ≥ 60% of NAV, idle cash ≤ 20%") rather
-than "80% of idle cash", and fix `keep_cash_usd`'s HKD contract error (200).
+### S6 — Cash-shield policy (superseded by `IBKR_CASH_SHIELD_SPEC.md`)
+Originally: make the target explicit in NAV terms. Superseded by the dynamic reservation
+design — hold back only what the pipeline needs plus a float, park the rest in SGOV, and sell
+SGOV to fund an entry when one appears. See that doc for the formula, the two-tier
+recall/sweep split, and the boundary conditions.
 
 ---
 

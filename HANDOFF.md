@@ -57,8 +57,44 @@ $28.9k cash, no orphans, no open orders).
 
 **Proposed build order (§5):** S2 TIF fix (2 lines) → S4 orphan-leg sweep + qty cap → S1
 submit-and-confirm helper + `order_exec_log` → S3 sweep failure budget + SGOV-ratio stat → S5
-`--no-deps` deploys + `trading_ready` gate → S6 policy (needs user decision). Still deferred:
-`unwind_shorts.py` two-consecutive-readings hardening.
+`--no-deps` deploys + `trading_ready` gate. Still deferred: `unwind_shorts.py`
+two-consecutive-readings hardening.
+
+### 📐 SPEC 2026-10-01: dynamic cash shield — park the buffer in SGOV, not idle cash (`IBKR_CASH_SHIELD_SPEC.md`)
+
+User follow-up: *"utilize SGOV rather than cash buffer as possible if no pending trades are
+occupying the money, how about dynamically adjusting?"* — **spec only, no code.**
+
+**The gap.** `CASH_SWEEP_TARGET = 0.80` (ib_exec.py:2017) is a **static** fraction: 80% into
+SGOV, 20% cash forever, whether or not anything is waiting to be bought. At live's $32.4k NAV
+that permanently idles ~$5k earning ~0.
+
+**Proposed.** Replace the fraction with a **reservation**:
+`reserve = pending entry notional (broker orders + unfunded journal-OPEN trades) + float`, then
+`sgov_target = max(0, cash + sgov − reserve)`. At rest the buffer collapses to the float
+(~3% / $1,500), so SGOV holds ~all idle capital (**live: 18.6% → 76.5% of NAV**); when a
+signal needs money, **sell SGOV to fund the trade instead of refusing it**.
+
+**Two tiers, because urgency differs:** surplus sweep keeps its ~85s cadence and entry window;
+a new `ensure_cash_usd(needed)` runs inline from `mirror_new()` *before* placement, confirms
+the fill (needs S1), then sizes against cash actually raised.
+
+**Guards specced:** min rebalance delta (max($1.5k, 1.5% NAV)), 300s cooldown + 30-min
+post-recall sell cool-off, no SGOV buys in the last 30 min before close when unfunded trades
+exist, `sgov_target ≤ equity`, whole-share rounding accepted (<0.4% at this size), withdrawal
+reserve still excluded.
+
+**Boundary conditions specced (§5 there):** reservation TTL so ghost/unfunded trades can't
+strand capital; a margin-vs-cash-account assertion (a cash account's T+1 proceeds would break
+recall — live is margin, buying power ≫ NL); `keep_cash_usd` is a second cash manager
+(sequence kept, sweep is tie-breaker); **SGOV sales raise USD and do NOT reduce live's ~HKD
+31.3k HKD-side margin debit** — so the shield may be optimising the wrong currency (Q3).
+
+**Sequencing (§6 there):** cannot ship before the execution spec — S2+S1 first (orders must be
+*known* to work; live currently discards them), then **shadow mode** (compute + log + display
+the target, place nothing, 5 sessions), then recall, then surplus sweep, then the dashboard
+panel. Open questions: float size (3%/$1.5k vs flat $2-3k), margin-account confirmation,
+currency-vs-amount scope, whether the sweep gets a wider window than entries.
 
 ---
 
