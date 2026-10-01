@@ -121,6 +121,58 @@ orders.
 
 ---
 
+### 🔥 FIXED 2026-10-01: S1 — "submitted" was assumed to mean "working"; every placement path now reads the broker's own verdict
+
+Second half of the execution-spec work (`IBKR_EXECUTION_SPEC.md` S1), following S2 (the MKT/GTC
+parent bug, deployed earlier today). Commit `e9b6e84`. **Deployed and verified on both
+instances.**
+
+**The gap.** Every order path treated `placeOrder()` returning as success. It isn't — IBKR accepts
+a submission and can kill it milliseconds later. Measured cost: on 2026-09-30 18:01-19:29 UTC the
+sweep logged `cash-sweep: BUY 149 SGOV` **17 times in 85 minutes**, SGOV never moved off 60
+shares, and **not one alert fired** — nothing ever asked the broker what happened. The S2
+`error 202` check that *did* exist only sampled status at submit time, which is exactly the window
+IBKR rejects in (the live probe died 40ms after submit).
+
+**What landed.**
+- `confirm_order(ib, trade, symbol, ...)` → waits up to `ORDER_CONFIRM_SEC` (5s) for the broker's
+  own status. `Submitted`/`Filled`/`Active`/`PartiallyFilled` = ok; `Inactive`/`Cancelled`/
+  `ApiCancelled`/`Rejected` = **refused**; no status at all = `unconfirmed`, which is explicitly
+  **not** ok (absence of a verdict is not proof of success). Never raises.
+- `confirm_bracket(...)` → confirms the **parent** (the leg that must reach the book) and, if it
+  died, **cancels the TP/SL children client-side**. Leaving them alive is how this codebase ends up
+  with protective SELL legs on a position that doesn't exist — the latent-short hazard measured
+  live today (CPER 84 / AMLP 21 / SPY 4 shares, no position). On `unconfirmed` it deliberately
+  does **not** cancel: no information, no action.
+- Wired into all three bracket builders + the sweep. **A refused entry is no longer mirrored** —
+  no `ib_mirror` row is written and no "placed" event fires, so an unfunded trade can't sit looking
+  live for 30min until the ghost-cancel grace period notices.
+- Sweep: cooldown now starts only after a **confirmed** submission; 3 consecutive unconfirmed
+  orders raise ONE `error` notable event ("cash shield NOT executing") — the alert whose absence
+  let this run silently for a week. Deduped by symbol and push-on-first-red, so it alerts once,
+  not every 5 minutes.
+- `order_exec_log` store key: capped 100-row ring of every verdict (symbol/action/qty/status/
+  broker message/orderId) so "why did nothing fill?" is answerable without docker logs.
+
+**Tests (5 new, 297 total passed, py_compile clean).** `test_s1_confirm_order_distinguishes_verdicts`
+(accepted / discarded / cancelled / rejected / filled / no-status / no-submit),
+`test_s1_dead_bracket_parent_cancels_its_children` (children cancelled on dead parent, **left
+alone** on a working parent and on unconfirmed), `test_s1_unconfirmed_entry_is_never_mirrored`
+(no `ib_mirror` row for a rejected entry), `test_s1_sweep_failure_streak_alerts_once` (3-strike
+budget, resets on success), `test_sweep_failure_log_and_success_reset_are_pure` (ring cap,
+store-failure never propagates).
+
+**Verified in both deployed containers:** S1+S2 present, all 5 S1 tests pass in-container, both
+gateways logged in (`Login has completed` 14:42:16), live reconnected (`clientId=41`, NL 252,643,
+positions 2), no tracebacks.
+
+**Next:** S4 (orphan-leg sweep — cancels the live CPER/AMLP/SPY latent shorts, still open and
+still recommended), then S3, then S5. **RC-2 remains open**: if live still discards orders, S1 now
+makes it *visible* (RED event + `order_exec_log` row) instead of silent, which is the precondition
+for diagnosing it.
+
+---
+
 ### 🔥 FIXED 2026-10-01: S2 -- MKT bracket parent carried `tif="GTC"`, so IBKR discarded every entry and cascade-killed its TP/SL (the real cause of "no trades since 2026-09-22")
 
 Implementation of S2 in `IBKR_EXECUTION_SPEC.md`; the investigation that found it is the

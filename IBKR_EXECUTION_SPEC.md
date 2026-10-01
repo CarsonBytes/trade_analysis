@@ -109,19 +109,29 @@ held 1,146 shares (the sweep sold 324 shares today to clear paper's USD margin d
 
 ## 3. Proposed design
 
-### S1 — Order lifecycle: submit → confirm (the keystone)
+### S1 — Order lifecycle: submit → confirm (the keystone) — **DONE 2026-10-01, `e9b6e84`**
 New helper in `ib_exec`, used by **every** order path (ETF bracket, futures bracket, sleeve
-bracket, sweep, keep-cash-usd, exits, reprotect):
+bracket, sweep; keep-cash-usd / exits / reprotect still place without confirmation — flagged for
+a follow-up pass):
 - place the order(s), capture `orderId`/`permId`;
-- wait up to `ORDER_CONFIRM_SEC` (default 5 s) for a status in
-  `{PendingSubmit, PreSubmitted, Submitted, ApiPending}`;
-- treat `Inactive / Cancelled / Rejected` as **failure**: cancel any siblings immediately,
-  record `orderId + status + broker message + error code` to a new `order_exec_log` store
-  key (last 100 rows, both instances), and raise a RED notable event **once per
-  (symbol, reason)**;
-- return the outcome to the caller so the journal does **not** open a trade that never
-  reached the broker.
-Tests: fake IB object with scripted status callbacks covering accept, discard, parent-death.
+- wait up to `ORDER_CONFIRM_SEC` (5s) for a status in
+  `{PendingSubmit, PreSubmitted, Submitted, Filled, Active, ApiPending, PartiallyFilled}`;
+- treat `Inactive / Cancelled / ApiCancelled / Rejected` as **failure**: cancel any siblings
+  immediately, record the verdict to the new `order_exec_log` store key, and raise a RED
+  notable event once per (symbol, reason);
+- no status at all → `unconfirmed`, explicitly **not** ok (absence of a verdict ≠ success) and
+  deliberately **no sibling cancel** (no information, no action);
+- return the outcome to the caller so the journal does **not** open a trade that never reached
+  the broker.
+Tests: 5 new (verdict matrix incl. Filled/unconfirmed/nosubmit; sibling-cancel on dead parent;
+children left alone on working parent and on unconfirmed; no `ib_mirror` row for a rejected
+entry; sweep 3-strike failure budget; `order_exec_log` ring cap + store-failure isolation).
+**297 passed.** Verified in both deployed containers.
+
+**Note on scope:** `Filled` is treated as success — a completed fill is the best possible outcome
+and refusing to mirror it would be absurd. `_ORDER_FAILED` deliberately excludes `PendingCancel`
+(in-flight with a whip coming), which waits for a real terminal status instead of being reported
+as dead.
 
 ### S2 — Fix the TIF bug (S1's first victim) — **DONE 2026-10-01, commit pending**
 `o.tif = "DAY"` on the MKT parent; `GTC` only on the TP/SL children. Applied in **all three**
@@ -193,7 +203,10 @@ policy must not gate it.
 1. **S2** — ✅ **DONE 2026-10-01** (all three bracket builders + regression test, 292 passed).
    Deploy paper, then live; entries reaching `Submitted` is the real verification.
 2. **S4** — orphan sweep (removes live short risk) + qty cap. Deploy.
-3. **S1** — the confirmation helper + `order_exec_log`; adopt in sweep first, then brackets.
+3. **S1** — ✅ **DONE 2026-10-01** (`e9b6e84`, deployed+verified both instances): the confirmation
+   helper + `order_exec_log`; adopted in all three bracket builders and the sweep. Still open for
+   a follow-up pass: `keep_cash_usd`, `manual_close_position`, `_reprotect_bracket`,
+   `prepare_withdrawal` place without confirmation.
 4. **S3** — sweep failure budget, ceiling, ratio stat.
 5. **S5** — `--no-deps` deploys + `trading_ready` gate (coordinate with the watchdog owner).
 6. **S6** — policy numbers, after the user picks the target ratio.
