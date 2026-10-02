@@ -55,6 +55,21 @@ services:
       # spent -- confirmed during the 7-day-window exhaustion). Live ignores this
       # flag entirely (live never reads paper).
       - SHARED_SCAN_ENABLE=1
+      # 2026-10-02: paper is a DEMO of live, so it must never spend an LLM call.
+      # Measured over 21d: paper made 32 of its own scans ($0.05, 17% of quant's
+      # token cost) to re-derive what live had already paid for, while the reuse
+      # path above fired ZERO times -- every attempt died on the fingerprint check,
+      # because paper and live almost never hash identically (different held
+      # positions, different refresh cadence). Worst of both: on mismatch paper
+      # skipped the whole apply block, so it also got NO signals and stopped
+      # placing/mirroring pending trades.
+      # mirror = serve live's scan regardless of fingerprint; if live has nothing
+      # fresh, fall back to this instance's last applied scan, then to
+      # deterministic-only signals (evaluate_signal already handles llm_sig=None).
+      # Either way the pending-trade path keeps running, and run_board_scan() is
+      # never reached -- including on a manual refresh. Live ignores this (see
+      # board_scan.paper_llm_mode: paper-only by construction).
+      - PAPER_LLM_MODE=mirror
       - SLEEVE_ENABLED=1
     ports:
       # Host 18080 -> container 8090, deliberately far from the native deployment's

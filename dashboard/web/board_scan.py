@@ -257,6 +257,70 @@ SHARED_SCAN_MAX_AGE_MIN = 30
 # SHARED_SCAN_ENABLE=1 lets paper attempt reuse; default off for a safe canary.
 SHARED_SCAN_ENV_FLAG = "SHARED_SCAN_ENABLE"
 
+# ---- PAPER_LLM_MODE=mirror (2026-10-02) ---------------------------------------
+# The paper instance is a DEMO of live, so it must never spend an LLM call:
+# measured over 21d it made 32 of its own board scans ($0.05) purely to re-derive
+# what live had already paid for, while the reuse path that exists for exactly
+# that purpose had fired ZERO times -- every attempt died on the fingerprint
+# check below, because paper and live almost never hash identically (live's
+# board carries its own position keys and a different refresh cadence). So paper
+# spent real quota AND ended up with no signals at all, since the mismatch branch
+# skips the whole apply-block (no place_from_state, no mirror_new).
+#
+# mirror mode therefore does three things, in order:
+#   1. serve live's scan from the shared volume regardless of fingerprint (the
+#      instruments are the same universe; a different top-9 ordering is not a
+#      reason to spend a call);
+#   2. if live has nothing fresh, fall back to the last scan paper already has
+#      cached, so the demo keeps showing a brain instead of "no scan yet";
+#   3. only then fall back to deterministic-only signals (llm={}), which
+#      evaluate_signal() has always supported -- action drops to score.signal.
+# Steps 2 and 3 are what keep PENDING paper trades working: they are placed and
+# mirrored from STATE["llm"], so a paper instance that can never call the LLM
+# must still get signals from somewhere, degrading rather than stalling.
+#
+# Freshness window for (1): 12h, not the 30min match window above. Live's real
+# inter-scan gap is p50 16min / p90 31min but with long quiet stretches (weekends,
+# no signal delta) measured at 200min average and up to 12h; 30min guaranteed a
+# miss on most of paper's attempts. 12h covers every gap live actually produced
+# in 21d except one 96h outage stretch, where (2)/(3) take over.
+SHARED_SCAN_MIRROR_MAX_AGE_MIN = 720
+# Env values: "" / "own" = today's behaviour (paper may call the LLM itself),
+# "mirror" = never call, serve live's scan. Anything else falls back to "own"
+# so a typo can never silently disable trading.
+PAPER_LLM_MODE_ENV = "PAPER_LLM_MODE"
+PAPER_LLM_MODE_MIRROR = "mirror"
+
+
+def paper_llm_mode(env: str | None = None) -> str:
+    """Which LLM policy this instance runs under: "mirror" or "own".
+
+    Mirror is opt-in per deployment (PAPER_LLM_MODE=mirror in
+    docker-compose.yml) and is PAPER-ONLY by construction -- live never reads
+    paper's views, so a mirrored scan can never flow back into real trading.
+    Unknown values resolve to "own" rather than raising: a typo in an env var
+    must not take an instance's trading pipeline down."""
+    import os as _os
+    raw = (_os.environ.get(PAPER_LLM_MODE_ENV) or "").strip().lower()
+    if raw != PAPER_LLM_MODE_MIRROR:
+        return "own"
+    if env is None:
+        # Same chain usage_log._resolve_environment() uses (DASH_FIXED_MODE ->
+        # persisted pointer -> "paper"), deliberately NOT mode.resolve_mode():
+        # that one mutates os.environ (IB_ALLOW_LIVE, DASH_DB_NAME) as a side
+        # effect, which a read-only policy check must not do.
+        env = (_os.environ.get("DASH_FIXED_MODE") or "").strip().lower()
+        if not env:
+            try:
+                from dashboard.core import store as _store
+                env = (_store.get_mode() or "paper").strip().lower()
+            except Exception:
+                env = "paper"
+    # Only the literal paper instance mirrors. Anything else -- "live" above all,
+    # but also an unresolved/garbage mode -- stays "own", so a config mistake can
+    # never point the mirror at the instance that places real trades.
+    return "mirror" if env == "paper" else "own"
+
 
 # FIXED 2026-07-14: found live (both instances share one OpenAI-compatible API key/quota)
 # hammering a THIRD-PARTY free-tier daily limit (chatanywhere.tech, 200 req/day, resets at

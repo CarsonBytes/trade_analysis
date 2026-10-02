@@ -1274,21 +1274,43 @@ def _reuse_allowed(env: str) -> bool:
     return env == "paper" and _os.environ.get(board_scan.SHARED_SCAN_ENV_FLAG) == "1"
 
 
-def _try_shared_reuse(market_fp: str) -> tuple:
-    """Paper-only: reuse live's last scan when our board fingerprints
-    identically to what live scanned. Returns (BoardScan|None, age_min|None,
+def _mirror_mode(env: str) -> bool:
+    """PAPER_LLM_MODE=mirror (2026-10-02): paper is a demo of live and must never
+    spend an LLM call. Pure, unit-tested; live is never mirrored (direction guard
+    is the same one _reuse_allowed enforces)."""
+    return board_scan.paper_llm_mode(env) == board_scan.PAPER_LLM_MODE_MIRROR
+
+
+def _try_shared_reuse(market_fp: str, *, tolerate_fp_mismatch: bool = False,
+                      max_age_min: float | None = None) -> tuple:
+    """Paper-only: reuse live's last scan. Returns (BoardScan|None, age_min|None,
     model, provider, latency_ms, cache_file_exists). Never raises -- any
-    problem means 'do your own scan'."""
+    problem means 'do your own scan' (or, in mirror mode, fall back).
+
+    `max_age_min` defaults to the strict fingerprint window (SHARED_SCAN_MAX_AGE_MIN,
+    30min) so the pre-mirror reuse path keeps its exact old semantics; mirror mode
+    passes SHARED_SCAN_MIRROR_MAX_AGE_MIN explicitly.
+
+    `tolerate_fp_mismatch` (mirror mode) drops the fingerprint-equality test.
+    The test was designed to avoid showing paper a scan of a *different* board,
+    but measured in production it never once matched -- paper and live keep
+    slightly different position sets and refresh cadences, so their top-9
+    hashes diverged on essentially every attempt and paper fell through to
+    paying for its own call anyway (21d: 32 paper scans, 0 reuses). The
+    universe is identical; only the ordering and the held positions differ, and
+    a signal for an instrument paper doesn't hold is simply ignored downstream
+    (place_from_state looks up state["llm"] by key)."""
     import time as _t
     _start = _t.perf_counter()
     try:
-        payload, age_sec = shared_cache.read(
-            shared_cache.SCAN_KEY, board_scan.SHARED_SCAN_MAX_AGE_MIN * 60)
+        age_cap = (board_scan.SHARED_SCAN_MAX_AGE_MIN if max_age_min is None
+                   else max_age_min)
+        payload, age_sec = shared_cache.read(shared_cache.SCAN_KEY, age_cap * 60)
         if not payload:
             # File missing or stale -- caller may try its own LLM call
             return None, None, "", "", 0, False
         cache_file_exists = True
-        if payload.get("market_fp") != market_fp:
+        if not tolerate_fp_mismatch and payload.get("market_fp") != market_fp:
             # File exists but fingerprint doesn't match -- caller should NOT
             # fall through to run_board_scan() for paper (the mismatch is
             # just timing jitter in refresh_cheap() scores; live's scan is
@@ -1305,6 +1327,55 @@ def _try_shared_reuse(market_fp: str) -> tuple:
                 payload.get("provider", ""), latency_ms, cache_file_exists)
     except Exception:
         return None, None, "", "", 0, False
+
+
+def _shared_scan_ts() -> float | None:
+    """Epoch seconds of live's shared scan, or None when there isn't a usable
+    one. Read separately from _try_shared_reuse because the cadence gate needs
+    the TIMESTAMP, not the parsed scan: in mirror mode the trigger for paper to
+    re-read is "live published something newer than what I already applied", not
+    paper's own fingerprint changing. Without this, paper's demo brain would sit
+    on an old scan for hours whenever paper's own board happened to be quiet --
+    the mirror would be stale for no reason. Never raises."""
+    import time as _t
+    try:
+        payload, age_sec = shared_cache.read(
+            shared_cache.SCAN_KEY, board_scan.SHARED_SCAN_MIRROR_MAX_AGE_MIN * 60)
+        if not payload or not payload.get("signals"):
+            return None
+        return _t.time() - float(age_sec)
+    except Exception:
+        return None
+
+
+def _cached_board_scan() -> tuple:
+    """Mirror-mode fallback source: the last scan this instance applied, rebuilt
+    from the `last_board_scan` snapshot store. Returns (BoardScan|None, age_min).
+    Keeps the demo's brain (and its pending-trade pipeline) alive across a live
+    instance that is mid-outage or simply hasn't scanned for hours, without
+    inventing signals."""
+    try:
+        snap, _ = store.cache_get("last_board_scan")
+    except Exception:
+        return None, None
+    if not isinstance(snap, dict) or not snap.get("signals"):
+        return None, None
+    try:
+        result = BoardScan.model_validate({
+            "macro_note": snap.get("macro_note", ""),
+            "signals": snap["signals"],
+        })
+    except Exception:
+        return None, None
+    age_min = None
+    try:
+        _, ts_raw = store.cache_get("llm_scan_ts")
+        if ts_raw:
+            import time as _t
+            age_min = max(0.0, (_t.time() - float(ts_raw)) / 60.0)
+    except Exception:
+        pass
+    return (result if result.signals else None), age_min
 
 
 def _position_keys() -> tuple:
@@ -1376,13 +1447,28 @@ def _hkt_short(d: dt.datetime | None) -> str | None:
     return d.astimezone(_HKT).strftime("%a %H:%M")
 
 
+def _is_reuse_reason(row: dict | None) -> bool:
+    """True for a scan_metrics row that SERVED a scan this instance didn't pay
+    for. Reuse rows are written with skipped=1 and zero tokens, so the reason
+    text is the only thing distinguishing them from ordinary cadence skips.
+
+    Two sources exist since PAPER_LLM_MODE=mirror (2026-10-02): live's shared
+    scan ("reused live scan ...") and, when live has nothing fresh, this
+    instance's own last applied snapshot ("reused last scan ..."). Both are
+    usable brains, so both must classify as 'reused' rather than 'skipped' --
+    hence one helper instead of the literal repeated at five call sites."""
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("reason") or "").startswith("reused ")
+
+
 def _classify_scan_row(row: dict | None) -> str | None:
     """fresh | reused | skipped | None. Reuse rows are written with skipped=1
-    and zero tokens, so the reason text ("reused live scan ...") is checked
-    FIRST -- a plain skipped flag alone would misclassify them."""
+    and zero tokens, so the reason text is checked FIRST -- a plain skipped flag
+    alone would misclassify them."""
     if not isinstance(row, dict):
         return None
-    if "reused live scan" in str(row.get("reason") or ""):
+    if _is_reuse_reason(row):
         return "reused"
     if row.get("skipped"):
         return "skipped"
@@ -1550,7 +1636,7 @@ def get_llm_scan_status() -> dict:
     latest = rows[0] if rows else None
     latest_usable = next(
         (r for r in rows
-         if not r.get("skipped") or "reused live scan" in str(r.get("reason") or "")),
+         if not r.get("skipped") or _is_reuse_reason(r)),
         None)
     try:
         _, board_ts = store.cache_get("last_board_scan")
@@ -1588,7 +1674,7 @@ def get_llm_today_totals() -> dict:
         if d is None or d.date() != today:
             continue
         out["attempts"] += 1
-        if not r.get("skipped") or "reused live scan" in str(r.get("reason") or ""):
+        if not r.get("skipped") or _is_reuse_reason(r):
             out["scans"] += 1
         out["input_tokens"] += int(r.get("input_tokens") or 0)
         out["output_tokens"] += int(r.get("output_tokens") or 0)
@@ -1676,6 +1762,7 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     import time as _t
     now_ts = _t.time()
     env = usage_log._resolve_environment()
+    mirror_mode = _mirror_mode(env)   # paper is a demo: never call the LLM at all
     fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], _position_keys())
     sfp = board_scan.score_fingerprint(ranked, _position_keys())
     last_fp, _ = store.cache_get("llm_scan_fingerprint")
@@ -1702,6 +1789,15 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         proceed, reason = board_scan.should_scan(fp, last_fp, effective_last_ts, now_ts,
                                                   score_only_fp=sfp,
                                                   last_score_only_fp=last_sfp)
+        # MIRROR MODE (2026-10-02): the cadence question is not "did MY board
+        # change" but "has live published something I haven't applied". Re-reading
+        # is free (no LLM call), so the gate only has to stop us re-applying the
+        # SAME scan every tick -- which is what the 30min debounce below gives,
+        # mirroring live's own scan cadence without ever spending a call.
+        if not proceed and mirror_mode:
+            shared_ts = _shared_scan_ts()
+            if shared_ts is not None and (last_scan_ts is None or shared_ts > last_scan_ts):
+                proceed, reason = True, "live published a newer scan"
         if not proceed:
             status = f"skipped ({reason}) -- reusing last scan"
             STATE["last_status"] = status
@@ -1730,7 +1826,42 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
     # instances. force=True (manual refresh) always takes the fresh path.
     market_fp = board_scan.scan_fingerprint(ranked, STATE.get("news") or [], ())
     reuse_info = None  # (age_min, model, provider, latency_ms) when serving shared
-    if not force and _reuse_allowed(env):
+    mirrored = False  # actually served a scan this instance didn't pay for
+    reuse_label = "reused live scan"   # reason prefix; see _is_reuse_reason
+    if mirror_mode:
+        # PAPER_LLM_MODE=mirror: never call the LLM on paper, whatever force says
+        # (force only means "re-read live's scan now"). Three-tier source, in
+        # order: live's shared scan -> our own last applied scan -> nothing
+        # (deterministic-only signals, which evaluate_signal already handles).
+        shared_result, age_min, shared_model, shared_provider, shared_ms, cache_hit = \
+            _try_shared_reuse(market_fp, tolerate_fp_mismatch=True,
+                              max_age_min=board_scan.SHARED_SCAN_MIRROR_MAX_AGE_MIN)
+        source = "live"
+        if shared_result is None:
+            shared_result, cached_age = _cached_board_scan()
+            age_min, shared_model, shared_provider = cached_age, "", ""
+            source = "cache"
+        if shared_result is not None:
+            result = shared_result
+            mirrored = True
+            # age_min is None when the cached snapshot has no readable timestamp
+            # (corrupt cache value) -- report it as unknown rather than crashing
+            # the format string, which would take out the whole refresh.
+            age_txt = "?" if age_min is None else f"{age_min:.0f}"
+            reuse_info = (age_min, shared_model or "unknown",
+                          shared_provider or "shared", shared_ms or 0)
+            reuse_label = ("reused live scan" if source == "live"
+                           else "reused last scan")
+            status = f"{reuse_label} ({age_txt}min old)"
+        elif cache_hit:
+            # live's file exists but is older than the mirror window or carries no
+            # usable signals. Deliberately still no call: place_from_state() still
+            # runs below off the deterministic signals, so pending trades keep
+            # being placed/mirrored instead of the whole demo stalling.
+            result, status = None, "live scan stale -- deterministic signals only (mirror mode)"
+        else:
+            result, status = None, "no live scan available -- deterministic signals only (mirror mode)"
+    elif not force and _reuse_allowed(env):
         shared_result, age_min, shared_model, shared_provider, shared_ms, cache_hit = \
             _try_shared_reuse(market_fp)
         if shared_result is not None:
@@ -1787,7 +1918,9 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
                     environment=env, kind="board_scan", n_signals=len(result.signals),
                     agreement=agreement, input_tokens=0, output_tokens=0,
                     cost_usd=0.0, latency_ms=shared_ms,
-                    skipped=True, reason=f"reused live scan {age_min:.0f}min old")
+                    skipped=True,
+                    reason=f"{reuse_label} "
+                           f"{'?' if age_min is None else f'{age_min:.0f}'}min old")
                 try:
                     usage_log.log_usage(
                         kind="board_scan_reuse", model=shared_model or "unknown",
@@ -1835,6 +1968,26 @@ def refresh_llm(cap: int | None = None, force: bool = False) -> str:
         except Exception as e:
             STATE["executor_logs"] = [f"executor error: {e}"]
             log.exception("executor mirror error: %s", e)
+    elif mirrored or mirror_mode:
+        # MIRROR MODE with no scan source at all (live's shared file stale AND no
+        # local snapshot). Deliberately still run placement + mirroring: those
+        # two calls are what create and fund PENDING paper trades, and in mirror
+        # mode no fresh scan is ever coming to trigger them from the block above.
+        # evaluate_signal() has always supported llm_sig=None (action falls back
+        # to the deterministic score.signal), so the demo keeps trading on the
+        # same deterministic gates it uses for every other non-LLM path. No
+        # fingerprint/ts is written, so should_scan() keeps treating this as "no
+        # scan yet" and the cadence gate stays honest.
+        try:
+            STATE["paper_logs"] = paper.place_from_state(STATE)
+        except Exception as e:
+            STATE["paper_logs"] = [f"placement error: {e}"]
+        try:
+            STATE["executor_logs"] = broker.mirror_new()
+        except Exception as e:
+            STATE["executor_logs"] = [f"executor error: {e}"]
+            log.exception("executor mirror error (mirror mode): %s", e)
+        log.info("LLM board scan: %s -- placement ran on deterministic signals only", status)
     STATE["last_status"] = status
     STATE["calls_today"] = store.calls_today()
     try:
@@ -1926,7 +2079,7 @@ def restore_cache() -> None:
             _rows = journal.scan_metrics_history(limit=20)
             _usable = next(
                 (r for r in _rows if isinstance(r, dict)
-                 and (not r.get("skipped") or "reused live scan" in str(r.get("reason") or ""))),
+                 and (not r.get("skipped") or _is_reuse_reason(r))),
                 None)
             _ts = (_usable or {}).get("ts")
             if _ts is None:
