@@ -2197,6 +2197,24 @@ _sweep_last_order_ts: float = 0.0   # monotonic timestamp of last sweep order su
 _sweep_fail_streak: int = 0           # consecutive UNCONFIRMED sweep orders (S1, 2026-10-01)
 CASH_SWEEP_ALERT_AFTER = 3            # consecutive failures before we shout -- this is the alert
                                       # whose absence let the sweep fail silently for a week
+# ADDED 2026-10-02: S1 counted the failures and alerted, but the RETRY GATE was still
+# success-only -- _sweep_last_order_ts was only stamped on a confirmed submission, so a broker
+# that refuses every sweep order got a fresh attempt every cycle forever. Measured live
+# 2026-10-01/02: 64+ consecutive "BUY 149 SGOV NOT working (status Inactive)" attempts across
+# ~2.5 hours, one per cheap-refresh cycle, filling order_exec_log and re-raising the same red
+# event while ~$20k of real cash sat uninvested. A refusal is not a transient blip -- retrying
+# it harder cannot fix it, and each retry is another chance to leave a ghost order behind.
+CASH_SWEEP_BACKOFF_BASE_SEC = 900    # wait 15 min after the 1st refusal, doubling per refusal
+CASH_SWEEP_BACKOFF_MAX_SEC = 4 * 3600  # ... capped at 4h so a genuinely fixed broker recovers
+CASH_SWEEP_BREAKER_AFTER = 6         # consecutive refusals -> stop submitting entirely
+
+
+def _sweep_backoff_sec(streak: int) -> int:
+    """Seconds to wait before the next sweep submission, given `streak` consecutive
+    refusals. 0 when the last submission was confirmed (normal operation)."""
+    if streak <= 0:
+        return 0
+    return min(CASH_SWEEP_BACKOFF_BASE_SEC * (2 ** (streak - 1)), CASH_SWEEP_BACKOFF_MAX_SEC)
 
 
 def _sweep_note_success() -> None:
@@ -2209,8 +2227,12 @@ def _sweep_note_failure(why: str) -> None:
     reaches CASH_SWEEP_ALERT_AFTER. The alert is deduped by symbol and only pushes when the
     group first turns red (b551e54), so a broker that rejects every sweep order alerts once,
     not every 5 minutes for the rest of the session."""
-    global _sweep_fail_streak
+    import time as _time
+    global _sweep_fail_streak, _sweep_last_order_ts
     _sweep_fail_streak += 1
+    # Stamp the attempt either way: the retry gate must also throttle a REFUSED order, not
+    # just a confirmed one (see CASH_SWEEP_BACKOFF_BASE_SEC above).
+    _sweep_last_order_ts = _time.monotonic()
     if _sweep_fail_streak < CASH_SWEEP_ALERT_AFTER:
         log.warning("cash-sweep: order not working (%d/%d consecutive): %s",
                     _sweep_fail_streak, CASH_SWEEP_ALERT_AFTER, why)
@@ -2336,10 +2358,22 @@ def sweep_cash() -> dict:
     # ADDED 2026-09-22: guard against ghost order flood. Without this, every cycle places
     # a new MARKET BUY that IB silently accepts but never fills (confirmed live: 160 identical
     # orders in one session). Check: (1) existing pending SGOV order, (2) cooldown timer.
+    # 2026-10-02: the cooldown now also covers REFUSED submissions, with a doubling backoff and
+    # a breaker (see CASH_SWEEP_BACKOFF_BASE_SEC / CASH_SWEEP_BREAKER_AFTER).
     global _sweep_last_order_ts
     now_mono = _time.monotonic()
-    if now_mono - _sweep_last_order_ts < CASH_SWEEP_COOLDOWN_SEC:
-        remaining = int(CASH_SWEEP_COOLDOWN_SEC - (now_mono - _sweep_last_order_ts))
+    if _sweep_fail_streak >= CASH_SWEEP_BREAKER_AFTER:
+        wait = int(_sweep_backoff_sec(_sweep_fail_streak)
+                   - (now_mono - _sweep_last_order_ts))
+        status["log"] = (f"cash-sweep: breaker OPEN after {_sweep_fail_streak} consecutive "
+                         f"refusals -- not submitting for another {max(wait, 0)}s. The broker "
+                         f"is refusing SGOV orders; check order_exec_log, then restart the "
+                         f"instance (or re-arm) once it is fixed.")
+        log.warning("cash-sweep: %s", status["log"])
+        return status
+    wait_sec = max(CASH_SWEEP_COOLDOWN_SEC, _sweep_backoff_sec(_sweep_fail_streak))
+    if now_mono - _sweep_last_order_ts < wait_sec:
+        remaining = int(wait_sec - (now_mono - _sweep_last_order_ts))
         status["log"] = f"cash-sweep: cooldown {remaining}s, skipping"
         log.info("cash-sweep: %s", status["log"])
         return status

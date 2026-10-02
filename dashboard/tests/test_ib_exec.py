@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import json
 import sqlite3
 import tempfile
@@ -1671,6 +1672,49 @@ def test_s1_sweep_failure_streak_alerts_once():
                   len(recorded), 2)
             ib_exec._sweep_note_success()
             check("a confirmed order resets the streak", ib_exec._sweep_fail_streak, 0)
+
+
+def test_sweep_refusals_back_off_then_trip_the_breaker():
+    print("\nSweep retry budget: a REFUSED order throttles the next attempt (doubling backoff) and "
+          "the breaker stops submitting entirely -- the 2026-10-01 live loop placed 64+ refused "
+          "SGOV orders in ~2.5h because the retry gate was success-only:")
+    from dashboard.execution import ib_exec
+
+    check("no backoff when nothing has failed", ib_exec._sweep_backoff_sec(0), 0)
+    check("1st refusal waits 15 min", ib_exec._sweep_backoff_sec(1),
+          ib_exec.CASH_SWEEP_BACKOFF_BASE_SEC)
+    check("backoff doubles", ib_exec._sweep_backoff_sec(2),
+          ib_exec.CASH_SWEEP_BACKOFF_BASE_SEC * 2)
+    check("backoff is capped", ib_exec._sweep_backoff_sec(99),
+          ib_exec.CASH_SWEEP_BACKOFF_MAX_SEC)
+
+    # a refused submission must stamp the retry clock -- this is the actual defect
+    ib_exec._sweep_fail_streak = 0
+    ib_exec._sweep_last_order_ts = 0.0
+    before = time.monotonic()
+    with mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
+         mock.patch.object(ib_exec.store, "cache_set", side_effect=lambda k, v: None):
+        ib_exec._sweep_note_failure("refused (status Inactive)")
+    check("a refusal stamps the retry timestamp", ib_exec._sweep_last_order_ts >= before, True)
+    check("streak counted", ib_exec._sweep_fail_streak, 1)
+
+    # with a refusal in the book, the gate must demand the backoff, not the plain cooldown
+    ib_exec._sweep_fail_streak = 1
+    gate = max(ib_exec.CASH_SWEEP_COOLDOWN_SEC, ib_exec._sweep_backoff_sec(1))
+    check("backoff exceeds the success cooldown after a refusal",
+          gate > ib_exec.CASH_SWEEP_COOLDOWN_SEC, True)
+
+    ib_exec._sweep_note_success()
+    check("a confirmed order clears the backoff to the normal cooldown",
+          max(ib_exec.CASH_SWEEP_COOLDOWN_SEC,
+              ib_exec._sweep_backoff_sec(ib_exec._sweep_fail_streak)),
+          ib_exec.CASH_SWEEP_COOLDOWN_SEC)
+    # invariant: we must SHOUT about the refusal before we stop retrying it, or the breaker
+    # would silently park the sweep with nobody ever told
+    check("we alert before the breaker trips",
+          ib_exec.CASH_SWEEP_BREAKER_AFTER > ib_exec.CASH_SWEEP_ALERT_AFTER, True)
+    check("the backoff still covers the retry window when the breaker trips",
+          ib_exec._sweep_backoff_sec(ib_exec.CASH_SWEEP_BREAKER_AFTER) > 0, True)
 
 
 def test_sweep_failure_log_and_success_reset_are_pure():
