@@ -264,9 +264,53 @@ def detect_external_cash_flow(prev_nl, prev_cash, new_nl, new_cash, netliq,
 #
 # These should agree to within cash interest + dividends + FX drift. A deposit wrongly booked
 # as profit inflates ONLY the equity route -- on 2026-07-27 that was a 30,000 HKD gap on a
-# 132k account (23%), which this would have surfaced within one tick.
+#   132k account (23%), which this would have surfaced within one tick.
 PNL_CROSSCHECK_MIN_ABS = 5000.0    # base-ccy floor; below this the gap is ordinary
 PNL_CROSSCHECK_MIN_PCT = 0.05      # interest/dividend/FX accumulation, not a misbooking
+
+# --- equity / SGOV history sampling (2026-10-03) --------------------------------
+# 2026-09-26 (2aabd62) switched both series from a ~10min throttle to "one point per UTC
+# day" so the 3000-point budget would cover years instead of ~21 days. The long-history
+# goal was right; the cost was that EVERY consumer of these series became day-granular:
+#   * the "P&L over time" chart at period 1W drew 7 points, each up to 24h stale, so a
+#     week's intraday swings (measured live: ~830 HKD peak-to-trough inside one 7d
+#     window) were invisible and even the window's endpoints lagged the real equity;
+#   * drawdown-from-peak, its duration badge, and pnl_crosscheck()'s equity route all
+#     inherited the same daily sampling.
+# Fixed by keeping BOTH properties: sample every ~10min as documented, and when the
+# budget is exceeded, halve the resolution of everything older than the recent tail
+# instead of discarding it. The newest EQUITY_TAIL_KEEP points therefore always keep
+# full cadence (the 1W/1M charts are exact), while older history degrades gracefully
+# to 20/40/80-minute spacing and still spans months.
+EQUITY_SNAPSHOT_MIN_SEC = 600
+EQUITY_HISTORY_MAX = 3000
+EQUITY_TAIL_KEEP = 1440          # newest 10 days stay at full ~10min resolution
+
+
+def _thin_history(hist: list, cap: int = EQUITY_HISTORY_MAX,
+                  tail: int = EQUITY_TAIL_KEEP) -> list:
+    """Progressively decimate a history series to fit `cap`: the newest `tail` rows are
+    kept verbatim, the older prefix is halved (every 2nd row). Pure, no I/O -- unit-tested.
+    Halving rather than truncating is what keeps long history AND recent resolution; the
+    next time the cap is hit the prefix halves again, so resolution degrades geometrically
+    backwards in time instead of the old data simply disappearing."""
+    if len(hist) <= cap:
+        return hist
+    if tail <= 0:                       # defensive: never drop the whole series
+        return hist[-cap:]
+    head, tail_rows = hist[:-tail], hist[-tail:]
+    return (head[::2] + tail_rows)[-cap:]
+
+
+def _should_snapshot(last_ts, now_s, min_sec: int = EQUITY_SNAPSHOT_MIN_SEC) -> bool:
+    """Is a new equity/sgov history point due? Extracted so the cadence rule is testable
+    on its own.
+
+    This WAS `_last_date != _today` (2aabd62) -- one point per UTC day -- which made every
+    downstream chart/crosscheck day-granular (see the block above). A plain elapsed-time
+    throttle is the rule the surrounding comment has always claimed, and it is what makes
+    a 1W chart show the week rather than seven day-old samples."""
+    return last_ts is None or (now_s - last_ts) >= min_sec
 
 
 def pnl_crosscheck() -> dict:
@@ -970,7 +1014,7 @@ def refresh_cheap() -> None:
                     flows.append([now_s, round(amount, 2), _ccy])
                     store.cache_set("cash_flows", flows[-500:])
                     hist.append([now_s, new_val, _ccy, _cash, _gpv])
-                    store.cache_set("equity_history", hist[-3000:])
+                    store.cache_set("equity_history", _thin_history(hist))
                     store.cache_set("equity_pending_jump", None)
                     log.warning("equity_history: CONFIRMED sustained jump %.2f -> %.2f -- "
                                "recorded %+.2f as a cash flow (%s), not P&L",
@@ -986,11 +1030,13 @@ def refresh_cheap() -> None:
                                "held pending confirmation, not recorded yet", new_val, hist[-1][1])
             else:
                 store.cache_set("equity_pending_jump", None)  # back to normal: clear any pending
-                _last_date = dt.datetime.fromtimestamp(hist[-1][0], tz=dt.timezone.utc).date() if hist else None
-                _today = dt.datetime.now(dt.timezone.utc).date()
-                if not hist or _last_date != _today:
+                # 2026-10-03: was `_last_date != _today` (one point per UTC day, from
+                # 2aabd62) -- see the EQUITY_SNAPSHOT_MIN_SEC block for what that cost.
+                # Now a real cadence throttle again, with progressive decimation instead of
+                # truncation so long history survives the 3000-point budget.
+                if _should_snapshot(hist[-1][0] if hist else None, now_s):
                     hist.append([now_s, new_val, _ccy, _cash, _gpv])
-                    store.cache_set("equity_history", hist[-3000:])
+                    store.cache_set("equity_history", _thin_history(hist))
     except Exception as e:
         log.debug("equity_history error: %s", e)
     STATE["conn"] = mt5_client.connection_status()
@@ -1221,7 +1267,8 @@ def refresh_cheap() -> None:
                                           "cur_px": cached_spy["cur_px"]}
     except Exception as e:
         log.debug("spy_benchmark fetch error: %s", e)
-    # SGOV-value history for the dashboard chart (daily snapshots, same as equity).
+    # SGOV-value history for the dashboard chart (~10min cadence, same as equity --2026-10-03:
+    # restored from one-point-per-day; see the EQUITY_SNAPSHOT_MIN_SEC block).
     # 2026-09-30: also store the SHARE count (3rd field) -- compute_today_pnl() needs it to
     # separate yield from a share sale (value delta alone can't: value = qty x price).
     try:
@@ -1231,13 +1278,15 @@ def refresh_cheap() -> None:
             sh, _ = store.cache_get("sgov_history")
             sh = sh or []
             now2 = int(_t2.time())
-            _last_sv_date = dt.datetime.fromtimestamp(sh[-1][0], tz=dt.timezone.utc).date() if sh else None
-            _today_sv = dt.datetime.now(dt.timezone.utc).date()
-            if not sh or _last_sv_date != _today_sv:
+            # 2026-10-03: was one-point-per-UTC-day (2aabd62) -- see the
+            # EQUITY_SNAPSHOT_MIN_SEC block. Restored to a real cadence throttle with
+            # progressive decimation, so the SGOV yield line is no longer day-granular
+            # while long history still fits the 3000-point budget.
+            if _should_snapshot(sh[-1][0] if sh else None, now2):
                 _qty = float((STATE.get("cash_sweep") or {}).get("sgov_qty") or 0.0)
                 sh.append([now2, round(float(sv), 2), round(_qty, 4)] if _qty
                           else [now2, round(float(sv), 2)])
-                store.cache_set("sgov_history", sh[-3000:])
+                store.cache_set("sgov_history", _thin_history(sh))
     except Exception as e:
         log.debug("sgov_history error: %s", e)
     # persist a portfolio snapshot so a fresh restart shows last-known stats (not empty).
