@@ -96,19 +96,22 @@ services:
       - EXISTING_SESSION_DETECTED_ACTION=primary
       - BYPASS_WARNING=yes
       - READ_ONLY_API=no
-      # 2FA-adjacent config.ini.tmpl vars -- DECIDED 2026-08-18, not left unset by accident:
-      # checked native live's own C:\IBC-Live\config.ini directly. It sets
-      # ReloginAfterSecondFactorAuthenticationTimeout=no and
-      # SecondFactorAuthenticationExitInterval= (blank) -- both EXACTLY match this
-      # deployment's own defaults when left unset (IBC's documented default for the first
-      # is 'no'; the second only matters if the first is 'yes'). Leaving both unset here
-      # matches native's proven behavior exactly, and gateway-login-live.sh implements its
-      # own bounded 240s wait-and-abort-cleanly at the SCRIPT level regardless, so IBC-level
-      # auto-relogin isn't needed for that path either. AUTO_RESTART_TIME: native sets
-      # "08:30 PM" (a daily scheduled restart), but that's an operational scheduling choice
-      # tied to native's own rhythm -- deliberately deferred rather than copied blind; the
-      # dashboard container already has restart:unless-stopped for crash recovery, and daily
-      # gateway-refresh timing can be revisited once this deployment is actually running.
+      # 2FA WINDOW -- REVERSED 2026-10-03, this was a deliberate decision on 2026-08-18 and it
+      # was wrong. It originally left these unset to "match native's proven behavior". Measured
+      # cost of that choice: IBC gives you ONE 180s shot at the IBKR push (SecondFactor-
+      # AuthenticationTimeout=180 is hardcoded in config.ini.tmpl and is IB-imposed -- IBC's own
+      # docs say don't change it), then gives up and sits unauthenticated. The gateway-login-
+      # watchdog only cycles again inside the US session window, and deliberately pushes NO
+      # phone alert outside it ("no US session within reach"), so one missed tap left the LIVE
+      # gateway dark for ~12h (2026-10-02 05:30 -> 17:42; again 2026-10-03 05:30 -> 10:16) with
+      # the dashboard looping "broker unreachable" and nothing telling anyone.
+      # ReloginAfterSecondFactorAuthenticationTimeout=yes makes IBC automatically RESTART the
+      # login sequence after a failed 2FA instead of abandoning it, so the push is re-sent and a
+      # late tap still lands. TWOFA_EXIT_INTERVAL is the post-tap grace before IBC terminates
+      # (IBC default 60s); 120s because the tap is followed by a real IB handshake that has
+      # taken ~90s to open the API port on this account.
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+      - TWOFA_EXIT_INTERVAL=120
     ports:
       # Host 14001 for my own debugging only (localhost-only, matches paper's 14002
       # convention) -- the dashboard service reaches this over the compose network's

@@ -163,6 +163,14 @@ services:
       # still exists" class of bug, this silently blocks EVERY order on a freshly-rebuilt
       # container regardless of login/connection success.
       - READ_ONLY_API=no
+      # 2FA WINDOW -- ADDED 2026-10-03, mirroring the live compose file's identical fix (see the
+      # long note there). IBC gets ONE 180s attempt at the IBKR push and then abandons login;
+      # SecondFactorAuthenticationTimeout=180 is hardcoded in config.ini.tmpl and IB-imposed
+      # (IBC's docs say don't change it), so the fix is the relogin loop, not a wider window.
+      # Measured cost of not having it: paper went dark at the 05:30 daily restart (2026-10-03)
+      # and the watchdog stayed quiet until the US session window reopened.
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+      - TWOFA_EXIT_INTERVAL=120
     ports:
       # Host 14002 purely for my own debugging (docker/wsl2-local only, not published
       # further) -- the dashboard service reaches it via the compose network's internal DNS
