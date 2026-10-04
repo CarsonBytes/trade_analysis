@@ -1709,8 +1709,29 @@ def portfolio_panel() -> None:
                              on_change=_set_chart_scale).props("dense")\
                         .tooltip("Truncated = zoomed to the data range (shows fine detail); "
                                  "Zero-baseline = y-axis starts at 0 (shows true relative scale)")
-    _win_idx = [i for i, h in enumerate(hist) if _cutoff is None or h[0] >= _cutoff]
-    _whist = [hist[i] for i in _win_idx]
+    # FIXED 2026-10-04: paper.with_inception() prepends a hand-set [ts, 0.00] anchor (the
+    # 2026-08-18 backfill) for the Total P&L stat and the drawdown peak, where it IS the right
+    # reference. It was ALSO reaching the chart, and there it was actively harmful: equity
+    # tracking only began 2026-09-03, so that lone 0.00 point sat 57 days before the first real
+    # reading (live measured: 07-08 P&L +0.00 -> 09-03 P&L +2,139.18). Because the y-axis uses
+    # `scale: True`, that one phantom point stretched the range to 0..3,315 and squashed every
+    # genuine reading (2,139..3,316) into the top third -- the user saw the real series as a flat
+    # line and reported "7/8 to 9/3 doesn't show up". It also made the P&L line's origin an
+    # ASSUMPTION rather than a measurement.
+    # The chart now plots REAL readings only and zero-references to the first of them. The anchor
+    # stays exactly where it is load-bearing: base0 for the Total P&L card (line ~1369) and the
+    # drawdown peak both still use the with_inception() list above, untouched.
+    # The anchor is not silently lost either -- for the Account-value view (where "capital was
+    # deposited before tracking started" is a meaningful fact) it is drawn as a marked, labelled
+    # point instead of an axis-defining one.
+# the anchor is exactly hist[0] when it exists (with_inception only ever prepends one row)
+    _anchor_ts = hist[0][0] if (hist and hist[0][1] == 0.0) else None
+    _plot_idx = [i for i, h in enumerate(hist)
+                 if h[0] != _anchor_ts and (_cutoff is None or h[0] >= _cutoff)]
+    _whist = [hist[i] for i in _plot_idx]
+    # P&L zero-reference = first REAL reading, never the anchor (see comment above).
+    _pl_base0 = (_whist[0][1] if _whist else (hist[0][1] if hist else 0.0))
+    _show_anchor = _anchor_ts is not None and (_cutoff is None or _anchor_ts >= _cutoff)
     if len(hist) >= 2:
         xs = [dt.datetime.fromtimestamp(h[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%m-%d %H:%M") + " HKT" for h in _whist]
         _use_adj = SETTINGS["chart_view"] == "P&L (ex-deposits)"
@@ -1719,8 +1740,26 @@ def portfolio_panel() -> None:
         # ORIGINAL starting value (itself a deposit, not profit) instead of 0. Subtract it here;
         # _adj_full stays value-based (unsubtracted) for the drawdown monitor below, where you
         # divide by the peak VALUE, not peak P&L.
-        ys = ([_adj_full[i] - hist[0][1] for i in _win_idx] if _use_adj
+        # P&L(ex-deposits) is plotted RELATIVE TO THE FIRST PLOTTED POINT, not to hist[0].
+        # deposit_adjusted_series() is already anchored at adj_full[0] == 0 (that is what the
+        # hand-set inception row buys), so subtracting it is a no-op -- which is why the anchor
+        # used to set the origin AND the y-axis scale. Anchoring on the first REAL reading instead
+        # makes the honest statement: "we have no measurement before 2026-09-03; relative to that
+        # first measurement, here is the performance." It also keeps the series inside a tight
+        # y-range instead of being crushed under a fabricated 0.00 point.
+        _pl_anchor_adj = _adj_full[_win_idx[0]] if _win_idx else 0.0
+        ys = ([_adj_full[i] - _pl_anchor_adj for i in _win_idx] if _use_adj
               else [hist[i][1] for i in _win_idx])
+        if _use_adj and _show_anchor and _whist:
+            # mark where pre-tracking capital entered, without letting it set the y-axis scale.
+            # xs/ys are ascending, and the anchor predates every plotted point, so it goes first.
+            xs.insert(0, dt.datetime.fromtimestamp(_anchor_ts, tz=dt.timezone.utc)
+                      .astimezone(HKT).strftime("%m-%d %H:%M") + " HKT")
+            ys.insert(0, 0.0)
+            _marks.insert(0, {"xAxis": xs[0],
+                              "label": {"formatter": "tracking began",
+                                        "fontSize": 9},
+                              "lineStyle": {"color": "#9ca3af", "type": "dashed"}})
         _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
         _marks = []
         for fts, famt, fccy in (flows or []):

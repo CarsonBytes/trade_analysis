@@ -7,6 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import tempfile
+from unittest import mock
 
 from dashboard.web.service import (heal_series, is_nl_implausible, pending_confirms,
                                    is_equity_jump_implausible, reconcile_due,
@@ -504,6 +505,53 @@ def _today_pnl_restore(saved):
     for k in ("equity_history", "cash_flows", "sgov_history", "interest_history",
               "position_day_open", "daily_pnl_history"):
         store.cache_set(k, [] if k != "position_day_open" else None)
+
+
+def test_chart_pnl_view_excludes_the_inception_anchor():
+    print("\nCHART FIX 2026-10-04: the P&L(ex-deposits) chart must not be anchored on -- or "
+          "have its y-axis set by -- the hand-set [ts, 0.00] inception row.")
+    from dashboard.core import store, paper
+
+    anchor_ts = 1783468844                     # 2026-07-08, the live inception backfill
+    # anchor + 32 days of real readings; the FIRST real reading is deliberately NOT 0 so a
+    # wrong zero-reference is detectable.
+    hist = [[anchor_ts, 0.0, "HKD"],
+            [anchor_ts + 32 * 86400, 222111.11, "HKD"],
+            [anchor_ts + 33 * 86400, 223000.00, "HKD"],
+            [anchor_ts + 40 * 86400, 225000.00, "HKD"]]
+    flows = [[anchor_ts + 10, 249971.50, "HKD"]]
+    store.cache_set("chart_fix_hist", hist)
+
+    with mock.patch.object(store, "cache_get",
+                           side_effect=lambda k: ((hist, "t") if k == "equity_history"
+                                                  else ((flows, "t") if k == "cash_flows"
+                                                        else (None, None)))), \
+         mock.patch.object(store, "cache_set", lambda *a, **k: None), \
+         mock.patch.object(paper, "with_inception", wraps=paper.with_inception):
+        full = paper.with_inception(hist)
+        adj = paper.deposit_adjusted_series(full, flows)
+        check("with_inception still prepends the anchor (card/drawdown depend on it)",
+              full[0][1], 0.0)
+        check("anchor's adj value is 0 (deposit netted out)", round(adj[0], 2), 0.0)
+
+        # what the CHART does post-fix: drop the anchor, anchor P&L on the first REAL reading
+        anchor_ts_used = full[0][0] if full[0][1] == 0.0 else None
+        plot_idx = [i for i, h in enumerate(full) if h[0] != anchor_ts_used]
+        pl_anchor_adj = adj[plot_idx[0]]
+        ys = [adj[i] - pl_anchor_adj for i in plot_idx]
+
+        check("anchor excluded from the plotted window", anchor_ts_used in plot_idx, False)
+        check("plotted P&L starts at exactly 0", round(ys[0], 2), 0.0)
+        check("plotted P&L ends positive (real gain preserved)",
+              round(ys[-1], 2) > 0, True)
+        # the regression: subtracting hist[0][1] (the anchor's 0.00) instead of the first
+        # REAL reading is what crushed every value into a sliver under a fabricated origin.
+        wrong = [adj[i] - full[0][1] for i in plot_idx]
+        check("old zero-reference produced a large fake offset",
+              abs(wrong[0]) > 1000, True)
+        check("new zero-reference has no such offset", abs(ys[0]) < 0.01, True)
+
+    store.cache_set("chart_fix_hist", [])
 
 
 def test_today_pnl_total_excludes_only_recorded_flows():
