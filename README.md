@@ -467,6 +467,34 @@ cost of real operational overhead to keep it running correctly.
   read — cached account data reports high `acct_age_sec` / `ok:false`, so a stuck login
   can't masquerade as healthy.
 
+### Paper is a demo of live: `PAPER_LLM_MODE=mirror` (added 2026-10-04)
+
+Paper never spends an LLM call. It serves **live's** board scan from the shared volume
+(`/shared/board_scan.json`) and places trades off that.
+
+Why this exists: paper used to run its own board scan to re-derive what live had already
+paid for -- 32 scans in 21 days, 17% of quant's token cost -- while the reuse path built
+for exactly that fired *zero* times, because paper's and live's board fingerprints almost
+never match (different held positions, different refresh cadence). The mismatch branch
+did nothing at all, so paper was paying for a scan and often getting no signals out of it.
+
+- Set in `docker-compose.yml` (paper only). Live ignores it and can never be mirrored --
+  the data flow is one-way by construction.
+- Resolution order: live's shared scan (12h window) -> paper's own last applied scan ->
+  deterministic-only signals (`evaluate_signal` already handles `llm_sig=None`). All three
+  still run `place_from_state()` + `mirror_new()`, which is what creates and funds
+  **pending** paper trades -- degrading is fine, going dark is not.
+- A manual refresh re-reads live's scan; it does **not** buy one.
+- Unknown values fall back to `own` rather than mirroring, so a typo can't silently change
+  how an instance trades.
+
+Related: history sampling. `equity_history` / `sgov_history` are sampled every
+~10min (`EQUITY_SNAPSHOT_MIN_SEC`); when the 3000-point budget is exceeded,
+`_thin_history()` halves the resolution of everything older than the newest 1440 points
+instead of discarding it. Recent charts (1W/1M) are exact, older history degrades
+gracefully and still spans months. Do not "optimise" this back to one point per UTC day
+(`2aabd62` did, and it silently made every chart day-granular).
+
 ### Order-placing safety rules (added 2026-08-31, after a runaway-order incident)
 
 A loop between two independently-correct repair functions placed a market order every

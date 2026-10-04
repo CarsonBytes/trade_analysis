@@ -1,9 +1,97 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-10-01.
+Last updated 2026-10-04.
 
 ---
+
+### SHIPPED 2026-10-04: paper mirrors live's LLM scan -- paper now spends ZERO LLM calls (`84e1966`, deployed)
+
+`PAPER_LLM_MODE=mirror` in `docker-compose.yml`. Paper was spending real quota to
+re-derive what live had already paid for: **32 board scans in 21 days ($0.05, 17% of
+quant's token cost)**, while the reuse path built for exactly that had fired **zero**
+times in 21 days. Root cause was not the 30-min freshness window but the fingerprint
+test in `_try_shared_reuse()` -- paper and live hold different positions and refresh on
+different cadences, so their top-9 hashes essentially never matched. Worse, the mismatch
+branch does *nothing at all*: no reuse, and no `place_from_state()` / `mirror_new()`
+either, since both sit inside `if result is not None`. So paper was paying for a scan
+and often ending up with no signals.
+
+Mirror mode serves live's shared scan with the fingerprint test dropped
+(`SHARED_SCAN_MIRROR_MAX_AGE_MIN=720`, sized from live's real cadence: p50 16min,
+p90 31min, avg 201min, quiet stretches to 12h). `run_board_scan()` is unreachable on
+paper, **including on a manual refresh**. Degradation instead of stalling: live's scan ->
+paper's last applied scan -> deterministic-only signals (`evaluate_signal` already
+handles `llm_sig=None`); all three still run `place_from_state()` + `mirror_new()`, which
+is what creates and funds PENDING paper trades. The cadence gate now asks "has live
+published something newer than what I applied" rather than "did my own board change".
+Policy is paper-only and fail-safe (unknown env value -> `own`; live can never mirror).
+Verified live: paper logs `reused live scan (9min old)` + `placement run: evaluating 21
+instruments`; its only ledger row is a zero-token `board_scan_reuse`; local
+`calls_today` = 0; live unaffected. New `dashboard/tests/test_paper_mirror.py` (9 tests).
+
+### SHIPPED 2026-10-04: equity/sgov history was DAY-granular, so the 1W P&L chart lied (`ec56912`, deployed both instances)
+
+`2aabd62` (2026-09-26) swapped the ~10min throttle for `_last_date != _today` -- one
+point per UTC day -- so the 3000-point budget would span years instead of ~21 days.
+Long history was the right goal; the gate is per DAY, so every consumer inherited day
+granularity. Measured on live: 135-136 points/day through 09-25, then **1 point/day**
+from 09-27; newest point 4h stale while the tick loop ran every ~2min; the "P&L over
+time" chart at period 1W drew 7 points each up to 24h old. A week's intraday swings
+(~830 HKD peak-to-trough measured inside one 7d window) were invisible, and the window's
+endpoints lagged real equity. Drawdown-from-peak, its duration badge,
+`pnl_crosscheck()`'s equity route and the SGOV yield line all inherited the staleness.
+
+Fixed by keeping BOTH properties: sample every ~10min again, and when the budget is
+exceeded decimate progressively -- `_thin_history()` halves the resolution of everything
+older than the newest `EQUITY_TAIL_KEEP` (1440) rows instead of discarding it. Recent
+charts are exact; older history degrades 20/40/80min and still spans months. Verified:
+thinning fired once (3000 -> 2221 rows), new points 713s apart, 1W window 7 -> 20 points
+reading +348.47 HKD against a broker-truth +348. New
+`dashboard/tests/test_equity_cadence.py` (6 tests). Full suite 313 passed.
+Worth knowing: the headline Total trading P&L was never affected (it reads live broker
+NetLiq directly, HKD 3,316 / +1.33% verified), and `compute_today_pnl()`'s start-of-day
+pick is correct under both gates -- it walks the history backwards overwriting, landing on
+the OLDEST point of today either way.
+
+### INVESTIGATED 2026-10-04: why paper keeps going "locked" -- five distinct modes, spec in `IBKR_PAPER_LOCK_SPEC.md`
+
+Not one thing. (A) **IBKR session contention** is the real one: one API session per
+username, and paper's and live's gateways fight for it -- `Error 10197 No market data
+during competing live session`, `Error 10141 paper trading disclaimer`, `clientId 31
+already in use?`. Paper's scores are yfinance anyway (`cheap refresh: 21 scored, data
+source = yfinance (0/21 MT5-tick)`); IBKR only gives it account reads and order
+mirroring that **never funds** (`ib_mirror` full of `perm_id=0`, EEM still unfunded
+2026-10-01). Every paper deploy also recreates paper's gateway -- the source of the
+measured 693 consecutive `broker unreachable` cycles over ~18h on 2026-09-30..10-01.
+(C) Quota lockout is retired for paper by the mirror-mode entry above.
+(D) **Paper's UI is permanently amber**, which is why real alarms get lost: the P&L
+cross-check has diverged every 30-90 min since at least 10-01 (`equity route +80,607 vs
+trade route -7,093, gap 87,700 vs tolerance 56,039`) plus a daily ghost-`EEM` reconcile
+mismatch. That divergence is itself a paper-specific bug: paper has
+`equity_inception = None` and exactly ONE cash-flow entry (-9,223 HKD), so its equity
+route measures raw window growth, not P&L. Spec proposes S1 (paper drops IBKR entirely,
+`BROKER=none`), S2 (serialize logins / stop recreating the gateway), S3 (backfill paper's
+flows + root-cause the unrecorded ~+80k rather than widening tolerance), S4 (a
+permanently-red monitor must not re-alert), S5 (ghost hygiene), S6 (one quota gate),
+S7 (paper consumes, never produces).
+
+### OPS 2026-10-04: registries unreachable from WSL -- root-caused to the WSL MTU, fixed in `a275561`
+
+`docker compose build` could not resolve the digest-pinned base images: ghcr.io,
+registry-1.docker.io and auth.docker.io all timed out at the TLS handshake from this host
+while DNS resolved fine. Two paper deploys aborted *before* touching the running container,
+which is correct. Live deployed normally earlier the same day; paper was deployed by
+verifying the live dashboard image provably contains the fix (both compose files build the
+dashboard as `build: .`, same context, no build args), retagging it as
+`quant-dashboard:latest`, and `docker compose up -d --no-build` -- paper came up on the same
+image ID as live.
+
+**Root cause found in the same session by the other track:** WSL2's eth0 MTU stayed 1500
+behind a 1380 VPN, blackholing all TLS (`a275561`, with `scripts/fix-wsl-mtu.sh`). So this
+was never a registry outage -- with the MTU corrected, ordinary builds work again and the
+image-reuse workaround is unnecessary. rsync succeeded throughout, which is why the synced
+source was never the problem.
 
 ---
 
