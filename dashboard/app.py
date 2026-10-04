@@ -1730,6 +1730,13 @@ def portfolio_panel() -> None:
                 if h[0] != _anchor_ts and (_cutoff is None or h[0] >= _cutoff)]
     _whist = [hist[i] for i in _win_idx]
     _show_anchor = _anchor_ts is not None and (_cutoff is None or _anchor_ts >= _cutoff)
+    # P&L is zero-referenced to the FIRST REAL READING OF THE WHOLE SERIES, never to the first
+    # point inside the selected period. FIXED 2026-10-04: using `_win_idx[0]` re-based the
+    # series per period, so 1W showed "0 -> +351" and 1M "0 -> +1,198" while the true
+    # cumulative figure was +3,276 for BOTH -- selecting a period should ZOOM the window, not
+    # restart the P&L count. All four periods now agree on the value at any given timestamp.
+    _all_real_idx = [i for i, h in enumerate(hist) if h[0] != _anchor_ts]
+    _pl_anchor_adj = (_adj_full[_all_real_idx[0]] if _all_real_idx else 0.0)
     if len(hist) >= 2:
         _use_adj = SETTINGS["chart_view"] == "P&L (ex-deposits)"
         # P&L(ex-deposits) is plotted RELATIVE TO THE FIRST PLOTTED POINT, not to hist[0].
@@ -1737,7 +1744,7 @@ def portfolio_panel() -> None:
         # hand-set inception row buys), so subtracting it is a no-op -- which is why the anchor
         # used to set the origin AND the y-axis scale. Anchoring on the first REAL reading instead
         # makes the honest statement: "relative to the first measurement, here is performance."
-        _pl_anchor_adj = _adj_full[_win_idx[0]] if _win_idx else 0.0
+        _pl_anchor_adj = (_adj_full[_all_real_idx[0]] if _all_real_idx else 0.0)
         ys = ([_adj_full[i] - _pl_anchor_adj for i in _win_idx] if _use_adj
               else [hist[i][1] for i in _win_idx])
         xs_ts = [hist[i][0] for i in _win_idx]     # epoch seconds, aligned to xs/ys
