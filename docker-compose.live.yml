@@ -67,9 +67,17 @@ services:
     # comes back, only a container restart does. Watched by WSL2's own
     # /home/cap/docker-watchdog.sh (cron, every 1min) which restarts any container
     # reporting "unhealthy".
+    # Probe /favicon.ico, NOT "/" (2026-10-04) -- identical reason to docker-compose.yml: a full
+    # render measures 3.3-11s against a 5s urlopen budget, which marked this container
+    # "unhealthy" (FailingStreak 5) while it was serving HTTP 200 and trading normally. That is
+    # not cosmetic here: infra-watchdog.sh (cron, every minute) restarts unhealthy containers on
+    # a 3/hour budget and alerts on Telegram, and its log already shows this container as
+    # "HTTP :18081 not responding" roughly hourly. A slow page render must never be able to
+    # restart a real-money container. favicon.ico answers in ~0.011s and still proves the ASGI
+    # app and its event loop are serving.
     healthcheck:
       test: ["CMD", "python3", "-c",
-            "import urllib.request; urllib.request.urlopen('http://localhost:8091/', timeout=5)"]
+            "import urllib.request; urllib.request.urlopen('http://localhost:8091/favicon.ico', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

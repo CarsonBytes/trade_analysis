@@ -105,9 +105,17 @@ services:
     # self-contained script instead, matching this project's own established pattern
     # elsewhere (git-sync-sweep.ps1 etc) rather than fighting registry connectivity. No curl
     # in this image (minimal Python base) -- uses urllib directly instead.
+    # Probe /favicon.ico, NOT "/" (2026-10-04). A full dashboard render measures 3.3-11s --
+    # it compiles the portfolio panel, board, charts and tables -- against a 5s urlopen budget,
+    # so the probe lost the coin flip repeatedly and the container went "unhealthy" while the
+    # app was serving HTTP 200 the whole time. That status is load-bearing: infra-watchdog.sh
+    # (cron, every minute) restarts unhealthy containers, budget 3/hour, and alerts on Telegram.
+    # favicon.ico answers in ~0.011s and still proves the ASGI app and its event loop are
+    # serving -- a wedged loop times out just the same. Page-render latency is a UX metric, not
+    # a liveness one; do not point this back at "/".
     healthcheck:
       test: ["CMD", "python3", "-c",
-            "import urllib.request; urllib.request.urlopen('http://localhost:8090/', timeout=5)"]
+            "import urllib.request; urllib.request.urlopen('http://localhost:8090/favicon.ico', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
