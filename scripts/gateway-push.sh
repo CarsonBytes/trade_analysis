@@ -55,6 +55,13 @@ key_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_' ; }
 # audit <outcome> <digest_eligible> [http_status] -- never fails the caller.
 audit() {
     local outcome="$1" digest="$2" http="${3:-}"
+    # curl reports `000` when it could not connect at all. Interpolated raw
+    # that is `http_status:000`, which is NOT valid JSON (leading zeros are
+    # forbidden) -- it would make the line unparseable and silently drop the
+    # one record that says a CRITICAL push failed. Emit null instead.
+    case "$http" in
+        ''|*[!0-9]*|000|0) http="null" ;;
+    esac
     mkdir -p "$AUDIT_DIR" 2>/dev/null || true
     printf '{"ts":"%s","level":"%s","source":"gateway-watchdog","key":"%s","outcome":"%s","http_status":%s,"digest_eligible":%s,"mode":"%s","text":"%s"}\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$(json_escape "$key")" "$outcome" \
