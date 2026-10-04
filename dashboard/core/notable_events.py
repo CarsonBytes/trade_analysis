@@ -209,8 +209,12 @@ def record(message: str, level: str = "info", kind: str | None = None,
         if became_red or escalate or force_push:
             try:
                 from dashboard.core import notify
+                # level="critical" (NOTIFICATION_SPEC 2026-10-04): this path
+                # only fires when a dedupe GROUP turns red or escalates -- a
+                # state transition, never a repeat -- which is exactly the
+                # "would ignoring this for 12 hours make it worse?" test.
                 notify.send(f"{title}" + (f" -- {detail}" if detail else ""),
-                            level="error")
+                            level="critical")
             except Exception as e:                  # noqa: BLE001
                 log.debug("notable_events: notify failed: %s", e)
     except Exception as e:                      # noqa: BLE001

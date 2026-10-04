@@ -88,7 +88,7 @@ def test_record_calls_notify():
                               side_effect=lambda msg, level="info": calls.append((msg, level))):
             notable_events.record("halt triggered", level="warning")   # red: halt keyword
         check("red event pushes once", len(calls), 1)
-        check("push carries error severity", calls[0][1], "error")
+        check("push carries critical severity", calls[0][1], "critical")
 
         calls.clear()
         with mock.patch.object(notify, "send",

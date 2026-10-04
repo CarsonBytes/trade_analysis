@@ -67,9 +67,13 @@ function Write-Log($msg) {
 # from here land in the same place. By contract a failed push must never break the loop --
 # and note it runs THROUGH WSL, so it is itself unavailable in the worst case this script is
 # built to detect. That is why every alert is written to the log first, unconditionally.
-function Send-Alert($msg) {
+# NOTIFICATION_SPEC (2026-10-04): three args now -- <level> <key> <msg>. Only `critical`
+# reaches Telegram; `error` lands in the shared audit trail for the daily digest instead.
+# gateway-push.sh still accepts the old 1-arg form (audited as key="legacy") so an
+# un-updated caller cannot silently stop alerting, but it is no longer the contract.
+function Send-Alert($level, $key, $msg) {
     try {
-        & wsl.exe -d $distro -- bash /home/cap/quant/scripts/gateway-push.sh "$msg" 2>$null | Out-Null
+        & wsl.exe -d $distro -- bash /home/cap/quant/scripts/gateway-push.sh $level $key "$msg" 2>$null | Out-Null
     } catch { }
 }
 
@@ -159,11 +163,11 @@ while ($true) {
                 $wslCooldown = $actionCooldownCycles
                 if (-not (Test-WslRunning)) {
                     Write-Log "WSL distro '$distro' is NOT running -- starting it"
-                    Send-Alert "quant: WSL ($distro) was not running -- watchdog started it"
+                    Send-Alert "critical" "wsl:distro" "quant: WSL ($distro) was not running -- watchdog started it"
                     try { & wsl.exe -d $distro -- true 2>$null | Out-Null } catch { }
                 } elseif (-not (Test-DockerResponding)) {
                     Write-Log "WSL is up but Docker is not responding -- attempting to start it"
-                    Send-Alert "quant: Docker inside WSL is not responding -- watchdog attempting start"
+                    Send-Alert "critical" "wsl:docker" "quant: Docker inside WSL is not responding -- watchdog attempting start"
                     try { & wsl.exe -d $distro -u root -- service docker start 2>$null | Out-Null } catch { }
                 } else {
                     # Docker is fine, and the containers are presumably fine with it -- yet
@@ -174,7 +178,7 @@ while ($true) {
                                "Containers are likely healthy on the WSL IP. Fix: wsl --shutdown " +
                                "(drops ALL containers on this machine and forces a fresh IBKR " +
                                "login with 2FA), after which they restart on their own.")
-                    Send-Alert ("quant: both dashboards unreachable from Windows while Docker is " +
+                    Send-Alert "critical" "wsl:forwarding" ("quant: both dashboards unreachable from Windows while Docker is " +
                                 "HEALTHY -- WSL localhost forwarding has failed. Needs wsl --shutdown.")
                     if ($allowWslShutdown) {
                         Write-Log "allowWslShutdown is set -- running wsl --shutdown"
@@ -203,7 +207,10 @@ while ($true) {
             $mins = [int]($fail[$l] * $checkIntervalSec / 60)
             Write-Log ("$l still down after $($fail[$l]) cycles -- restarting container " +
                        "$($inst.Container) from the Windows side")
-            Send-Alert "quant: $l dashboard down ~${mins}min and not recovered by infra-watchdog -- restarting $($inst.Container)"
+            # NOTIFICATION_SPEC: `error`, not `critical` -- the restart itself succeeded, so
+            # there is nothing to act on now. infra-watchdog.sh records its own restarts the
+            # same way, so both layers feed one digest.
+            Send-Alert "error" "restart:$l" "quant: $l dashboard down ~${mins}min and not recovered by infra-watchdog -- restarting $($inst.Container)"
             try {
                 & wsl.exe -d $distro -- docker restart $($inst.Container) 2>$null | Out-Null
             } catch {

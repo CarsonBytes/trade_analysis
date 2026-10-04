@@ -123,8 +123,12 @@ for t in paper live; do
     if restart_requested "$t"; then
         log "$t: on-demand gateway restart requested from the dashboard UI -- cycling relogin now"
         clear_restart_request "$t"
-        /home/cap/quant/scripts/gateway-push.sh \
-            "IBKR ${t} gateway restart requested from the dashboard -- relogin cycle started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+          # NOTIFICATION_SPEC: level=info -- the operator just clicked this
+          # button, so the relogin is their own doing; buzzing them back is
+          # pure echo. (The 2FA instruction still matters, which is why the
+          # watchdog's own first-cycle page below carries it.)
+          /home/cap/quant/scripts/gateway-push.sh info "manual-ui:$t" \
+              "IBKR ${t} gateway restart requested from the dashboard -- relogin cycle started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
         bash "$RELOGIN" "$t" "manual-ui-restart" >/dev/null 2>&1
         rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet" \
               "$ST/$t.escalated" "$ST/$t.escalated.notified"
@@ -225,8 +229,11 @@ for t in paper live; do
                 echo "$now" > "$ST/$t.quiet.alerted"
                 log "$t: API port STILL closed after ${qage_min}min of quiet hours -- " \
                     "sending the bounded outage notification (relogin remains suppressed)"
-                /home/cap/quant/scripts/gateway-push.sh \
-                    "IBKR ${t} gateway down for $((qage_min / 60))h while markets are shut. Expected during IBKR's weekly reset -- but if you expected it logged in, investigate."
+                  # NOTIFICATION_SPEC: level=error -- expected during IBKR's
+                  # weekly reset, and the relogin stays suppressed anyway, so
+                  # there is nothing to act on. Rolls into the digest.
+                  /home/cap/quant/scripts/gateway-push.sh error "quiet:$t" \
+                      "IBKR ${t} gateway down for $((qage_min / 60))h while markets are shut. Expected during IBKR's weekly reset -- but if you expected it logged in, investigate."
             fi
         fi
         continue
@@ -256,7 +263,10 @@ for t in paper live; do
         if [ ! -f "$ST/$t.escalated" ]; then
             echo "$now" > "$ST/$t.escalated"
             log "$t: $attempts auto-relogin cycles failed within this hour -- ESCALATING to manual action"
-            /home/cap/quant/scripts/gateway-push.sh \
+            # NOTIFICATION_SPEC: level=critical -- auto-relogin has exhausted
+            # its attempts and a human has to open the IBKR app. This is the
+            # one gateway message that meets the decision rule.
+            /home/cap/quant/scripts/gateway-push.sh critical "escalate:$t" \
                 "IBKR ${t} gateway: ${MAX_ATTEMPTS} automatic relogin cycles FAILED. Manual action needed: check IBKR app / gateway logs."
             touch "$ST/$t.escalated.notified"
         fi
@@ -270,8 +280,16 @@ for t in paper live; do
         echo "$hourkey $n" > "$ST/$t.attempts"
         echo "$now" > "$ST/$t.lastattempt"
         rm -f "$ST/$t.since"                        # reset the stall clock for the new attempt
-        /home/cap/quant/scripts/gateway-push.sh \
-            "IBKR ${t} gateway not logged in -- relogin cycle ${n}/${MAX_ATTEMPTS} started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+        # NOTIFICATION_SPEC: page on the FIRST cycle of an incident only.
+        # Every attempt carried the same "approve the 2FA prompt" instruction,
+        # so pushing all of them turned 299 cycles into 299 phone buzzes with
+        # no extra action available to the operator. A later hour of the same
+        # outage re-arms `attempts` and pages again, and the MAX_ATTEMPTS
+        # escalation above still pages once when auto-relogin gives up.
+        if [ "$n" -eq 1 ]; then
+            /home/cap/quant/scripts/gateway-push.sh critical "cycle:$t" \
+                "IBKR ${t} gateway not logged in -- relogin cycle ${n}/${MAX_ATTEMPTS} started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+        fi
         bash "$RELOGIN" "$t" "watchdog-cycle-${n}" >/dev/null 2>&1
     fi
 done

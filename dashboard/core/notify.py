@@ -3,9 +3,10 @@ events (a false -89.8% drawdown display, an orphaned real broker order, a reconc
 mismatch, a portfolio-cap breach) that were each only discovered by a human happening to
 check the right place. This is the push-notification side; core/notable_events.py is the
 paired local changelog side -- both fire from the SAME call sites so they can't drift out
-of sync with each other. Only WARNING/ERROR level actually pushes to Telegram (see
+of sync with each other. Only CRITICAL level actually pushes to Telegram (see
 _PUSH_LEVELS below) -- routine INFO events still land in the local changelog, just don't
-buzz your phone.
+buzz your phone, and WARNING/ERROR now roll up into the dashboard's daily digest
+(docs/NOTIFICATION_SPEC.md, adopted here 2026-10-04).
 
 Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment (put them in
 analyst/.env, or set them directly for whichever instance should alert). No-ops (logs at
@@ -32,7 +33,7 @@ _COOLDOWN_SEC = 300     # de-dup: don't resend the EXACT same message within 5 m
 # setups make awkward; ntfy is just an HTTP POST to a topic URL and its mobile app
 # subscribes directly. Set NTFY_URL to a full topic URL (e.g. https://ntfy.sh/quant-
 # <something-random>) and optionally NTFY_TOKEN for access-controlled topics. Same
-# WARNING/ERROR level filter and per-message cooldown as Telegram -- both channels fire
+# CRITICAL-only level filter and per-message cooldown as Telegram -- both channels fire
 # from the same send(), so call sites never pick between them.
 def _send_ntfy(message: str, level: str) -> bool:
     url = os.environ.get("NTFY_URL", "").strip()
@@ -43,8 +44,8 @@ def _send_ntfy(message: str, level: str) -> bool:
         headers = {
             "Title": f"[{os.environ.get('DASH_FIXED_MODE', '?').upper()}] "
                      f"{'WARNING' if level == 'warning' else 'ALERT'}",
-            "Priority": "high" if level == "error" else "default",
-            "Tags": "rotating_light" if level == "error" else "warning",
+            "Priority": "high" if level in ("error", "critical") else "default",
+            "Tags": "rotating_light" if level in ("error", "critical") else "warning",
             # plain ASCII-safe tag fallback handled server-side by ntfy
         }
         token = os.environ.get("NTFY_TOKEN", "").strip()
@@ -65,12 +66,21 @@ def is_configured() -> bool:
                 or os.environ.get("NTFY_URL"))
 
 
-# ADDED 2026-07-15: only WARNING/ERROR actually push to Telegram -- user asked for
+# ADDED 2026-07-15: only important levels push to Telegram -- user asked for
 # "important alert or notice" only. INFO-level events (new order placed, sleeve order
 # placed, position closed -- the routine, happens-every-day stuff) still get recorded in
 # the local changelog (notable_events.record() writes that regardless of this filter),
 # just no longer buzz your phone for something that isn't actionable.
-_PUSH_LEVELS = {"warning", "error"}
+#
+# TIGHTENED 2026-10-04 from {"warning", "error"} to {"critical"} -- see
+# docs/NOTIFICATION_SPEC.md. Retro over the box's logs measured ~9 Telegram
+# messages/day at the old setting, most of them describing events that had
+# already resolved themselves. The decision rule is now uniform across every
+# sender on this machine: *would ignoring this for 12 hours make it worse?*
+# If no, it is not critical and it does not buzz the phone. WARNING/ERROR are
+# still recorded (local changelog + the dashboard's daily digest) -- they are
+# demoted, not discarded.
+_PUSH_LEVELS = {"critical"}
 
 
 def send(message: str, level: str = "info") -> bool:
@@ -92,7 +102,8 @@ def send(message: str, level: str = "info") -> bool:
     if token and chat_id:
         try:
             import requests
-            emoji = {"warning": "⚠️", "error": "\U0001f6a8"}.get(level, "ℹ️")
+            emoji = {"warning": "⚠️", "error": "🚨",
+                     "critical": "🚨"}.get(level, "ℹ️")
             mode = os.environ.get("DASH_FIXED_MODE", "?").upper()
             text = f"{emoji} [{mode}] {message}"
             # MIRROR 2026-09-30: record every outbound push where an operator can see it.
