@@ -21,6 +21,22 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 log() { echo "[$(ts)] $*" >> "$LOG"; }
 
+# --- concurrency lock (ADDED 2026-10-04) ---------------------------------------
+# This script has three callers that can overlap: the 20:00 scheduled cron, the
+# login watchdog's stall cycles (every 60s while a port is closed), and a human.
+# A cycle takes 35-90s (docker restart + IBC login + wait-for-port), so two
+# overlapping runs restart the same container twice and generate two competing
+# 2FA prompts -- both of which then fail, wasting the hour's retry budget.
+# Separate lock file from the watchdog's on purpose: the watchdog holds ITS lock
+# while calling this, so sharing one file would make this block on itself.
+RELOGIN_LOCK=/home/cap/.gateway-watchdog/relogin.lock
+mkdir -p "$(dirname "$RELOGIN_LOCK")"
+exec 9>"$RELOGIN_LOCK"
+if ! flock -n 9; then
+    log "another relogin cycle is already in progress -- skipping this invocation"
+    exit 0
+fi
+
 container_for() {
     case "$1" in
         paper) echo quant-ibgateway-docker ;;

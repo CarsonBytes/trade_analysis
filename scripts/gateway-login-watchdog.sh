@@ -24,6 +24,14 @@ set -uo pipefail
 STALL_MIN=${STALL_MIN:-5}
 RETRY_GAP_MIN=${RETRY_GAP_MIN:-3}
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}
+# QUIET-hour outage signal (ADDED 2026-10-04). The weekend gate below correctly
+# suppresses ACTION during quiet hours (a relogin would only push a 2FA prompt
+# nobody can use), but it used to suppress ALL awareness too. Defaults chosen so
+# a normal weekend -- where IBKR's weekly reset legitimately leaves the gateway
+# logged out -- produces at most one informational message per quiet period, not
+# a re-spam of the thing the gate exists to stop.
+QUIET_ALERT_MIN=${QUIET_ALERT_MIN:-720}          #12h continuously down while quiet
+QUIET_ALERT_REPEAT_MIN=${QUIET_ALERT_REPEAT_MIN:-1440}   # then at most once/day
 
 ST=/home/cap/.gateway-watchdog
 RELOGIN=/home/cap/quant/scripts/gateway-relogin.sh
@@ -33,6 +41,34 @@ now=$(date +%s)
 hourkey=$(date +%Y%m%d%H)
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> /home/cap/gateway-restart.log; }
+
+# --- concurrency lock (ADDED 2026-10-04) ---------------------------------------
+# This runs every 60s from cron while each relogin cycle it launches takes
+# 35-90s (docker restart + IBC login + wait-for-port). Without a lock, the next
+# cron fire lands mid-cycle and starts a SECOND cycle against the same container
+# -- two competing `docker restart`s and two 2FA prompts. Confirmed by the
+# observed cadence (286 cycles logged vs 332 "first seen CLOSED" markers).
+# Non-blocking on purpose: if a run is still in flight we drop this minute and
+# let the next fire handle it -- cron will be back shortly, so nothing is lost.
+# Proof-of-life that cron itself is alive. Its ABSENCE is the alarm signal (the
+# pre-market cron's missing log file is what hid its never-fired status until
+# now). Cheap: one append per minute, and it must also be written by a run that
+# exits early on the lock -- cron DID fire then, and a gap here would read as
+# "cron died" to anything watching this file.
+heartbeat() {
+    echo "$now $(date '+%Y-%m-%d %H:%M:%S')" >> "$HBLOG"
+    tail -200 "$HBLOG" > "${HBLOG}.tmp" 2>/dev/null && mv "${HBLOG}.tmp" "$HBLOG"
+}
+
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$ST/run.lock"
+    if ! flock -n 9; then
+        heartbeat
+        exit 0    # a previous run (and the relogin cycle it launched) still owns the lock
+    fi
+else
+    log "WARNING: flock(1) unavailable -- running WITHOUT the concurrency lock"
+fi
 
 container_for() {
     case "$1" in
@@ -103,10 +139,46 @@ done
 # an hour, around the clock. Measured 2026-08-29..31: 21 cycles Sat, 52 Sun, 31 Mon vs 4-11
 # on a weekday. See dashboard/ops/gateway_window.py for why this asks the NYSE calendar
 # rather than testing day-of-week (2026-09-07 is a Labor Day Monday).
-# Fails ACTIVE: if the container is down or the calendar errors, behave exactly as before.
+# Fails ACTIVE: if the calendar says open (or cannot answer), behave exactly as before --
+# a noisy phone beats an undetected outage. What it must NOT do is treat an unavailable
+# CONTAINER as an ACTIVE answer (ADDED 2026-10-04): `docker exec` fails outright for the
+# few seconds a dashboard recreate takes, and the old code could not tell that apart from
+# a genuine "market is open". On a weekend, that single transient was enough to start a
+# relogin cycle and push a 2FA prompt -- the exact spam this gate exists to stop.
+#
+# Why a sentinel instead of exit codes: `docker exec` on a missing container exits 1,
+# which is the SAME code gateway_window.py returns for ACTIVE. Exit codes alone therefore
+# cannot tell the two apart; only a token printed by a successful evaluation can.
+#   QUIET/ACTIVE on stdout -> a real answer, cache it and use it
+#   rc=2, no stdout        -> the calendar itself failed to evaluate -> ACTIVE
+#   anything else          -> docker exec failed -> reuse the last real answer for
+#                             QUIET_CACHE_MIN, then default ACTIVE
+QUIET_CACHE="$ST/last_quiet"
+QUIET_CACHE_MIN=${QUIET_CACHE_MIN:-30}
 market_quiet() {
-    docker exec -w /app -e PYTHONPATH=/app quant-dashboard-docker \
-        /app/.venv/bin/python -m dashboard.ops.gateway_window >/dev/null 2>&1
+    local out rc last_rc last_ts
+    out=$(docker exec -w /app -e PYTHONPATH=/app quant-dashboard-docker \
+        /app/.venv/bin/python -m dashboard.ops.gateway_window 2>/dev/null)
+    rc=$?
+    case "$out" in
+        QUIET)
+            echo "0 $(date +%s)" > "$QUIET_CACHE"
+            return 0
+            ;;
+        ACTIVE)
+            echo "1 $(date +%s)" > "$QUIET_CACHE"
+            return 1
+            ;;
+    esac
+    [ "$rc" = "2" ] && return 1    # calendar evaluation failed -> ACTIVE (documented)
+    # `read < file` errors are reported by the SHELL before any later 2>/dev/null takes
+    # effect (redirections apply left to right), so test for the file explicitly rather
+    # than trying to silence it.
+    [ -f "$QUIET_CACHE" ] || return 1
+    read -r last_rc last_ts < "$QUIET_CACHE" 2>/dev/null || return 1
+    [ "$last_rc" = "0" ] || return 1
+    [ $(( (now - last_ts) / 60 )) -le "$QUIET_CACHE_MIN" ] || return 1
+    return 0
 }
 QUIET=0
 if market_quiet; then QUIET=1; fi
@@ -127,11 +199,35 @@ for t in paper live; do
     # branch does, so the 5-minute clock starts FRESH when the window reopens and fires one
     # cycle then -- rather than a stale multi-day clock instantly burning all MAX_ATTEMPTS.
     if [ "$QUIET" -eq 1 ]; then
-        rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.escalated" "$ST/$t.escalated.notified"
+        # ADDED 2026-10-04: this branch used to also rm the two escalation files on EVERY
+        # run. That had two consequences. (a) An alarm raised just before the gate engaged
+        # was discarded the next minute, so the exhaustion notification could vanish without
+        # ever being seen. (b) With the ladder state gone and no replacement signal, a
+        # gateway that was down for a whole 12h quiet stretch was completely
+        # indistinguishable from an idle weekend -- zero signal, to the very last minute.
+        # So: reset only the ACTIVE-hours ladder (fresh clock on reopen, as designed), keep
+        # the escalation latches, and emit ONE bounded outage notification instead.
+        rm -f "$ST/$t.since" "$ST/$t.attempts"
         if [ ! -f "$ST/$t.quiet" ]; then
             touch "$ST/$t.quiet"
+            echo "$now" > "$ST/$t.quiet_since"
+            # a new quiet period is a new story: forget the previous period's escalation
+            # and alert state so they cannot suppress this one
+            rm -f "$ST/$t.escalated" "$ST/$t.escalated.notified" "$ST/$t.quiet.alerted"
             log "$t: API port closed, but no US session within reach (weekend/holiday) -- " \
                 "watchdog quiet, no relogin and no phone push until the window reopens"
+        fi
+        qsince=$(cat "$ST/$t.quiet_since" 2>/dev/null || echo "$now")
+        qage_min=$(( (now - qsince) / 60 ))
+        if [ "$qage_min" -ge "$QUIET_ALERT_MIN" ]; then
+            last_alert=$(cat "$ST/$t.quiet.alerted" 2>/dev/null || echo 0)
+            if [ $(( (now - last_alert) / 60 )) -ge "$QUIET_ALERT_REPEAT_MIN" ]; then
+                echo "$now" > "$ST/$t.quiet.alerted"
+                log "$t: API port STILL closed after ${qage_min}min of quiet hours -- " \
+                    "sending the bounded outage notification (relogin remains suppressed)"
+                /home/cap/quant/scripts/gateway-push.sh \
+                    "IBKR ${t} gateway down for $((qage_min / 60))h while markets are shut. Expected during IBKR's weekly reset -- but if you expected it logged in, investigate."
+            fi
         fi
         continue
     fi
@@ -181,7 +277,5 @@ for t in paper live; do
 done
 
 # --- heartbeat: proof-of-life that cron itself is alive ----------------------
-# Its ABSENCE is the alarm signal (the pre-market cron's missing log file is what hid
-# its never-fired status until now). Cheap: one append per minute.
-echo "$now $(date '+%Y-%m-%d %H:%M:%S')" >> "$HBLOG"
-tail -200 "$HBLOG" > "${HBLOG}.tmp" 2>/dev/null && mv "${HBLOG}.tmp" "$HBLOG"
+# (Written via heartbeat(), which also runs on the lock-skip path above.)
+heartbeat

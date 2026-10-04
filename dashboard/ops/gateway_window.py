@@ -17,6 +17,20 @@ the NYSE calendar (holidays included).
 Exit status is the interface (this is called from bash):
     0 -> QUIET, the watchdog should not restart or notify
     1 -> ACTIVE, normal watchdog behaviour
+    2 -> evaluation itself failed (calendar error) -> still treated as ACTIVE
+
+STDOUT carries a sentinel, `QUIET` or `ACTIVE`, printed only on a successful
+evaluation (and nothing at all otherwise). ADDED 2026-10-04 because exit codes
+alone are ambiguous across the docker boundary: `docker exec` on a missing or
+mid-recreate container exits 1 -- identical to this program's ACTIVE -- so the
+caller cannot distinguish "the market is open" from "the container is gone".
+See scripts/gateway-login-watchdog.sh::market_quiet for the consumer.
+
+2 (ADDED 2026-10-04) is deliberately distinct from 1: the watchdog needs to tell
+"the calendar said the market is open" apart from "I could not ask the calendar",
+because the third state -- the container is simply unavailable, e.g. mid-recreate
+during a deploy -- must not be mistaken for a real answer either. Everything
+non-zero still means ACTIVE to a naive caller, so existing behaviour is unchanged.
 
 Fails ACTIVE. A broken calendar must not silently disable the watchdog -- a gateway that is
 logged out with nobody watching is the exact silent-outage class this project keeps hitting
@@ -50,7 +64,13 @@ def should_be_quiet(now: dt.datetime | None = None) -> bool:
 if __name__ == "__main__":
     try:
         quiet = should_be_quiet()
-    except Exception as e:                             # noqa: BLE001 -- fail ACTIVE, loudly
+    except Exception as e:                             # noqa: BLE001 -- fail ACTIVE, distinctly
         print(f"gateway_window: could not evaluate ({e}) -- failing ACTIVE", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
+    # Sentinel on stdout. Needed because exit codes alone are ambiguous across the
+    # docker boundary: `docker exec` on a missing/recreating container exits 1, which
+    # is the very same code this program uses for ACTIVE -- so a caller literally
+    # cannot tell "the market is open" from "the container is gone". A token only a
+    # successful evaluation can print is unambiguous.
+    sys.stdout.write("QUIET\n" if quiet else "ACTIVE\n")
     sys.exit(0 if quiet else 1)
