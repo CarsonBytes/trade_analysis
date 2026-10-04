@@ -1799,13 +1799,20 @@ def portfolio_panel() -> None:
         else:
             _yaxis["scale"] = True
         _series = [{"type": "line", "data": _xy, "smooth": True, "areaStyle": {},
+                    # FIXED 2026-10-04: on a time axis the ~10min samples of the tracked
+                    # window (2,300+ points in ~32 days) render as a solid ink band that reads
+                    # as a "thick line" and hides the shape. LTTB is ECharts' built-in
+                    # largest-triangle downsampler: it keeps the silhouette (and the extremes
+                    # that matter for a P&L chart) at whatever pixel density is actually
+                    # available, without us guessing a stride.
+                    "sampling": "lttb", "large": True, "largeThreshold": 400,
                     "lineStyle": {"width": 2},
                     "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"},
                     "markLine": ({"silent": True, "symbol": "none", "data": _marks}
                                  if _marks else None)}]
         if _spy_xy is not None:
             _series.append({"type": "line", "data": _spy_xy, "yAxisIndex": 1,
-                            "smooth": True, "symbol": "none",
+                            "smooth": True, "symbol": "none", "sampling": "lttb",
                             "lineStyle": {"width": 1.5, "type": "dashed", "color": "#9ca3af"},
                             "itemStyle": {"color": "#9ca3af"}})
         ui.echart({
