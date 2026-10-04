@@ -1726,11 +1726,9 @@ def portfolio_panel() -> None:
     # point instead of an axis-defining one.
 # the anchor is exactly hist[0] when it exists (with_inception only ever prepends one row)
     _anchor_ts = hist[0][0] if (hist and hist[0][1] == 0.0) else None
-    _plot_idx = [i for i, h in enumerate(hist)
-                 if h[0] != _anchor_ts and (_cutoff is None or h[0] >= _cutoff)]
-    _whist = [hist[i] for i in _plot_idx]
-    # P&L zero-reference = first REAL reading, never the anchor (see comment above).
-    _pl_base0 = (_whist[0][1] if _whist else (hist[0][1] if hist else 0.0))
+    _win_idx = [i for i, h in enumerate(hist)
+                if h[0] != _anchor_ts and (_cutoff is None or h[0] >= _cutoff)]
+    _whist = [hist[i] for i in _win_idx]
     _show_anchor = _anchor_ts is not None and (_cutoff is None or _anchor_ts >= _cutoff)
     if len(hist) >= 2:
         xs = [dt.datetime.fromtimestamp(h[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%m-%d %H:%M") + " HKT" for h in _whist]
@@ -1750,6 +1748,8 @@ def portfolio_panel() -> None:
         _pl_anchor_adj = _adj_full[_win_idx[0]] if _win_idx else 0.0
         ys = ([_adj_full[i] - _pl_anchor_adj for i in _win_idx] if _use_adj
               else [hist[i][1] for i in _win_idx])
+        _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
+        _marks = []
         if _use_adj and _show_anchor and _whist:
             # mark where pre-tracking capital entered, without letting it set the y-axis scale.
             # xs/ys are ascending, and the anchor predates every plotted point, so it goes first.
@@ -1760,8 +1760,6 @@ def portfolio_panel() -> None:
                               "label": {"formatter": "tracking began",
                                         "fontSize": 9},
                               "lineStyle": {"color": "#9ca3af", "type": "dashed"}})
-        _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
-        _marks = []
         for fts, famt, fccy in (flows or []):
             if _cutoff is not None and fts < _cutoff:
                 continue

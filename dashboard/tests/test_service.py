@@ -507,6 +507,90 @@ def _today_pnl_restore(saved):
         store.cache_set(k, [] if k != "position_day_open" else None)
 
 
+def test_portfolio_panel_has_no_undefined_names():
+    print("\nSTATIC GUARD 2026-10-04: app.py's portfolio_panel() is the P&L-chart render path, and "
+          "no existing test exercises it (NiceGUI context). A 2026-10-04 edit left `_win_idx` "
+          "undefined there, py_compile passed, all 318 tests passed -- and the deployed paper "
+          "dashboard raised NameError on EVERY page render, so the portfolio panel never drew. "
+          "This walks the function's AST and asserts every name it READS is defined somewhere in "
+          "the function (any scope), at module level, or is a builtin. A mini-pyflakes for the one "
+          "file that can't be unit-tested.")
+    import ast
+    import builtins
+
+    src_path = None
+    for cand in ("dashboard/app.py", "app.py"):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                src_path = cand
+                src = fh.read()
+            break
+        except OSError:
+            continue
+    if src_path is None:
+        check("app.py located for the AST scan", False, True)
+        return
+
+    tree = ast.parse(src)
+    module_names = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                module_names.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            module_names.add(node.id)
+        elif isinstance(node, ast.arg):
+            module_names.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            module_names.add(node.name)
+        elif isinstance(node, ast.Global):
+            module_names.update(node.names)
+
+    panel = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == "portfolio_panel":
+            panel = node
+            break
+    check("portfolio_panel() found in app.py", panel is not None, True)
+    if panel is None:
+        return
+
+    defined = set(module_names)
+    for node in ast.walk(panel):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            defined.add(node.id)
+        elif isinstance(node, ast.arg):
+            defined.add(node.arg)
+        elif isinstance(node, (ast.comprehension,)):
+            for t in ast.walk(node.target):
+                if isinstance(t, ast.Name):
+                    defined.add(t.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+
+    undefined = sorted({n.id for n in ast.walk(panel)
+                        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                        and n.id not in defined})
+    for name in undefined:
+        print(f"      undefined name in portfolio_panel(): {name}")
+    check("portfolio_panel() reads no undefined name (would NameError at render)", undefined, [])
+    # NEGATIVE CONTROL: the guard must actually FAIL on the bug it was written for, otherwise it
+    # proves nothing. Re-introduce the exact 2026-10-04 defect (`_win_idx` never assigned) and
+    # assert this analysis catches it.
+    broken = ast.parse(ast.unparse(panel))
+    defined_no_win = {n for n in defined if n != "_win_idx"}
+    undefined_broken = sorted({n.id for n in ast.walk(broken)
+                               if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                               and n.id not in defined_no_win})
+    check("negative control: guard flags _win_idx when it is unassigned",
+          "_win_idx" in undefined_broken, True)
+
+
 def test_chart_pnl_view_excludes_the_inception_anchor():
     print("\nCHART FIX 2026-10-04: the P&L(ex-deposits) chart must not be anchored on -- or "
           "have its y-axis set by -- the hand-set [ts, 0.00] inception row.")
