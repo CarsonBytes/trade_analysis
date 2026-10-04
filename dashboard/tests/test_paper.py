@@ -32,6 +32,103 @@ def approx(name, got, want, tol=1e-6):
     assert ok, f"{name}: got {got!r} want ~{want!r}"
 
 
+def test_total_pl_does_not_double_count_the_first_deposit():
+    print("\nREGRESSION 2026-10-04 (live): backfilling real NAV rows BEFORE the first recorded "
+          "reading made the Total P&L card read -6,724.50 when the true figure was +3,315.50. "
+          "Cause: with_inception() prepends the 0.00 zero-reference ONLY when "
+          "inception_ts < hist[0][0]; a seeded row landing 1s later made the anchor vanish, so "
+          "base0 became the first REAL NAV sample (10,040 -- which already CONTAINS that "
+          "day's 10,000 deposit) while net_flows still subtracted the same deposit.")
+    from dashboard.core import paper
+    from dashboard.core import store
+
+    inception_ts = 1000
+    flow_ts = 1100                      # deposit lands AFTER inception, BEFORE the reading
+    seeded_ts = 1001                    # seeded NAV row sits before the flow -> anchor lost
+    nav = 10040.0
+    deposit = 10000.0
+    later_ts = 9000
+    later_nav = 253287.0
+
+    hist = [[seeded_ts, nav, "HKD"], [later_ts, later_nav, "HKD"]]
+    flows = [[flow_ts, deposit, "HKD"]]
+    cached = {"equity_inception": [inception_ts, 0.0, "HKD"]}
+
+    def fake_cache_get(k):
+        return (cached.get(k), "ts")
+
+    with mock.patch.object(store, "cache_get", side_effect=fake_cache_get):
+        w = paper.with_inception(hist)
+
+        # --- the broken configuration: anchor ts is NOT before the seeded row ---
+        cached["equity_inception"] = [seeded_ts + 44, 0.0, "HKD"]
+        broken = paper.with_inception(hist)
+        check("broken: anchor dropped when its ts is not < hist[0][0]",
+              broken[0][0] != seeded_ts + 44 or broken[0][1] != 0.0, True)
+        b_base0 = broken[0][1]
+        b_nl = broken[-1][1]
+        b_flows = sum(f[1] for f in flows if f[0] >= broken[0][0])
+        b_card = b_nl - b_base0 - b_flows
+        b_true = b_nl - sum(f[1] for f in flows)
+        check("broken config double-counts the first deposit",
+              round(b_card - b_true, 2), -nav)
+
+        # --- the fixed configuration: anchor strictly before the seeded row ---
+        cached["equity_inception"] = [seeded_ts - 1, 0.0, "HKD"]
+        ok = paper.with_inception(hist)
+        check("fixed: anchor prepended when ts < hist[0][0]", ok[0][1], 0.0)
+        f_base0 = ok[0][1]
+        f_flows = sum(f[1] for f in flows if f[0] >= ok[0][0])
+        f_card = ok[-1][1] - f_base0 - f_flows
+        f_true = ok[-1][1] - sum(f[1] for f in flows)
+        check("fixed: card P&L equals nav - ALL deposits", round(f_card, 2), round(f_true, 2))
+        check("fixed: no double-count (gap is zero)", round(f_card - f_true, 2), 0.0)
+        check("fixed: base0 is the 0.00 pre-funding reference", f_base0, 0.0)
+
+
+def test_backfilled_nav_must_be_stamped_end_of_day():
+    print("\nREGRESSION 2026-10-04 (live): NAV from an IBKR statement is an END-OF-DAY "
+          "snapshot, but the backfill stamped every row at 00:00:00 -- BEFORE that day's "
+          "deposits (the 7/08 deposit landed 00:01:44). deposit_adjusted_series only nets a "
+          "flow into rows at/after its timestamp, so the whole deposit showed up as a "
+          "one-day profit spike (7/08 +10,040, 7/27 +30,930, 8/11 +62,404).")
+    import datetime as dt
+    from dashboard.core import paper
+
+    EQ = dt.timezone.utc
+
+    def day_at(day, h, m, s):
+        return int(dt.datetime(day.year, day.month, day.day, h, m, s, tzinfo=EQ).timestamp())
+
+    dep_day = dt.date(2026, 7, 8)
+    flow_ts = day_at(dep_day, 0, 1, 44)          # deposit 00:01:44
+    nav = 10040.0
+    flows = [[flow_ts, 10000.0, "HKD"]]
+    anchor_ts = day_at(dep_day - dt.timedelta(days=1), 23, 59, 59)   # pre-funding zero
+
+    def series(rows):
+        """Build it exactly as production does: with_inception() then deposit-adjusted."""
+        hist = [[anchor_ts, 0.0, "HKD"]] + rows
+        return paper.deposit_adjusted_series(hist, flows)[1:]   # drop the anchor itself
+
+    midnight_rows = [[day_at(dep_day, 0, 0, 0), nav, "HKD"],
+                     [day_at(dep_day + dt.timedelta(days=1), 0, 0, 0), nav, "HKD"]]
+    eod_rows = [[day_at(dep_day, 23, 59, 59), nav, "HKD"],
+                [day_at(dep_day + dt.timedelta(days=1), 23, 59, 59), nav, "HKD"]]
+
+    adj_mid = series(midnight_rows)
+    adj_eod = series(eod_rows)
+
+    check("midnight stamp leaves the deposit unnetted -> fake spike",
+          round(adj_mid[0], 2), round(nav, 2))
+    check("end-of-day stamp nets the deposit -> true P&L",
+          round(adj_eod[0], 2), round(nav - 10000.0, 2))
+    check("end-of-day series is flat (no spike at all)",
+          round(adj_eod[1] - adj_eod[0], 2), 0.0)
+    check("midnight series swings by the whole deposit",
+          round(abs(adj_mid[1] - adj_mid[0]), 2), 10000.0)
+
+
 def test_deposit_adjusted_series():
     print("deposit_adjusted_series:")
     hist = [[100, 10000.0, "HKD"], [200, 10100.0, "HKD"], [300, 20100.0, "HKD"]]

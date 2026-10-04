@@ -1731,32 +1731,23 @@ def portfolio_panel() -> None:
     _whist = [hist[i] for i in _win_idx]
     _show_anchor = _anchor_ts is not None and (_cutoff is None or _anchor_ts >= _cutoff)
     if len(hist) >= 2:
-        xs = [dt.datetime.fromtimestamp(h[0], tz=dt.timezone.utc).astimezone(HKT).strftime("%m-%d %H:%M") + " HKT" for h in _whist]
         _use_adj = SETTINGS["chart_view"] == "P&L (ex-deposits)"
-        # P&L view must be ZERO-referenced (matches the Total P&L stat's own math: nl - base0 -
-        # flows) -- _adj_full alone only nets out cash flows, leaving the series sitting at the
-        # ORIGINAL starting value (itself a deposit, not profit) instead of 0. Subtract it here;
-        # _adj_full stays value-based (unsubtracted) for the drawdown monitor below, where you
-        # divide by the peak VALUE, not peak P&L.
         # P&L(ex-deposits) is plotted RELATIVE TO THE FIRST PLOTTED POINT, not to hist[0].
         # deposit_adjusted_series() is already anchored at adj_full[0] == 0 (that is what the
         # hand-set inception row buys), so subtracting it is a no-op -- which is why the anchor
         # used to set the origin AND the y-axis scale. Anchoring on the first REAL reading instead
-        # makes the honest statement: "we have no measurement before 2026-09-03; relative to that
-        # first measurement, here is the performance." It also keeps the series inside a tight
-        # y-range instead of being crushed under a fabricated 0.00 point.
+        # makes the honest statement: "relative to the first measurement, here is performance."
         _pl_anchor_adj = _adj_full[_win_idx[0]] if _win_idx else 0.0
         ys = ([_adj_full[i] - _pl_anchor_adj for i in _win_idx] if _use_adj
               else [hist[i][1] for i in _win_idx])
+        xs_ts = [hist[i][0] for i in _win_idx]     # epoch seconds, aligned to xs/ys
         _zero_base = SETTINGS["chart_scale"] == "Zero-baseline"
         _marks = []
         if _use_adj and _show_anchor and _whist:
             # mark where pre-tracking capital entered, without letting it set the y-axis scale.
-            # xs/ys are ascending, and the anchor predates every plotted point, so it goes first.
-            xs.insert(0, dt.datetime.fromtimestamp(_anchor_ts, tz=dt.timezone.utc)
-                      .astimezone(HKT).strftime("%m-%d %H:%M") + " HKT")
+            xs_ts.insert(0, _anchor_ts)
             ys.insert(0, 0.0)
-            _marks.insert(0, {"xAxis": xs[0],
+            _marks.insert(0, {"xAxis": _anchor_ts * 1000,
                               "label": {"formatter": "tracking began",
                                         "fontSize": 9},
                               "lineStyle": {"color": "#9ca3af", "type": "dashed"}})
@@ -1767,7 +1758,7 @@ def portfolio_panel() -> None:
             if idx is None:
                 continue
             kind = "deposit" if famt > 0 else "withdrawal"
-            _marks.append({"xAxis": xs[idx],
+            _marks.append({"xAxis": _whist[idx][0] * 1000,
                            "label": {"formatter": f"{kind} {famt:+,.0f}", "fontSize": 9},
                            "lineStyle": {"color": "#6b7280", "type": "dotted"}})
         # ADDED 2026-08-26: SPY benchmark OVERLAY -- the headline card compares returns vs
@@ -1777,11 +1768,13 @@ def portfolio_panel() -> None:
         # omitted until service.refresh_cheap() has cached spy_series (first fetch happens
         # on the same ~4h cadence as the two-point benchmark).
         _spy_pts = None
+        _spy_xy = None
         if _use_adj:
             try:
                 _spy_raw, _ = store.cache_get("spy_series")
                 if _spy_raw and len(_spy_raw) >= 2:
                     _aligned: list[float] = []
+                    _ats: list[int] = []
                     _j, _base = 0, None
                     for _h in _whist:
                         while _j + 1 < len(_spy_raw) and _spy_raw[_j + 1][0] <= _h[0]:
@@ -1792,31 +1785,44 @@ def portfolio_panel() -> None:
                             _base = _spy_raw[_j][1]
                         if _base:
                             _aligned.append(round((_spy_raw[_j][1] / _base - 1) * 100, 2))
+                            _ats.append(_h[0])
                     if len(_aligned) >= 2:
                         _spy_pts = _aligned
+                        _spy_xy = [[t * 1000, v] for t, v in zip(_ats, _aligned)]
             except Exception as e:                         # noqa: BLE001 -- overlay is optional
                 from dashboard.core.log import log
                 log.debug("SPY overlay unavailable: %s", e)
+        _xy = [[t * 1000, v] for t, v in zip(xs_ts, ys)]
         _yaxis = {"type": "value", "name": ccy}
         if (_zero_base and not _use_adj):                  # P&L can go negative -- never clip at 0
             _yaxis["min"] = 0
         else:
             _yaxis["scale"] = True
-        _series = [{"type": "line", "data": ys, "smooth": True, "areaStyle": {},
+        _series = [{"type": "line", "data": _xy, "smooth": True, "areaStyle": {},
                     "lineStyle": {"width": 2},
                     "itemStyle": {"color": "#16a34a" if total_pl >= 0 else "#dc2626"},
                     "markLine": ({"silent": True, "symbol": "none", "data": _marks}
                                  if _marks else None)}]
-        if _spy_pts is not None:
-            _series.append({"type": "line", "data": _spy_pts, "yAxisIndex": 1,
+        if _spy_xy is not None:
+            _series.append({"type": "line", "data": _spy_xy, "yAxisIndex": 1,
                             "smooth": True, "symbol": "none",
                             "lineStyle": {"width": 1.5, "type": "dashed", "color": "#9ca3af"},
                             "itemStyle": {"color": "#9ca3af"}})
         ui.echart({
-            "tooltip": {"trigger": "axis"},
+            "tooltip": {"trigger": "axis",
+                        "axisPointer": {"type": "line"}},
             "legend": ({"data": [ccy, "SPY %"], "bottom": 0, "textStyle": {"fontSize": 10}}
                        if _spy_pts is not None else None),
-            "xAxis": {"type": "category", "data": xs, "boundaryGap": False},
+            # FIXED 2026-10-04: this was a CATEGORY axis, which spaces points by INDEX rather
+            # than by TIME. equity_history has ~10min samples since tracking began but only
+            # ONE point per day before it, so on 3M/All the 41 pre-tracking days were crushed
+            # into ~1.7% of the plot width and read as an empty gap at the left -- exactly what
+            # the user reported. A TIME axis spaces points by real elapsed time, so the backfilled
+            # daily history occupies the width it actually covers. Data must now be [ts_ms, value]
+            # pairs and markLine x values are epoch-ms rather than category labels.
+            "xAxis": {"type": "time", "boundaryGap": False,
+                      "axisLabel": {"formatter": "{MM}-{dd}",
+                                    "hideOverlap": True, "fontSize": 10}},
             "yAxis": [_yaxis, *( [{"type": "value", "name": "SPY %", "scale": True,
                                    "splitLine": {"show": False}}]
                                  if _spy_pts is not None else [] )],
