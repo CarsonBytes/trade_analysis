@@ -1850,6 +1850,110 @@ def test_sweep_failure_log_and_success_reset_are_pure():
     check("store failure never propagates", True, True)
 
 
+def test_s1_unconfirmed_exit_is_reported_as_unprotected():
+    print("\nS1 on the exit path: manual_close_position() cancels the TP/SL children BEFORE "
+          "submitting the flatten, so an order that never reaches the book leaves a REAL "
+          "position with NO protection. That must be reported as urgent, not as 'flatten order "
+          "sent' -- and must raise the alert rather than quietly returning:")
+    from dashboard.execution import ib_exec
+    from dashboard.core import paper as _paper
+
+    alerted = []
+
+    def _conn_open():
+        """`with _conn() as c:` enters the MagicMock, so the row must be set on the
+        ENTERED object -- setting it on the connection mock itself does nothing."""
+        inner = mock.MagicMock()
+        inner.execute.return_value.fetchone.return_value = (7, 8.0, "OPEN")
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = inner
+        cm.__exit__.return_value = False
+        return cm
+
+    class _Pos:
+        def __init__(self, pos):
+            self.position = pos
+            self.contract = type("C", (), {"conId": 7, "symbol": "QQQ", "secType": "STK",
+                                           "currency": "USD"})()
+            self.avgCost = 700.0
+
+    class _Trade:
+        def __init__(self, order):
+            self.order = order
+            self.orderStatus = type("S", (), {"status": "Inactive", "filled": 0.0,
+                                              "message": "Order was discarded."})()
+
+    class _IB:
+        def openTrades(self):
+            return []
+
+        def positions(self):
+            return [_Pos(8.0)]
+
+        def placeOrder(self, contract, o):
+            return _Trade(o)
+
+        def cancelOrder(self, order):
+            pass
+
+    # filter_by_account() drops positions whose account doesn't match the requested one, and the
+    # fake Position carries no .account attribute -- pass them through unchanged.
+    with mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                           side_effect=lambda items, _acct: list(items or [])), \
+         mock.patch.object(ib_exec.paper, "_LOCK", mock.MagicMock()), \
+         mock.patch.object(ib_exec, "_conn", return_value=_conn_open()), \
+         mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+         mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                           side_effect=lambda items, _acct: list(items or [])), \
+         mock.patch.object(ib_exec.ib_client, "call",
+                           side_effect=lambda fn, timeout=None: fn()), \
+         mock.patch.object(ib_exec, "alert_order_failure",
+                           side_effect=lambda *a, **k: alerted.append(a) or "x"), \
+         mock.patch.object(ib_exec, "record_order_exec"), \
+         mock.patch.object(ib_exec, "_guard", return_value=_IB()), \
+         mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
+         mock.patch.object(ib_exec.store, "cache_set"):
+        msg = ib_exec.manual_close_position({"id": 900001, "instrument": "QQQ"},
+                                            "S1 test: dynamic exit")
+
+    check("exit failure is reported, not swallowed", bool(msg), True)
+    check("message says the position is UNPROTECTED", "UNPROTECTED" in msg, True)
+    check("message names the broker status", "Inactive" in msg, True)
+    check("exit failure raised an alert", len(alerted), 1)
+
+    # and the success case must NOT cry wolf
+    class _TradeOK:
+        def __init__(self, order):
+            self.order = order
+            self.orderStatus = type("S", (), {"status": "Submitted", "filled": 0.0,
+                                              "message": ""})()
+
+    class _IBOK(_IB):
+        def placeOrder(self, contract, o):
+            return _TradeOK(o)
+
+    alerted.clear()
+    with mock.patch.object(ib_exec, "_conn", return_value=_conn_open()), \
+         mock.patch.object(ib_exec.paper, "_LOCK", mock.MagicMock()), \
+         mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
+         mock.patch.object(ib_exec.ib_client, "filter_by_account",
+                           side_effect=lambda items, _acct: list(items or [])), \
+         mock.patch.object(ib_exec.ib_client, "call",
+                           side_effect=lambda fn, timeout=None: fn()), \
+         mock.patch.object(ib_exec, "alert_order_failure",
+                           side_effect=lambda *a, **k: alerted.append(a)), \
+         mock.patch.object(ib_exec, "record_order_exec"), \
+         mock.patch.object(ib_exec, "_guard", return_value=_IBOK()), \
+         mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
+         mock.patch.object(ib_exec.store, "cache_set"):
+        msg2 = ib_exec.manual_close_position({"id": 900002, "instrument": "QQQ"},
+                                             "S1 test: dynamic exit")
+
+    check("confirmed exit reports the flatten normally",
+          bool(msg2) and "flatten order sent" in msg2, True)
+    check("no false alert on a working exit", alerted, [])
+
+
 # ADDED 2026-07-30: live_positions() now reports the broker's own live mark as
 # "current_price" -- confirmed live the dashboard had no fresh per-instrument price for a
 # pure IB deployment (STATE["live"] falls back to WEEKLY yfinance bars under BROKER=ib,

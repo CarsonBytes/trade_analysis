@@ -1186,6 +1186,19 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
         return f"{trade['instrument']}: dynamic exit send failed ({e}), retry"
     if sent is None:
         return None
+    # S1 (2026-10-01): an exit that never reached the book is the WORST kind of silent failure --
+    # this function cancels the position's protective TP/SL children *before* submitting the
+    # flatten, so an unconfirmed order here means a real position left with NO protection. Say so
+    # loudly rather than reporting "flatten order sent".
+    _sym = trade["instrument"]
+    _conf = confirm_order(ib, sent, _sym, "EXIT", None, timeout=ORDER_CONFIRM_SEC)
+    if not _conf["ok"]:
+        alert_order_failure({**_conf, "symbol": _sym},
+                            f"dynamic exit ({reason}) -- protection was already cancelled")
+        return (f"{_sym}: DYNAMIC EXIT NOT working at broker (status "
+                f"{_conf['status'] or 'unknown'}) -- position left UNPROTECTED, retry urgently")
+    record_order_exec(_sym, "EXIT", None, _conf["status"],
+                      f"orderId={_conf['order_id']} dynamic exit: {reason}")
     return f"{trade['instrument']}: DYNAMIC EXIT ({reason}) -- flatten order sent"
 
 
@@ -2110,9 +2123,35 @@ def _reprotect_bracket(ib, trade: dict, con_id: int, qty: float, direction: str,
                 o.account = acct
         return [ib.placeOrder(contract, o) for o in (tp_order, sl_order)]
     try:
-        ib_client.call(send, timeout=15)
+        trades = ib_client.call(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{trade['instrument']}: reprotect order send failed ({e}), retry"
+    # S1 (2026-10-01): confirm BOTH legs. This function exists to restore PROTECTION to a real,
+    # held position, so "placed" without a verdict is exactly the false comfort it's meant to
+    # prevent -- and it's called on a loop, so a broker that discards these would otherwise
+    # re-arm "protection" every cycle forever, reporting success each time.
+    bad = [confirm_order(ib, tr, trade["instrument"], action, qty,
+                         timeout=ORDER_CONFIRM_SEC) for tr in (trades or [])]
+    dead = [b for b in bad if not b["ok"]]
+    # cancel the dead leg(s) by matching them back to the Trade objects -- a dead leg left
+    # resting is protection for a stop that will never fire in the intended way.
+    for b in dead:
+        for tr in (trades or []):
+            if int(getattr(getattr(tr, "order", tr), "orderId", 0) or 0) == b["order_id"]:
+                try:
+                    ib.cancelOrder(getattr(tr, "order", tr))
+                except Exception:                          # noqa: BLE001
+                    log.debug("reprotect: dead-leg cancel failed", exc_info=True)
+                break
+    if dead:
+        _statuses = ",".join(sorted({b["status"] or "unconfirmed" for b in dead}))
+        alert_order_failure({**dead[0], "symbol": trade["instrument"]},
+                            f"re-protect leg ({len(dead)}/{len(bad)} dead)")
+        return (f"{trade['instrument']}: re-protect order NOT working at broker (status "
+                f"{_statuses}) -- position still UNPROTECTED")
+    record_order_exec(trade["instrument"], action, qty,
+                      ",".join(b["status"] for b in bad),
+                      f"reprotect legs for trade #{trade['id']}")
     msg = f"{trade['instrument']}: re-armed bracket for {qty} SL {sl_px} TP {tp_px}"
     from dashboard.core import notable_events
     notable_events.record(f"Naked position re-protected: {msg}", level="warning")
@@ -2220,15 +2259,24 @@ def keep_cash_usd() -> dict:
         status["log"] = f"keep-cash-usd: FX order failed ({e})"
         log.warning("ib_exec: %s", status["log"])
         return status
-    # best-effort immediate status check -- placeOrder() doesn't block for a fill, so this
-    # only catches a FAST rejection, not a delayed one; the 5min cooldown is the real safety net
-    st = getattr(trade.orderStatus, "status", "") if trade else ""
-    if st in ("Cancelled", "Inactive", "ApiCancelled"):
-        status["log"] = f"keep-cash-usd: order REJECTED immediately (status={st}) -- check " \
-                        "the account has Forex trading permissions enabled"
+    # S1 (2026-10-01): the immediate status peek below only caught FAST rejections. This is the
+    # path that burned 224+ attempts in 3.5h with zero fills (see the retry-cooldown comment
+    # above), and it reads -- plausibly incorrectly -- as success whenever the status is still
+    # blank 0ms after placeOrder(). Wait for the broker's actual verdict instead.
+    _conf = confirm_order(ib, trade, "USDHKD", "BUY", usd_to_buy, timeout=ORDER_CONFIRM_SEC)
+    st = _conf["status"] or "unknown"
+    if not _conf["ok"]:
+        status["log"] = (f"keep-cash-usd: order NOT working at broker (status={st}"
+                         f"{' -- ' + _conf['message'] if _conf['message'] else ''})"
+                         + (" -- check the account has Forex trading permissions enabled"
+                            if _conf["status"].lower() in ("inactive", "rejected") else ""))
+        _sweep_note_failure(status["log"])          # shared consecutive-failure counter
         log.warning("ib_exec: %s", status["log"])
         return status
-    status["log"] = (f"keep-cash-usd: SUBMITTED (status={st or 'unknown'}) BUY ${usd_to_buy:,} "
+    _sweep_note_success()
+    record_order_exec("USDHKD", "BUY", usd_to_buy, _conf["status"],
+                      f"orderId={_conf['order_id']} keep-cash-usd")
+    status["log"] = (f"keep-cash-usd: WORKING (status={st}) BUY ${usd_to_buy:,} "
                      f"vs HKD {hkd:,.0f} -- not yet confirmed filled")
     log.info("ib_exec: %s", status["log"])
     return status
@@ -2562,10 +2610,26 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
                 o.account = acct
             return ib.placeOrder(contract, o)
         try:
-            ib_client.call(_send); out["sgov_sold"] = sell_shares
+            _t = ib_client.call(_send)
         except Exception as e:                     # noqa: BLE001
             out["log"] = f"withdrawal: SGOV sell failed ({e}); reserve set, sell SGOV manually"
             return out
+        # S1 (2026-10-01): confirm the sell actually worked. The operator is told
+        # "sold N SGOV... now withdraw MANUALLY" off the back of this line -- an unconfirmed
+        # sell would leave them withdrawing against cash that never materialised.
+        _conf = confirm_order(ib, _t, SGOV_SYMBOL, "SELL", sell_shares,
+                              timeout=ORDER_CONFIRM_SEC)
+        if not _conf["ok"]:
+            alert_order_failure({**_conf, "symbol": SGOV_SYMBOL},
+                                f"withdrawal reserve ${amount_usd:,.0f}")
+            out["log"] = (f"withdrawal: SGOV sell NOT working at broker (status "
+                          f"{_conf['status'] or 'unconfirmed'}) -- reserve is set but the cash "
+                          f"is NOT freed; do NOT withdraw yet")
+            log.warning("ib_exec: %s", out["log"])
+            return out
+        record_order_exec(SGOV_SYMBOL, "SELL", sell_shares, _conf["status"],
+                          f"orderId={_conf['order_id']} prepare_withdrawal")
+        out["sgov_sold"] = sell_shares
     out["log"] = (f"withdrawal READY: reserved ${amount_usd:,.0f}, sold {sell_shares} SGOV. "
                   f"Now withdraw ${amount_usd:,.0f} MANUALLY in IBKR, then run --withdraw-clear. "
                   f"Core ETF book untouched.")
