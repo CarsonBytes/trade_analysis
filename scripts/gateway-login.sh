@@ -131,9 +131,15 @@ else
     exit 1
 fi
 
+# ADDED 2026-10-04: the dashboard's own API connect can take ~70s after IBC
+# reports success. On 2026-10-04 it failed clientIds 31-34 with TimeoutError at
+# 06:17:45 and only logged `ib_client: connected` at 06:18:56 -- 69s into this
+# loop -- so a 60s window printed "gateway login NOT confirmed" for a gateway
+# that WAS connected, one second before the answer arrived. The deploy already
+# allows the dashboard 120s to start; this waits the same.
 DASH_OK=0
 waited=0
-while [ "$waited" -lt 60 ]; do
+while [ "$waited" -lt 120 ]; do
     if docker logs "$DASH_CONTAINER" --since 2m 2>&1 | grep -q "ib_client: connected"; then
         DASH_OK=1
         break
@@ -146,6 +152,6 @@ if [ "$DASH_OK" = "1" ]; then
     log "=== gateway-login OK: dashboard confirms real IB connection ==="
     exit 0
 else
-    log "!!! IBC logged success but dashboard never confirmed a real connection within 60s"
+    log "!!! IBC logged success but dashboard never confirmed a real connection within 120s"
     exit 1
 fi

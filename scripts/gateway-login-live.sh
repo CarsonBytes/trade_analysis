@@ -133,9 +133,12 @@ else
     exit 1
 fi
 
+# ADDED 2026-10-04: same 60s-vs-69s race as paper's gateway-login.sh -- the
+# dashboard's first API connect can land after IBC reports success, and the old
+# window declared NOT confirmed for a gateway that was actually connected.
 DASH_OK=0
 waited=0
-while [ "$waited" -lt 60 ]; do
+while [ "$waited" -lt 120 ]; do
     if docker logs "$DASH_CONTAINER" --since 2m 2>&1 | grep -q "ib_client: connected"; then
         DASH_OK=1
         break
@@ -148,6 +151,6 @@ if [ "$DASH_OK" = "1" ]; then
     log "=== gateway-login-live OK: dashboard confirms real IB connection ==="
     exit 0
 else
-    log "!!! IBC logged success but dashboard never confirmed a real connection within 60s"
+    log "!!! IBC logged success but dashboard never confirmed a real connection within 120s"
     exit 1
 fi
