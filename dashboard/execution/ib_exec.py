@@ -197,6 +197,18 @@ _ORDER_ACCEPTED = {"pendingsubmit", "presubmitted", "submitted", "apipending",
 # real terminal status rather than being reported as a failure on a maybe.
 _ORDER_SUCCESS = {"filled"}
 _ORDER_FAILED = {"inactive", "cancelled", "apicancelled", "rejected"}
+# ADDED 2026-10-03: IBKR states WHY it refused an order in a SEPARATE errorEvent (201 "Order
+# rejected", 110/200/202/10197), not in the orderStatus message -- which arrives blank. Measured
+# cost of that: 2026-09-22 -> 2026-10-03 every live entry (DIA #133-#139) and all 67 SGOV sweep
+# attempts reported only "order NOT working at broker (status Inactive)", which is unreadable.
+# The real cause was an account-level restriction ("not allowed to open a position: restricted
+# to close-only ... incomplete Passkey enrollment") and it took 12 days to find, because nothing
+# in the alert distinguished it from a transient glitch. confirm_order() now listens for the
+# broker's own rejection text during its (5s) confirm window and folds it into the verdict, so it
+# reaches order_exec_log AND the Telegram alert via the existing message plumbing.
+_ORDER_REJECT_CODES = {110, 200, 201, 202, 10197, 102, 103, 104, 129}
+_ORDER_REJECT_WORDS = ("rejected", "not allowed", "restricted", "close-only",
+                       "close only", "not permitted", "insufficient", "pacing")
 ORDER_EXEC_LOG_KEY = "order_exec_log"
 ORDER_EXEC_LOG_MAX = 100
 
@@ -225,6 +237,10 @@ def confirm_order(ib, trade, symbol: str, action: str = "", qty=None,
     ok=True only for statuses that mean the order is genuinely working at the broker. Anything
     terminal-and-dead is ok=False. Deliberately never raises: a monitoring helper must not be
     able to break a placement path.
+
+    "message" carries the broker's OWN rejection text when IBKR sent one during the confirm
+    window (see _ORDER_REJECT_CODES) -- that text is the difference between "status Inactive"
+    and an actionable "restricted to close-only ... incomplete Passkey enrollment".
     """
     out = {"ok": False, "status": "", "order_id": 0, "message": "", "filled": 0.0}
     if trade is None:
@@ -232,33 +248,67 @@ def confirm_order(ib, trade, symbol: str, action: str = "", qty=None,
         return out
     order = getattr(trade, "order", trade)
     out["order_id"] = int(getattr(order, "orderId", 0) or 0)
+
+    # Scoped listener: IBKR's rejection text arrives here, not on the orderStatus. Unhooked in
+    # the finally block so a long-lived IB object doesn't accumulate one listener per placement.
+    broker_notes: list[str] = []
+
+    def _grab_error(req_id, error):
+        try:
+            code = int(getattr(error, "errorCode", 0) or 0)
+        except Exception:                                   # noqa: BLE001
+            return
+        text = str(error).strip()
+        low = text.lower()
+        if code not in _ORDER_REJECT_CODES and not any(w in low for w in _ORDER_REJECT_WORDS):
+            return
+        entry = f"{code}: {text}" if code else text
+        if entry not in broker_notes:
+            broker_notes.append(entry)
+
     deadline = time.monotonic() + max(0.5, timeout)
-    st = getattr(trade, "orderStatus", None)
-    while True:
-        st = getattr(trade, "orderStatus", None)
-        status = str(getattr(st, "status", "") or "").strip()
-        filled = float(getattr(st, "filled", 0.0) or 0.0)
-        if status:
-            out["status"], out["filled"] = status, filled
-            out["message"] = str(getattr(st, "message", "") or "")
-            if status.lower() in _ORDER_FAILED:
+    # ib is None in unit tests; only hook the listener when there is a real IB object.
+    hook = getattr(ib, "errorEvent", None)
+    try:
+        if hook is not None:
+            hook += _grab_error
+        while True:
+            st = getattr(trade, "orderStatus", None)
+            status = str(getattr(st, "status", "") or "").strip()
+            filled = float(getattr(st, "filled", 0.0) or 0.0)
+            if status:
+                out["status"], out["filled"] = status, filled
+                out["message"] = str(getattr(st, "message", "") or "")
+                if status.lower() in _ORDER_FAILED:
+                    return out
+                if status.lower() in _ORDER_SUCCESS:
+                    out["ok"] = True
+                    return out
+                # A fast fill, or a clean 'Submitted', is enough; anything else still in flight
+                # keeps waiting until the window closes (then reports 'unconfirmed', never a
+                # false ok).
+                if status.lower() in _ORDER_ACCEPTED and (filled > 0
+                                                          or time.monotonic() >= deadline
+                                                          or status.lower() == "submitted"):
+                    out["ok"] = True
+                    return out
+            if time.monotonic() >= deadline:
+                out["status"] = out["status"] or "unconfirmed"
+                # No terminal status inside the window: NOT proof of failure (the order may
+                # still be working), so don't call it ok -- report unconfirmed and let the
+                # caller decide.
                 return out
-            if status.lower() in _ORDER_SUCCESS:
-                out["ok"] = True
-                return out
-            # A fast fill, or a clean 'Submitted', is enough; anything else still in flight keeps
-            # waiting until the window closes (then reports 'unconfirmed', never a false ok).
-            if status.lower() in _ORDER_ACCEPTED and (filled > 0
-                                                      or time.monotonic() >= deadline
-                                                      or status.lower() == "submitted"):
-                out["ok"] = True
-                return out
-        if time.monotonic() >= deadline:
-            out["status"] = out["status"] or "unconfirmed"
-            # No terminal status inside the window: NOT proof of failure (the order may still be
-            # working), so don't call it ok -- report unconfirmed and let the caller decide.
-            return out
-        time.sleep(0.25)
+            time.sleep(0.25)
+    finally:
+        try:
+            if hook is not None:
+                hook -= _grab_error
+        except Exception:                                   # noqa: BLE001
+            pass
+        if broker_notes:
+            detail = " | ".join(broker_notes)[:400]
+            out["message"] = (f"{out['message']} | broker: {detail}" if out["message"]
+                              else f"broker: {detail}")
 
 
 def confirm_bracket(ib, trades, symbol: str, action: str = "", qty=None,

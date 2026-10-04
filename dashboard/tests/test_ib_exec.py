@@ -1531,6 +1531,100 @@ def test_s1_confirm_order_distinguishes_verdicts():
     check("no submission at all -> nosubmit, NOT ok", (r["status"], r["ok"]), ("nosubmit", False))
 
 
+def test_confirm_order_surfaces_the_brokers_own_rejection_reason():
+    print("\nconfirm_order(): IBKR states WHY it refused in a separate errorEvent (201 etc.), "
+          "not in the orderStatus message -- which arrives blank. The real reason has to reach "
+          "order_exec_log AND the Telegram alert, or a close-only account looks identical to a "
+          "transient glitch (measured live 2026-09-22..2026-10-03: 67 sweep refusals and DIA "
+          "#133-#139 all reported only 'status Inactive'):")
+    from dashboard.execution import ib_exec
+
+    class _Events:
+        """Stand-in for ib_async's Event: `+=` / `-=` attach/detach ONE callback."""
+
+        def __init__(self):
+            self.fns = []
+
+        def __iadd__(self, fn):
+            self.fns.append(fn)
+            return self
+
+        def __isub__(self, fn):
+            if fn in self.fns:
+                self.fns.remove(fn)
+            return self
+
+        def __len__(self):
+            return len(self.fns)
+
+        def __iter__(self):
+            return iter(list(self.fns))
+
+    class _Err:
+        def __init__(self, code, text):
+            self.errorCode = code
+            self.errorText = text
+
+        def __str__(self):
+            return self.errorText
+
+    class _Trade:
+        """Delivers `err` into the IB object's errorEvent on the FIRST orderStatus read --
+        i.e. after confirm_order has attached its listener, the way the real socket would."""
+
+        def __init__(self, ib, status, err=None, message=""):
+            self._ib, self._fired, self._err = ib, False, err
+            self._status, self._message = status, message
+            self.order = type("O", (), {"orderId": 42, "permId": 1})()
+
+        @property
+        def orderStatus(self):
+            if not self._fired:
+                self._fired = True
+                if self._err is not None:
+                    for fn in list(getattr(self._ib, "errorEvent", []) or []):
+                        fn(42, self._err)
+            return type("S", (), {"status": self._status, "filled": 0.0,
+                                  "message": self._message})()
+
+    def _ib():
+        return type("IB", (), {"errorEvent": _Events()})()
+
+    # a) the rejection error arrives during the confirm window -> folded into the verdict
+    ib = _ib()
+    r = ib_exec.confirm_order(
+        ib,
+        _Trade(ib, "Inactive",
+               _Err(201, "Order rejected - reason:Not allowed to open a position: Your "
+                         "account is restricted to close-only transactions due to "
+                         "incomplete Passkey enrollment.")),
+        "SGOV", "BUY", 149, timeout=0.6)
+    check("close-only rejection still reads as NOT ok", r["ok"], False)
+    check("broker status preserved", r["status"], "Inactive")
+    check("broker's own reason is carried, not just 'Inactive'",
+          "close-only" in r["message"] and "Passkey" in r["message"], True)
+    check("the IBKR error code is in there too", "201" in r["message"], True)
+
+    # b) an unrelated error during the window must NOT be mislabelled as the reason
+    ib2 = _ib()
+    r = ib_exec.confirm_order(
+        ib2, _Trade(ib2, "Inactive", _Err(162, "Historical Market Data Service error: "
+                                                "query cancelled")),
+        "SGOV", "BUY", 149, timeout=0.6)
+    check("unrelated error is not attached", "Historical" in r["message"], False)
+    check("but the refusal is still NOT ok", r["ok"], False)
+
+    # c) the listener is unhooked -- no leak across placements on a long-lived IB object
+    check("errorEvent listener removed after confirm", len(ib.errorEvent), 0)
+    check("and after the second one too", len(ib2.errorEvent), 0)
+
+    # d) no broker text at all -> unchanged behaviour (blank message, status only)
+    ib3 = _ib()
+    r = ib_exec.confirm_order(ib3, _Trade(ib3, "Inactive"), "SGOV", "BUY", 149, timeout=0.6)
+    check("silent refusal stays silent when IB sends nothing", r["message"], "")
+    check("silent refusal still NOT ok", r["ok"], False)
+
+
 def test_s1_dead_bracket_parent_cancels_its_children():
     print("\nS1 confirm_bracket(): a dead parent must take its TP/SL children down with it -- "
           "orphan SELL legs against a position that doesn't exist are the latent-short hazard "
