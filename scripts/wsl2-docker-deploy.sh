@@ -22,6 +22,59 @@ DASH_URL="http://localhost:18080"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
+# --- code freshness proof (ADDED 2026-10-04) ----------------------------------
+# Three builds died on "TLS handshake timeout" (a WSL/VPN MTU blackhole) and the
+# deployed containers kept running sources from 2026-10-02 while the log happily
+# said "deploy OK" -- the pushes had landed in git, the containers had never
+# heard about them, and nothing in the output distinguished the two.
+#
+# So instead of trusting that `docker compose build` did what it said, compare
+# every .py the container is actually running against the freshly rsynced
+# source tree, byte for byte. An old image that happens to start cleanly now
+# fails loudly instead of passing as success.
+code_freshness_check() {
+    local container_manifest=/tmp/_quant_deploy_container_manifest
+    local source_manifest=/tmp/_quant_deploy_source_manifest
+
+    docker exec quant-dashboard-docker sh -c \
+        'cd /app && find dashboard analyst -name "*.py" -type f -exec sha256sum {} + 2>/dev/null | sort -k2' \
+        > "$container_manifest" 2>/dev/null
+    # Compared against the REPO working tree (/mnt/d/quant), not the rsync target
+    # (/home/cap/quant). Within one run they are identical, so the rsync target
+    # would also catch a failed build -- but only if the run got as far as rsync.
+    # The repo tree is the thing a push actually changes, so it is the only
+    # reference that also catches an image left behind by a deploy that never ran.
+    ( cd /mnt/d/quant && find dashboard analyst -name '*.py' -type f -exec sha256sum {} + 2>/dev/null | sort -k2 ) \
+        > "$source_manifest" 2>/dev/null
+
+    if [ ! -s "$container_manifest" ]; then
+        echo "!!! code freshness check: could not read the container's sources"
+        return 1
+    fi
+
+    local total=0 bad=0 hash path want
+    while read -r hash path; do
+        total=$((total + 1))
+        want=$(awk -v p="$path" '$2 == p { print $1; exit }' "$source_manifest")
+        if [ -z "$want" ]; then
+            echo "  stale: $path runs in the container but is gone from the source tree"
+            bad=$((bad + 1))
+        elif [ "$want" != "$hash" ]; then
+            echo "  STALE: $path (container ${hash:0:12}, source ${want:0:12})"
+            bad=$((bad + 1))
+        fi
+    done < "$container_manifest"
+
+    if [ "$bad" -ne 0 ]; then
+        echo "!!! code freshness: $bad of $total deployed .py file(s) differ from source --"
+        echo "    the image predates this push. 'docker compose build' reported success but"
+        echo "    did not produce the code that was sent (stale base image / failed pull)."
+        return 1
+    fi
+    echo "code freshness: all $total deployed .py files match the repo working tree"
+    return 0
+}
+
 {
     echo "=== deploy started $(ts) (triggered by: ${1:-manual}) ==="
 
@@ -108,10 +161,21 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
     # health-check result and continue regardless; the final summary below reflects both
     # outcomes accurately instead of a hard binary pass/fail.
     echo "$ok" > /tmp/_quant_deploy_health_ok
+
+    # Prove the code that is running is the code that was just synced (see the
+    # function's header for why "deploy OK" was not enough on its own). Runs
+    # after the health check because there has to be a container to inspect;
+    # if the health check already failed this reports 0 as well, which is the
+    # honest answer -- a deploy nobody has proven the contents of is not a deploy.
+    code_ok=0
+    code_freshness_check && code_ok=1
+    echo "$code_ok" > /tmp/_quant_deploy_code_ok
 } >> "$LOG" 2>&1
 
 health_ok=$(cat /tmp/_quant_deploy_health_ok 2>/dev/null || echo 0)
 rm -f /tmp/_quant_deploy_health_ok
+code_ok=$(cat /tmp/_quant_deploy_code_ok 2>/dev/null || echo 0)
+rm -f /tmp/_quant_deploy_code_ok
 
 # gateway-login.sh has its own log() calls appending to the same $LOG -- run it OUTSIDE the
 # redirect block above so its output isn't double-wrapped. Runs regardless of the dashboard
@@ -121,14 +185,22 @@ rm -f /tmp/_quant_deploy_health_ok
 bash /home/cap/quant/scripts/gateway-login.sh "${1:-manual}" >> "$LOG" 2>&1
 login_rc=$?
 {
-    if [ "$health_ok" = "1" ] && [ $login_rc -eq 0 ]; then
-        echo "=== deploy OK $(ts) -- dashboard healthy, gateway login confirmed ==="
+    if [ "$code_ok" != "1" ]; then
+        # Deliberately not "deploy OK": a container that is healthy and logged in
+        # but running last week's sources is still a failed deploy, and reporting
+        # it as success is what hid the 2026-10-04 stale-code outage.
+        echo "=== deploy STALE/UNVERIFIED $(ts) -- could not confirm the containers are"
+        echo "    running THIS push's code (see the code-freshness lines above;"
+        echo "    health_ok=$health_ok, login_rc=$login_rc) ==="
+    elif [ "$health_ok" = "1" ] && [ $login_rc -eq 0 ]; then
+        echo "=== deploy OK $(ts) -- code verified, dashboard healthy, gateway login confirmed ==="
     elif [ "$health_ok" = "1" ]; then
-        echo "=== deploy OK $(ts) -- dashboard healthy, gateway login NOT confirmed (see"
-        echo "    gateway-login entries above) -- will retry on its own connection cycle ==="
+        echo "=== deploy OK $(ts) -- code verified, dashboard healthy, gateway login NOT confirmed"
+        echo "    (see gateway-login entries above) -- will retry on its own connection cycle ==="
     else
-        echo "=== deploy PARTIAL $(ts) -- dashboard health check did not pass within ~120s"
-        echo "    (login_rc=$login_rc) -- check $DASH_URL and docker logs manually ==="
+        echo "=== deploy PARTIAL $(ts) -- code verified but dashboard health check did not pass"
+        echo "    within ~120s (login_rc=$login_rc) -- check $DASH_URL and docker logs manually ==="
     fi
 } >> "$LOG" 2>&1
+[ "$code_ok" = "1" ] || exit 1
 exit 0
