@@ -110,7 +110,25 @@ for t in $TARGETS; do
         log "$t: LOGIN OK (API port ${hex} open after ~${waited}s)"
     else
         log "$t: STUCK after ${POLL_SEC}s -- API port ${hex} still closed (approve the IBKR phone push, or see gateway-login-watchdog.sh for auto-retry)"
-        notify "IBKR ${t} gateway did NOT come back within ${POLL_SEC}s (reason: ${REASON}). Approve the second-factor prompt in the IBKR app now."
+        # NOTIFICATION_SPEC: route through gateway-push.sh (2026-10-05).
+        #
+        # This used to call the local notify() above, which is a bare curl with NO cooldown
+        # and NO level filter. The 2026-10-04 "page on the first cycle of an incident only"
+        # rule lives in the WATCHDOG (gateway-login-watchdog.sh line ~289), keyed on the
+        # per-hour attempt counter -- but this STUCK push originates here, so it bypassed
+        # that guard entirely. Measured 2026-10-05: the live gateway's port stayed closed
+        # across the whole 4h pre-open window, the watchdog cycled 3x per hour, and every
+        # single cycle pushed "approve the second-factor prompt" from THIS line. That is
+        # why the phone felt relentless despite the dedup work: the guard and the noise
+        # were in different scripts.
+        #
+        # gateway-push.sh gives us the per-key cooldown (COOLDOWN_KEY_SEC, 15min) and the
+        # hard daily cap, so a stuck gateway pages at most once per cooldown window per
+        # target instead of once per attempt. The key carries the target so paper and live
+        # incidents are tracked separately, and the reason is included because the human
+        # reading this needs to know WHY it is being asked to approve something.
+        /home/cap/quant/scripts/gateway-push.sh critical "relogin-stuck:${t}" \
+            "IBKR ${t} gateway did NOT come back within ${POLL_SEC}s (reason: ${REASON}). Approve the second-factor prompt in the IBKR app now."
     fi
 done
 log "=== relogin finished ($TARGET)"

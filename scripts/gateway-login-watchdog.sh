@@ -286,8 +286,19 @@ for t in paper live; do
         # no extra action available to the operator. A later hour of the same
         # outage re-arms `attempts` and pages again, and the MAX_ATTEMPTS
         # escalation above still pages once when auto-relogin gives up.
+        #
+        # FIXED 2026-10-05: `attempts` is keyed on $hourkey, so "first cycle of an
+        # incident" was really "first cycle of each HOUR". Combined with the `rm -f
+        # .since` below resetting the stall clock, a gateway whose port stayed closed
+        # across the whole pre-open window re-armed hourly and paged once per hour --
+        # measured 3 cycles/hour for 4 hours on 2026-10-05, 9 pages for one outage.
+        # The incident key below is anchored to when the port was FIRST seen closed
+        # (`since`, captured before the clock is reset), so one continuous outage pages
+        # once no matter how many hours it spans. A genuine recovery + new outage starts
+        # a fresh key because `since` is re-created in the port_open() branch above.
+        incident_key=$(printf '%s' "$since")
         if [ "$n" -eq 1 ]; then
-            /home/cap/quant/scripts/gateway-push.sh critical "cycle:$t" \
+            /home/cap/quant/scripts/gateway-push.sh critical "cycle:${t}:${incident_key}" \
                 "IBKR ${t} gateway not logged in -- relogin cycle ${n}/${MAX_ATTEMPTS} started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
         fi
         bash "$RELOGIN" "$t" "watchdog-cycle-${n}" >/dev/null 2>&1
