@@ -25,18 +25,51 @@ authoritative source.** Its "All" period correctly shows only what exists (09-03
 
 ### 0.1 Every IBKR path tested for the paper account (not assumed)
 
+**CORRECTION 2026-10-05 — the original conclusion in this section was WRONG.** The rows below
+are retained to record what was actually probed, but the inference drawn from them has been
+overturned by direct evidence (see 0.2).
+
 | path | result | evidence |
 |---|---|---|
-| Flex Web Service, 2026-07-08→09-02 | returns **`U12991898` only** | 371 KB report; account set = `{U12991898}`; zero `DU…` rows |
+| Flex Web Service, 2026-07-08→09-02, **live query** | returns **`U12991898` only** | 371 KB report; account set = `{U12991898}`; zero `DU…` rows |
 | Flex Web Service, 1-year window | `Status: Fail` (window rejected) | probe 2026-10-04 |
 | `reqAccountSummary` (TWS) | **current values only** — 0 tags carrying `prev*`/`yesterday`/`history`/`navseries` | probe on `DUK968178` |
 | `reqExecutions` (TWS) | **0 fills** from a fresh session | probe on `DUK968178` |
 | local DB scan (all tables + cache keys) | **0 rows** pre-2026-09-03 | `equity_history`, `cash_flows`, `paper_trades`, `ib_mirror` all checked |
 
-Flex is account-scoped by login and IBKR issues statements for **live** accounts; a `DU`-prefixed
-demo account is not statement-eligible. **No IBKR API yields the paper account's historical
-NAV.** The only remaining route is a journal-derived reconstruction (§3), which is a
-*reconstruction* rather than a measurement.
+**What went wrong:** the Flex probe used the **live** Flex query ID. A Flex query is scoped to
+the account it was created against, so it can only ever return that one account. Returning
+`{U12991898}` therefore says nothing about whether the demo account is statement-eligible. The
+error was generalising a per-query scoping property into a per-account ineligibility claim, and
+not testing it — the very thing this section's own title promises to avoid.
+
+### 0.2 Paper Flex DOES work — measured, not assumed
+
+The user supplied a **paper-specific** Flex token + query (`1659951`, token held outside the
+repo at `C:\Users\Cap\Downloads\token_paper.txt`). Result:
+
+```
+"BOF","DUK968178","StatementOfFundsNetLiquidation paper",...
+```
+
+Paper's historical NAV **is** available from IBKR, and it has been backfilled:
+
+| window | result |
+|---|---|
+| Flex `20260601`→`20260930` (query `1659951`) | **89 NAV days**, `2026-05-29 .. 2026-09-30` |
+| Flex `20261001`→`20261004` | 2 days; October is not a closed period so coverage is partial |
+| backfilled into `equity_history` | 42 rows (`07-07..09-02`) then 27 more (`05-29..07-06`) |
+| paper `equity_history` now | **2,362 rows, 101 days, `2026-05-29 .. 2026-10-04`** |
+| deposits/withdrawals in window | **none** (`CNAV` `DepositsWithdrawals` = 0 for all 90 days IBKR covered) |
+
+Cross-check against paper's independently-recorded data (20 days from `09-03`, recorded from
+the live broker feed) agreed to **0.239% mean / 1.490% max** — the residual is sampling-time
+skew (the dashboard's last sample of a day is not the close), consistent with live's 0.072%.
+
+**What this means for §0.1's conclusion:** it is void. Paper NAV is a *measurement* from IBKR,
+not a §3 *reconstruction*. §3 is now only a fallback for days Flex has not yet generated.
+The practical lesson is recorded in `docs/NOTIFICATION_SPEC.md`'s sibling rule: a negative
+result from a scoped probe is not evidence of absence.
 
 
 ## 1. Three bugs this work exposed (all fixed 2026-10-04, all in this file's scope)
@@ -109,7 +142,9 @@ weeks because nothing ever backfilled it. Spec a **one-shot + periodic Flex back
   committed), `--from/--to`, **dry-run by default**, refuses to overwrite `MEASURED` rows,
   writes `MEASURED` rows stamped at `23:59:59`, and **asserts `inception_ts < first_row_ts`
   before committing** (the B2 guard);
-- scheduled monthly against live only (demo accounts are skipped — they return nothing).
+- scheduled monthly against live **and** paper — each with its own Flex query ID, since a query
+  is scoped to one account (corrected 2026-10-05; the old "demo accounts return nothing" note
+  was an artefact of probing paper with the live query).
 
 ## 4. Verification
 
