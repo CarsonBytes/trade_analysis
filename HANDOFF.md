@@ -1,7 +1,443 @@
 # Project Handoff — D:\quant quant trading platform
 
 **Purpose of this doc:** let a new session continue the work without prior context.
-Last updated 2026-10-04.
+Last updated 2026-10-17.
+
+---
+
+### SHIPPED 2026-10-14: LIVE gateway end-to-end -- passkey login, TrustedIPs relay chain, dark-period P&L backfill
+
+**Passkey login works reliably.** `ibkr-live-login.ps1` (KeepAlive default, 210s timeout)
+plus the elevated Passkey Helper automate everything down to the YubiKey touch. A clean
+restart (kill the whole IBC cmd tree, relaunch) binds the local API on 4001 within ~24s.
+Successful run 23:53:28–23:53:39: port 4001 open, handshake `server version 176`.
+
+**Root cause of "no local API listener" / remote EOF: `TrustedIPs=127.0.0.1` in
+`C:\Jts-Live\jts.ini`.** The gateway accepts a TCP connection from a remote IP (WSL /
+container) then closes it the moment any data arrives. Localhost handshakes worked; every
+WSL/container handshake got EOF. The Gateway has NO "Enable ActiveX and Socket API"
+checkbox (that is TWS-only) -- do not look for it again.
+
+**Relay chain (verified handshake at every hop, 2026-10-14):**
+```
+dashboard container -> host.docker.internal:4003 (win-gateway-relay socat, compose)
+  -> Windows:4003 (user-mode TcpRelay, scheduled task \IBKR\API Relay)
+  -> 127.0.0.1:4001 (IBKR Gateway API, satisfies TrustedIPs)
+```
+- Windows relay: `scripts/windows/win-api-relay.ps1` (C# TcpRelay, 0.0.0.0:4003 ->
+  127.0.0.1:4001). Registered as scheduled task `\IBKR\API Relay` at logon (Limited
+  privileges; port 4003 >1024, no admin needed) by `setup-api-relay.ps1`.
+- `win-gateway-relay` compose service now sets `WIN_PORT=4003` (was 4001 -- that was the
+  TrustedIPs bug). The script `scripts/win-gateway-relay.sh` resolves Windows' address at
+  start (WSL NAT) and socats to it.
+- Firewall: user added the inbound allow for TCP 4003 ("IBKR API Relay 4003").
+- Dashboard `LIVE_IB_PORT=4003`, `IB_HOST=host.docker.internal`, clientIds 41-44.
+- Verified: `ib_hs2.py` handshake OK from WSL (`127.0.0.1:4003`) and from the dashboard
+  container (`host.docker.internal:4003`); dashboard log `ib_client: connected ... clientId=41`
+  at 23:25:26 and again 23:52:12 after the relay was recreated via compose.
+
+**Dashboard is live on U12991898** (`LIVE trading ENABLED -- REAL MONEY`): mirror-qty heal
+corrected QQQ 8->7 from broker truth; flagged position #79 QQQ auto-reopened (was EXPIRED);
+cash-sweep cycle runs (market closed, deferred to next US session).
+
+**Dark-period P&L backfilled (2026-10-05..10-12).** The gateway was HELD that week; the
+dashboard kept sampling but every reading froze at 253,287.0 with stale cash/gpv. Real EOD
+NAV pulled from IBKR Flex (live query `1659726`, token in `C:\Users\Cap\Downloads\token.txt`
+-- NEVER commit) and written as one EOD row per trading day in the legacy 3-field shape
+(no cash/gpv, so `detect_external_cash_flow` degrades gracefully instead of consuming stale
+values). Backup under store key `equity_history_darkperiod_backup`. Script:
+`tmp/live_backfill_dark.py` (dry-run by default). Note: IBKR rate-limits Flex probes
+(error 1025) -- do not spam windows. Oct 3 2026 is a Saturday (no market).
+
+**Resolved same day (2026-10-14 afternoon):** login success test now uses a real API
+handshake (`ib-api-handshake.ps1`, `LoggedIn`), gateway-hold released (cleared
+`/home/cap/.container-hold/quant-ibgateway-live-docker` directly -- NOT via
+`gateway-hold.sh release`, which would start the parked Docker gateway).
+
+---
+
+### SHIPPED 2026-10-14 (ops): 6 operational optimizations for the LIVE gateway
+
+1. **Logon auto-start** — `scripts/windows/ibkr-live-autostart.ps1` (+ `.vbs` hidden
+   launcher) registered as scheduled task `\IBKR\Live Auto-Start` (AtLogOn, Limited,
+   hidden). Mid-week it is fully unattended (IBC reuses the persisted session token; the
+   script just launches IBC-Live and waits for a handshake). At the weekly passkey
+   boundary it auto-clicks "Authenticate >", triggers `\IBKR\Passkey Helper`, and waits --
+   the Windows Security dialog is the notification; the human only touches the YubiKey.
+   No MessageBoxes (runs hidden at every logon). Timeout 300s; on timeout IBC is left
+   running so a late tap still completes (same KeepAlive philosophy as the manual script).
+
+2. **LIVE log-spam fix** — `dashboard/execution/ib_exec.py` now has a module-level
+   `_LIVE_WARNED` flag; the "LIVE trading ENABLED ... REAL MONEY" warning logs once per
+   process instead of ~126 times per 30 min. **Deployed** via
+   `docker compose -f docker-compose.live.yml up -d --build dashboard` at 11:26; verified
+   the count dropped to 1.
+
+3. **Handshake success test** — `ibkr-live-login.ps1` now dot-sources
+   `scripts/windows/ib-api-handshake.ps1` and uses `LoggedIn` (Test-IbApiHandshake to
+   127.0.0.1:4001) for the pre-check, the main wait loop, the adopt-loop, and the grace
+   window. Replaces the port-open-only checks that produced false "logged in" reports.
+   **CAVEAT added 2026-10-17: the probe itself returned `$false` ALWAYS until 16:50 that
+   day (parse bug, see the MIN-2FA block's `ib-api-handshake.ps1` bugfix) -- every
+   handshake outcome in the logs before then is a false negative and confirmation had
+   fallen back to "IBC log + port + no auth dialog".**
+
+4. **AutoRestartTime verification** — **SUPERSEDED 2026-10-17, see the 2026-10-17
+   section below.** Original claim ("gateway only rewrites the file after a token-based
+   re-login, not after a passkey login") is WRONG: after the full-passkey login of
+   Oct 13 23:53 the file was absent at 08:21 but present at Oct 14 20:30. Correct model:
+   written at the moment of a healthy gateway's scheduled 20:30 shutdown, consumed
+   seconds later by the launcher. IBC cold restart scheduled for **2026-10-18 20:30**
+   (Sunday, full passkey). Check script `scripts/windows/check-autorestart.ps1`, output
+   `C:\IBC-Live\Logs\autorestart-check.log`.
+
+5. **Weekly Flex NAV reconciliation** — `scripts/flex_nav_reconcile.py` (runs in the live
+   container): ONE Flex SendRequest + GetStatement per run (rate-limit safe), detects
+   flat-placeholder stretches (>=2 consecutive trading days with identical last NAV),
+   flags by default, patches (3-field EOD rows, backup key
+   `equity_history_flexrecon_backup`) only with `--commit`. Token read from
+   `/mnt/c/Users/Cap/Downloads/token.txt` (WSL) or `C:\Users\Cap\Downloads\token.txt`
+   (Windows); fails visibly if missing. Wrapper `scripts/flex_nav_reconcile_weekly.sh`
+   copies the token into the container and runs the script; cron entry
+   `0 9 * * 1` (Mondays 09:00 WSL) added. Dry-run test hit Flex error 1025 (still
+   rate-limited from earlier probing) -- will work once the limit expires; do NOT probe
+   more windows before then.
+
+6. **Disk cleanup** — deep `docker image prune -af` + `docker builder prune -af`
+   reclaimed ~4.5 GB (build cache 4.45 GB, images ~7 MB); daily prune task
+   (`D:\claude\docker-prune.ps1`, runs 04:00, LastResult=0) keeps a 72h window so old
+   rebuild layers linger until then. `tmp/` cleaned of stale probe scripts and debug
+   screenshots (1.3 MB remaining, was ~5 MB of files). D:\ still 93% full (69 GB free of
+   932 GB) -- the bulk is not Docker; a full D:\ scan timed out and was skipped.
+
+**Scheduled/one-time tasks registered today:** `\IBKR\Live Auto-Start` (AtLogOn),
+`\IBKR\Autorestart Check 20261014` (once, 2026-10-14 20:35).
+
+---
+
+### 2026-10-17: autorestart token model CORRECTED + restart guards + 2-day gateway outage (Oct 15–17)
+
+**Corrected token-file model (supersedes the old claim above).** The `autorestart` file
+(`C:\Jts-Live\ajaninkbfndcbgmelgahgpfcmhmgggpefgeamgbo\autorestart`, IBKR's own
+`AutoRestartDescriptor[autoRestartType=DAILY, token=XYZSessionToken[type=TST...]]`) is
+**not** a persistent credential written at login. It is written at the moment a *healthy*
+gateway shuts down for its scheduled 20:30 restart, and consumed+deleted by the launcher
+seconds later. Proof chain (autorestart-check.log + launcher.log + IBC logs):
+
+| Moment | File | Line |
+|---|---|---|
+| Oct 13 23:53 full-passkey login | absent | absent at Oct 14 08:21 check |
+| Oct 14 20:30:08 gateway shuts down for daily restart | appears | `autorestart file found ... authentication will not be required` |
+| Oct 14 20:30:10 launcher | read + deleted | `Reading data from autorestart` -> `Deleting` |
+| Oct 14 20:35:01 our check | absent | consumed 25s earlier |
+
+Same shape Aug 17: session start 20:17 `not found` -> `found` at 20:30. **Consequences:**
+(a) right after any passkey login the file is *expected* absent -- it is not a bug;
+(b) a session that never reaches a healthy 20:30 (killed, crashed, rebooted, 2FA timeout)
+never produces one, so the *next* start demands a full passkey; (c) the chain self-sustains
+only while each session survives to its 20:30.
+
+**What actually broke the chain (Oct 14–16 incident timeline):**
+1. Oct 14 20:30 token restart ran but **died instead of coming up**: `4001 reachable:
+   False` at 20:35, no IBC process at 20:52. (Root cause NOT identified -- a token-based
+   restart silently failing is still an open question.)
+2. 20:52 manual login: PIN entered 20:52:42, handshake never confirmed -> gave up 20:57,
+   left running.
+3. 21:35+21:36 `restart-live-gateway.ps1` run **twice within 34s** -> two IBC instances
+   launched/killed in alternation -> two helper runs found "no Security dialog" -> chaos.
+4. 21:38 third attempt -> touch -> **confirmed 21:39:07** (via `LoginLooksDone` fallback).
+5. Overnight machine reboot before Oct 15 20:30 killed that session -> no file written.
+6. Oct 15 08:58 logon autostart -> full 2FA -> PIN entered, **no touch** -> timed out.
+7. Oct 15 23:24 logon autostart -> IBC 2FA dialog appeared 23:25:54 but the Windows
+   passkey chooser never showed (`no Security dialog within 60s`) -> dialog self-closed
+   23:35:21 (571s) -> Gateway sat logged-out; window **closed 2026-10-16 10:25:52,
+   Normal exit** -> gateway DOWN since, unnoticed ~2 days; dashboard failing
+   (`broker unreachable`) until relaunch 2026-10-17.
+
+**Shipped 2026-10-17:**
+- `restart-live-gateway.ps1` now has **guards 0a/0b**: named mutex
+  (`Global\IBKRLiveRestart`) rejects concurrent runs outright (fixes the 34s double-run),
+  and it refuses to run while `ibkr-live-login.ps1` (manual or autostart) is already in
+  progress -- killing mid-login is what caused the Oct 14 collision. Rejected runs log
+  `REJECTED: ...` to `live-login.log`.
+- **Second cause of the 2-day outage, found while restoring: the Windows API Relay task
+  was DEAD.** `\IBKR\API Relay` last started Oct 15 23:24:33 and died with
+  `LastTaskResult=0xC000013A` (console Ctrl+C/close) at ~Oct 16 10:26 (10s after the
+  Gateway window closed), never restarted -- so nothing listened on the IPv4
+  `0.0.0.0:4003` for ~28h (only `wslrelay.exe` on `::1:4003`, which made the naive
+  `Get-NetTCPConnection -LocalPort 4003` check give a FALSE "UP" -- test
+  `127.0.0.1`/`172.27.64.1:4003` with `Test-NetConnection` instead). Relay container
+  logged `socat ... Connection timed out` to `172.27.64.1:4003` the whole time;
+  dashboard kept `TimeoutError ... falling back`. Fixes applied:
+  - `win-api-relay.ps1` accept loop hardened: a thrown socket error now logs
+    `ACCEPT ERROR: ... -- retrying in 3s`, restarts the listener, and continues instead
+    of killing the process (the bare `AcceptTcpClient()` loop was the death mechanism).
+  - Task restart-on-failure raised `-RestartCount 3 -> 999` (1 min interval) on the live
+    task AND in `setup-api-relay.ps1` (the old cap of 3 evidently did not cover this
+    death).
+  - Task restarted 14:59:33; dashboard reconnected `clientId=41` at 14:59:39 with
+    `LIVE trading ENABLED for U12991898`.
+- Full restore sequence 2026-10-17: 14:52:10 manual `ibkr-live-login.ps1` -> touch ->
+  confirmed 14:52:50 (4001 up, `LoginLooksDone`); relay task restart 14:59:33 ->
+  dashboard 14:59:39. Gateway had been down Oct 16 10:25 -> Oct 17 14:52.
+- This outage proves a **watchdog gap**: nothing alerted on a dead gateway (28h) OR a
+  dead relay (28h) -- the dashboard logged `broker unreachable`/`TimeoutError` the whole
+  time and nobody read it. **CLOSED same day -- see the MIN-2FA block below.**
+
+### MIN-2FA spec (2026-10-17 afternoon): 1 planned touch/week + silent-outage detection -- ALL SHIPPED & TESTED
+
+**Target state:** exactly 1 planned passkey touch/week (Sunday 20:30 cold restart), zero
+otherwise; Docker daily restart kept; any gateway/relay death paged within ~3 min.
+**Answers to the two standing questions:** (a) the gateway's daily 20:30 restart does NOT
+cost or reset 2FA -- it *consumes* the autorestart file but is itself token-based and
+re-arms the cycle (`Daily auto-restart is enabled` + `SOFT -> TST` conversion, launcher.log
+Oct 17 14:52); (b) the Docker daily restart never touches the gateway/token (separate OS
+domain, verified Oct 14). **Measured 2FA leak inventory:** Windows Update forced reboots
+x3 in 2 days (Oct 13 20:07, Oct 15 08:45+08:46 -- `MoUsoCoreWorker`/`TrustedInstaller`),
+one abrupt power-off (boot Oct 15 23:24 with NO shutdown event), the unexplained Oct 14
+token-restart death (forensics destroyed by per-launch log overwrite -- fixed by P1), and
+the weekly cold restart (by design).
+
+**P1 -- observability + log preservation (was: every launch destroyed forensics):**
+- Task `\IBKR\Restart Observe`, daily **20:29** + **20:34** (NextRun verified), running
+  `scripts/windows/restart-observe.ps1`. 20:29 archives `IBC-*.txt` + `C:\Jts-Live\launcher.log`
+  to `C:\IBC-Live\Logs\archived\<stamp>_pre\` BEFORE the 20:30 restart overwrites them and
+  records autorestart-file existence/mtime ONLY (never token bytes), IBC pids, 4001/4003
+  owners. 20:34 records post-restart: new pid, `file found/not found`, `Login has
+  completed`, 2FA initiated, cold-restart date (sliced from the LAST launcher header so a
+  previous session can't fake a healthy result), 4001/4003 owners. Log:
+  `C:\IBC-Live\Logs\restart-observe.log`. Both phases tested manually.
+- `ibkr-live-login.ps1` now also archives both logs pre-launch (120s dedup), covering
+  manual/autostart/watchdog launches.
+
+**P2 -- Windows Update can no longer reboot the box unattended:** elevated run of
+`scripts/windows/set-wu-policy.ps1` (15:30, UAC approved) set
+`HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU\NoAutoRebootWithLoggedOnUsers=1`,
+dual read-back confirmed. Ritual: after any MANUAL reboot expect exactly one touch (the
+logon autostart raises the prompt). Non-elevated `Register-ScheduledTask -RunLevel Highest`
+is denied (0x80070005) on this box -- use `Start-Process -Verb RunAs` for HKLM work.
+
+**P3 -- watchdog.ps1 extended with the gateway/relay layer (restarts via Startup VBS;
+final pid 30064):** every 20s: `Test-GatewayUp` (4001 listening AND IBC-Live java) and
+`Test-RelayUp` (`0.0.0.0:4003` owned by **powershell** -- explicitly excluding
+`wslrelay.exe`'s `::1:4003`, which made a naive port check report false-UP for the whole
+28h outage). Grace **6 cycles (~2 min)** so the planned 20:30 restart blip never alarms.
+On failure after grace: toast (`scripts/windows/toast.ps1`, detached NotifyIcon balloon) +
+Telegram `critical` (`gateway:ibc4001` / `gateway:relay4003`; 15-min per-key cooldown,
+10/day cap in gateway-push.sh) + **auto-launch `ibkr-live-login.ps1`** (never double: skips
+if a login is already in progress; re-prompts every ~5 min only while no login process
+runs). Relay additionally gets `Start-ScheduledTask '\IBKR\API Relay'`. Recoveries log +
+`error`-level digest notice (never pages). Header comment in watchdog.ps1 documents it.
+
+**P4 -- Docker Daily Restart trigger moved 20:30 -> 20:45** (de-stacked from the gateway
+restart; NextRun verified tonight 20:45). Prune task 04:00 untouched.
+
+**P5 -- Sunday 20:30 cold restart unchanged = THE single planned weekly touch.**
+Deliberately NOT extending/disabling `ColdRestartTime`: an unattended mid-week IBKR
+session expiry would turn a scheduled touch into an unpredictable outage.
+
+**P6 -- daily self-audit at 20:50 (task `\IBKR\Restart Verify`): the verdict is pushed,
+nobody has to read logs manually.** `scripts/windows/restart-verify.ps1` parses today's
+PRE/POST records from `restart-observe.log` and asserts 12 invariants of a healthy token
+restart: observe task ran (LastResult 0), pre+post records present, archive dir exists,
+`restarted=yes`, 4001+relay up at 20:34, `finding='autorestart file found'`,
+`loginCompleted=yes`, `cold=` next Sunday 20:30, no stuck passkey prompt, gateway healthy
+at verify time. Two deliberate soft rules (same-day runs only): a login that finished
+between the 20:34 POST and the 20:50 check still counts (`login_completed` re-confirm via
+real API handshake -> `confirmed-by-verify(late)`), and a 20:34 security prompt is only
+"stuck" if the handshake is ALSO down at 20:50. **Sunday exemption:** on the cold-restart
+night `finding` is NOT asserted -- file absent + full passkey are by design (P5) -- so the
+one planned weekly touch can never false-page; Sunday PASS messages read "Sunday cold
+restart done". Forensic `-ForDate` runs skip the same-day soft rules (POST is
+authoritative). One push through gateway-push.sh: **PASS -> `error`** (digest trail,
+never pages), **FAIL -> `critical`** (pages Telegram WITH the failed-check list; key
+`restart-verify`), **SKIPPED -> `info`** (catch-up run before 20:50 / machine booted past
+the 20:30 window / both records absent while the gateway is healthy = slept across the
+window -- benign, the chain re-arms at the next healthy 20:30; gateway NOT healthy with
+records absent is a real FAIL and pages).
+**Three-part audit trail BY DESIGN (debugging completeness):**
+- `C:\IBC-Live\Logs\restart-verify.log`: `START` -> `TASKINFO` (observe task lastRun/
+  lastResult) -> verbatim `PRE_RAW`/`POST_RAW` -> one `CHECK name=PASS|FAIL <observed>`
+  line per invariant (observed values, never booleans) -> `OBSERVE` (2faInitiated/
+  autorestart_at_post -- logged, deliberately NOT asserted while token-relogin semantics
+  are unpinned) -> `SUMMARY` -> `PUSH_ISSUED` -> `PUSH_AUDIT` (the actual alerts.jsonl
+  outcome, read back ~1s after the push, so "was it delivered?" is answered right there)
+- `restart-observe.log` now carries `START requested=.. detected=.. clock=..` / `END
+  phase=.. ok=1` pairs -- a missed run shows as an ABSENT START, a crash as START without
+  END, a late/shifted trigger is visible from `clock=` vs 20:29/20:34
+- `D:\claude\alerts\audit\alerts.jsonl` -- the shared gateway-push.sh delivery record
+Tested before registration: healthy synthetic 11/12 (only FAIL = observe task genuinely
+never run -- correct), broken synthetic adds `login_completed`, Sunday synthetic shows
+`token_finding=SKIP` + cold expectation `2026/10/25 20:30`, default run SKIPPED+`info`,
+full push plumbing (exit=0 + PUSH_AUDIT readback), task run end-to-end
+`lastResult=0x00000000`. The first test round is what exposed the `ib-api-handshake.ps1`
+bug above (`gateway_now` false-failed against a healthy gateway) -- fixed, True 3/3.
+Manual/forensic runs: `-NoPush` (log only), `-ForDate <yyyy-MM-dd>` (audit a past evening),
+`-ObserveLog <copy>` (test against synthetic records).
+
+**MIN-2FA evening schedule (single source of truth -- update THIS table when a trigger moves):**
+
+| When (daily) | Task / actor | Script | Output |
+|---|---|---|---|
+| 20:29 | `\IBKR\Restart Observe` (pre) | `restart-observe.ps1` | `Logs\archived\*_pre\`, state file, observe.log `START`/`PRE` |
+| 20:30 | IBC token warm restart (Sunday = cold, the weekly touch) | `config.ini` AutoRestartTime/ColdRestartTime | launcher/IBC logs (archived at 20:29) |
+| 20:34 | `\IBKR\Restart Observe` (post) | `restart-observe.ps1` | observe.log `POST`/`END` |
+| 20:45 | `Docker Daily Restart` (moved from 20:30, P4) | `D:\claude\docker-daily-restart.ps1` | docker-daily-restart.log |
+| 20:50 | `\IBKR\Restart Verify` (P6) | `restart-verify.ps1` | verify.log + Telegram verdict |
+| every 20s | watchdog (Startup VBS, P3) | `watchdog.ps1` | watchdog.log + toast/Telegram/auto-login on gateway or relay death |
+| 04:00 | `Docker Daily Prune` | `D:\claude\docker-prune.ps1` | LastResult 0 |
+
+
+**`gateway-push.sh` BUG FOUND BY THE TESTS AND FIXED:** the parser read `level="${2:-}"`
+-- the KEY, not the level -- so the case list never matched and `*` forced **every 3-arg
+call to `critical`**: info/error calls (recovery notices, digest-only restart restarts)
+were paging Telegram, violating NOTIFICATION_SPEC v1. Caught live when an `info` recovery
+came back `level:critical, sent`. Fixed to `level="${1:-}"`, synced to the deployed
+`/home/cap/quant` copy (byte-identical), verified both paths WITHOUT paging:
+`info` -> `suppressed-level`, `critical` -> reached the cooldown check. Callers
+(gateway-login-watchdog, gateway-relogin, watchdog.ps1) all use `<level> <key> <msg>` and
+now get the documented behavior: only `critical` pages.
+
+**Test evidence (2026-10-17):** toast balloon launched; Telegram `gateway:test` sent
+http 200; relay failure injection: task stopped 15:29:37 -> detected 15:29:53 (16s) ->
+toast + `critical` page + `Start-ScheduledTask` 15:32:02 (grace honored) -> **RECOVERED
+15:32:27** (task Running, listener pid 28192) -> digest notice. All six PowerShell scripts
+parse clean, `bash -n` clean. **Regression suite (permanent):**
+`scripts\windows\test-min2fa.ps1` 28 checks + `uv run pytest dashboard/tests -q` 321
+passed -- see the "2026-10-17 evening" section.
+
+**`ib-api-handshake.ps1` BUG FOUND + FIXED (2026-10-17 16:50) -- the probe had NEVER once
+returned True:** it built its length bytes with
+`[byte[]]@( ($len -shr 24) -band 0xFF, ... )`; PowerShell parses that comma list so
+`-band`'s operand becomes an `Object[]`, throws `op_BitwiseAnd not found on
+System.Object[]`, and `catch { return $false }` swallowed the exception every time.
+Caught while wiring restart-verify's `gateway_now` check: the probe said False while
+python `tmp/ib_hs2.py` on the same wire read `server version: b'176'` + `HANDSHAKE OK`.
+Fixed to `[byte[]][BitConverter]::GetBytes([IPAddress]::HostToNetworkOrder($len))`;
+now True 3/3 with the dashboard connected. Consequences:
+(1) **every `handshake never succeeded` / `probe blocked by an existing API client` line
+in live-login.log (Oct 14 20:57+21:39, Oct 15 09:03+23:29, Oct 17 14:52) was this bug's
+false negative -- the "blocked by an existing API client" theory recorded in those lines
+is WRONG; multiple concurrent API clients are fine** (verified: probe True with the
+dashboard's session up);
+(2) `LoggedIn` pre-check + main wait + adopt + grace (ibkr-live-login.ps1) and the weekly
+boundary wait (ibkr-live-autostart.ps1) now confirm against real state instead of always
+timing out into their fallbacks -- the pre-check now actually protects against re-running
+login against a healthy gateway;
+(3) restart-verify's handshake-at-20:50 checks are real evidence. See P6.
+
+**Automated verification tonight (no manual step required):** 20:29 pre-archive -> 20:30
+gateway token restart (watchdog silent if healthy; toast + critical + auto-login within
+~3 min if it dies) -> 20:34 POST record -> 20:45 Docker restart -> **20:50 Restart Verify
+pushes the verdict itself**: `quant: 20:50 verify PASS ...` is the green light, a
+`critical` page arrives with the failed-check list to start from, full per-check evidence
+in `restart-verify.log`. Two consecutive clean evenings = the 1-touch/week claim is
+proven.
+
+**DECISION TABLE -- LIVE gateway triage (follow this; do not improvise):**
+
+| Symptom | Action | Never do |
+|---|---|---|
+| Dashboard `broker unreachable`, `4001` listening, IBC running | relay/ports first: `4003` relay task, `win-gateway-relay` container, handshake probe | kill IBC |
+| `4001` NOT listening, no IBC process (gateway dead) | run `restart-live-gateway.ps1` **ONCE**, touch YubiKey | run it twice / run `ibkr-live-login.ps1` concurrently (guards reject, but don't fight them) |
+| 2FA/passkey dialog pending | touch the YubiKey in the existing window; late touch is fine (KeepAlive) | start a second login or restart while a prompt is pending |
+| Docker containers down/old | `wsl --shutdown` + auto-restart, or `docker compose up -d` -- containers only | touch the Windows gateway; Docker restarts do NOT involve it |
+| 20:30 daily warm restart didn't come up (like Oct 14) | `restart-live-gateway.ps1` once + touch | assume it self-heals; it didn't |
+| Sunday 20:30 cold restart | full passkey by design (cold restart 2026-10-18 20:30) | treat as a bug |
+| General rule | **never kill IBC unless it is actually broken** | "restart to be safe" |
+
+**Open questions (unresolved):** (1) why the Oct 14 20:30 token restart died instead of
+coming up; (2) exactly *when* during a session IBKR writes the file (all evidence points
+to the clean-20:30-shutdown moment, but the write itself is not logged); (3) why the Oct 15
+23:25 attempt raised IBC's 2FA dialog but never the Windows Security passkey chooser.
+
+---
+
+### 2026-10-17 evening: feature regression suite (28/28 + 321) + Oct 15–16 equity_history BACKFILLED via Flex CSV
+
+**Re-runnable feature test suite -- 28/28 PASS.** `powershell -File
+scripts\windows\test-min2fa.ps1` (exit code = failed checks, ~1 min, safe at any time --
+by construction it cannot page Telegram: info/error/warning never leave the box, critical
+cases are cooldown-suppressed in a temp state dir with fake Telegram creds, verify runs
+use `-NoPush`). Covers: parse of all 6 stack scripts; handshake True on `:4001` / False on
+a closed port; the 8-case offline gateway-push level matrix (`scripts/gateway_push_test.sh`,
+also runnable standalone via `wsl -e bash /mnt/d/quant/scripts/gateway_push_test.sh` --
+legacy 1-arg coerced to critical, unknown level coerced, per-level audit fields
+`suppressed-level`/`suppressed-cooldown-key` + `digest_eligible`, deployed-copy `diff`);
+port ownership (`4001` java, `4003` `0.0.0.0` not wslrelay); watchdog process + pid file;
+WU policy `NoAutoRebootWithLoggedOnUsers=1` at `HKLM:\SOFTWARE\Policies\Microsoft\Windows\
+WindowsUpdate\AU` (HANDOFF P2 path -- note NOT `CurrentVersion\Policies\System`); task
+triggers as DAILY (observe 20:29+20:34, verify 20:50, docker restart 20:45, prune 04:00,
+relay Running); observe/verify log record structure; **4 synthetic restart-verify runs
+(-NoPush)**: healthy Friday → `failed=1 list=[observe_task]` (lastRun semantics: the task
+re-registered Oct 17, so forensic dates always fail this one check) + all others PASS,
+broken login → adds `login_completed`, Sunday (use 2026-10-11, the actual Sunday) →
+`token_finding=SKIP sunday-cold-night` with `cold='2026/10/18 20:30'`, catch-up before
+20:50 → `result=SKIPPED` + `level=info`; WSL crontab/wrapper/py_compile. App suite:
+`uv run pytest dashboard/tests -q` (uv on WINDOWS, not WSL) → **321 passed** (62s).
+
+**Oct 15–17 equity_history gap (2FA outage) -- BACKFILLED & VERIFIED (2026-10-17 ~19:35).**
+Date facts: Oct 15 = Thu, Oct 16 = Fri, Oct 17 = Sat (today; live-sampled rows, no EOD
+needed). Gap: Oct 15 mixed (81 measured intraday rows + 50 frozen at 252,038.36), Oct 16
+138 placeholder rows all 252,038.36. **Values written (Flex query 1659726, statement
+window 20261013–20261016): Oct 15 = 252,226.419435411, Oct 16 = 251,052.604833374 HKD.**
+Commit mechanics: `scripts/flex_nav_reconcile.py --statement-file <csv> --commit` in the
+live container → 2,564 → 2,378 rows (50+138 placeholders dropped, **81 measured rows kept**
+per spec §3.5, +2 EOD rows stamped at each day's last sample ts), backup under store key
+`equity_history_flexrecon_backup`. Verification: both days' last NAV == Flex values; H-1
+idempotent (re-run = `nothing to patch`); H-3 day-over-day last-NAV deltas −166 … +967 HKD
+(all « 20,000); independent sqlite re-read after the write shows the running dashboard did
+not revert (Oct 17 sampler still appending normally). Statement archived at
+`tmp/flex_stmt_9329566246.csv` (38,086 B, BOF…EOF).
+
+**THE ROOT CAUSE OF THE HOURS-LONG "1020 STORM": query 1659726 is format=CSV.** Success
+responses are CSV (`"BOF","U12991898","StatementOfFundsNetLiquidation"...` … `"EOF"`);
+ONLY error responses are XML. The XML-only parser therefore misread **real statement data
+as garbage** (the mysterious `not well-formed (invalid token): line 1, column 5` was
+column 5 of CSV!), while `ErrorCode 1020` responses were faithfully reported as errors --
+and the IBKR cluster oscillated between Success/1020/CSV per node, which looked like a
+server-side fault. Symptoms to recognize next time: SendRequest `Status=Success` with a
+ref + immediate GetStatement parse failures at line 1 col 5 = **the statement is arriving
+as CSV**. Also learned: (a) a fresh SendRequest with a *different* fd/td window forces a
+NEW ref (same window dedupes to the old wedged ref); (b) the token file is a bare
+24-digit line + `query=` line (parsers now accept bare `[0-9A-Fa-f]{16,}`); (c) keep
+SendRequest probing spaced >=30 min while the cluster flaps.
+
+**`scripts/flex_nav_reconcile.py` -- all changes now in:** surgical per-day patching (drop
+only NAV==plateau rows, keep measured rows in mixed days, refuse placeholder-less days,
+print dropped/kept counts); `--statement-file <path>` offline mode (no token/network;
+auto-detects XML vs CSV); network path returns on `"BOF"` CSV bodies instead of
+XML-parsing them; EOF-record truncation guard; official `t` token on GetStatement;
+retryable codes `1003/1004/1019/1021`; labeled `never became ready (last_err)` instead of
+a bare parse re-throw. **Weekly wrapper bug FIXED:** `flex_nav_reconcile_weekly.sh`
+referenced `/app/scripts/flex_nav_reconcile.py` (does not exist in the image -- Monday's
+`0 9 * * 1` cron would have failed exit=127); it now `docker cp`s the script to `/tmp`,
+runs it there, and removes `/tmp/flex_token.txt` + the script afterwards. Spec §3.5 status
+note added to IBKR_HISTORY_SPEC.md (flex_backfill.py + monthly cadence still unstarted).
+
+**Graph-artifact cleanup (same evening, prompted by "P&L graph looks unnatural"):**
+the outage had also left NAV-API-tainted rows the day-scoped reconcile never touched, and
+these were the visible zigzag: (a) `equity_history` Oct 17 carried **39 frozen rows at
+252,038.36** (00:09-07:06 UTC sampler prefix) between Oct-16 EOD 251,052.60 and the live
+250,922.26 -> fake +986 up-spike then -1,116 drop on a Saturday; dropped them
+(backup `equity_history_graphfix_backup`, 2385->2346). (b) `daily_pnl_history` (30-day
+daily-P&L panel, `record_daily_pnl_snapshot` snapshots of STATE) had Oct 15 **and** Oct 16
+NL frozen at 252,038.36 (Oct 16 was an exact duplicate of Oct 15 incl. unrl/sgov/acc) ->
+0 P&L shown for both days with the real -1,174 misattributed to Oct 17; patched NL to
+Flex EOD 252,226.42 / 251,052.60 (backup `daily_pnl_history_pregraphfix_backup`;
+unrl/sgov/acc left stale -- not derivable, deltas ~tens HKD). Verify/inspect tool:
+`tmp/graph_check.py` (runs in container; prints per-day NAV transitions + the full
+daily_pnl series). Known remaining historical artifact, NOT yet fixed: daily_pnl
+Oct 5-9 + Oct 12 are still frozen at 253,287.0 from the EARLIER dark period (equity has
+the true backfilled EODs from that incident, daily_pnl was never repaired) -> 10 flat
+bars in the 30-day panel; unrl/sgov/acc components of the Oct 15/16 entries also remain
+stale by ~tens HKD. ONE SendRequest per attempt,
+spaced >=30 min while errors persist; prefer changing the fd/td window over hammering the
+same one; GetStatement/CSV delivery itself is not rate-limited. Live DB read-only checks:
+`wsl -e bash -c "docker cp /mnt/d/quant/tmp/db_gap_check.py quant-dashboard-live-docker:
+/tmp/db_gap_check.py && docker exec quant-dashboard-live-docker /app/.venv/bin/python3
+/tmp/db_gap_check.py"` (no sqlite3 binary in the image -- use python3).
+
 
 ---
 
