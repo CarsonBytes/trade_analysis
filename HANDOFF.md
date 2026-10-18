@@ -10025,6 +10025,44 @@ relay VBS + stall_capture.sh).
 
 ---
 
+## 2026-10-18 evening — Sunday cold chain, 3× auto-recovery, 05:30 decision, GATEWAY_AUTOLOGIN spec
+
+- **Three watchdog-driven recoveries today:** 18:41 (gateway died ~18:39, suspect IBKR
+  Sunday maintenance window Sun 18:00-19:30 HKT = 06:00-07:30 ET; no hs_err/EventLog
+  crash; recovered 52s); 20:54 (the **Sunday weekly COLD restart** at 20:30:04 — by
+  design: `ColdRestartTime=20:30` set Oct 14, verify's `sunday-cold-night = full passkey`
+  skip; recovered 20:55:09 after an 18-min chain defect); 21:07 (user closed the login
+  screen at 21:04:58 — it IS the main `IBKR Gateway` frame → `Normal exit`; recovered
+  21:07:44). Rule documented: **minimize the login screen, never close it**.
+- **Chain defects found tonight:** (1) adoption branch (`ibkr-live-login.ps1:119-135`)
+  adopts a pending prompt but never starts the elevated helper → dead wait 20:32-20:50
+  until the session self-exited 20:50:36; (2) the adoption `Say` modal (:121) blocks its
+  own watch-loop; (3) every run ends in a modal OK (`Say()` success sites :109/:121/:127/
+  :191/:198/:229/:236) and `watchdog.ps1:132 Start-LiveLogin` starts a **visible** console
+  (no `-WindowStyle Hidden`, unlike Show-Toast :122) → new **silent-completion**
+  requirement (0 post-login clicks); (4) observe task `lastRun` stuck at 2026-10-17 and no
+  verify run at 20:50 tonight — root-cause during Phase-1 task re-registration.
+- **Decision (user-approved): all restarts move to 05:30 HKT.** Weekly touch becomes a
+  Monday wake-up touch (Mon 05:30 = Sun 17:30 ET, past the Sun 01:00 ET boundary); Sat/Sun
+  05:30 restarts stay token-only; market opens 21:30 HKT → pre-wake dark has zero trading
+  exposure. This week's boundary already satisfied by today's full logins; first migrated
+  warm restart Tue 2026-10-20 05:30; first touch under the new schedule Mon 2026-10-26
+  05:30. Open point: `ColdRestartTime` day semantics (spec §3).
+- **Spec committed: `GATEWAY_AUTOLOGIN_SPEC.md`** — incident retro table (Sep 1 → Oct 18),
+  token mechanics (autorestart file = serialized `AutoRestartDescriptor` carrying the TST
+  session token, ~2s consume window, warm vs cold, weekly-boundary math for both
+  schedules), 05:30 migration phases 1-3, silent-completion rules, staged-token design for
+  zero-touch crash recovery, 15min page ladder with 2h freeze, metrics (1 touch/week,
+  0 post-login clicks, MTTR p50 <3min), P2 open (USB/IP remote touch, auto-logon,
+  close-screen rule). Supersedes the midday **Pending** bullets above (those items shipped
+  in `1223744`; tonight's chain completed).
+- **Still uncommitted (user scope):** `IBKR_GATEWAY_PASSKEY_SPEC.md`, all
+  `scripts/windows/*` (incl. `ibkr-live-login.ps1`, observe/verify), `scripts/gateway-*`,
+  `flex_nav_reconcile*`, `Dockerfile.gateway`, etc. Implementation of Phases 1-3 not
+  started — spec only, per "do the spec and push".
+
+---
+
 ## Open items / decisions pending
 - **Whitelist (commodities+indices only) is a judgment call:** improves per-trade expR
   (+0.107→+0.149) but portfolio return ~same and DD slightly worse (lost FX diversification).
