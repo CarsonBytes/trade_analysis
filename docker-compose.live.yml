@@ -41,13 +41,26 @@ services:
       - IB_ALLOW_LIVE=1
       - SLEEVE_ENABLED=1
       - DASH_DB_NAME=/data/dashboard_live_docker.db
-      - IB_HOST=ib-gateway-live
+      # 2026-10-13 (spec GATEWAY_PASSKEY): the LIVE gateway now runs natively on WINDOWS (IBC-Live)
+      # because IBKR requires the YubiKey PIN on every login and only Windows' WebAuthn dialog can
+      # collect it. host.docker.internal = this WSL VM (host-gateway, below), where the
+      # win-gateway-relay service forwards 4003 -> Windows:4001. LIVE_IB_PORT stays 4003 so
+      # ib_exec's live-port guard is untouched.
+      - IB_HOST=host.docker.internal
       # Distinct from native paper's 7, native live's 21, and Docker paper's 31.
       - IB_CLIENT_ID=41
     ports:
       # Host 18081 -> container 8091, distinct from native's 8080/8081 and Docker paper's
       # 18080.
       - "18081:8091"
+    # ADDED 2026-10-18: let py-spy dump the app's stacks when HTTP :18081 stalls for real
+    # (favicon 0.011s healthy, but the event loop intermittently blocks 5-15s+ -- stalls hit
+    # roughly hourly per infra-watchdog and trigger watchdog.ps1's docker-restart escalation).
+    # Default Docker caps drop SYS_PTRACE, so `docker exec ... py-spy dump` dies with EPERM;
+    # with this cap the dump is read-only (ms-scale GIL pause) and needs no app rebuild.
+    # Paper's compose left without it deliberately -- live only, debugging window 2026-10-18.
+    cap_add:
+      - SYS_PTRACE
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -59,8 +72,10 @@ services:
       # (live never reads paper's; see service._reuse_allowed). External,
       # created once via `docker volume create quant_shared`.
       - quant_shared:/shared
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - ib-gateway-live
+      - win-gateway-relay
     # ADDED 2026-08-20 -- same fix as paper's docker-compose.yml (see its comment for the
     # full incident/reproduction writeup): a stuck/unreachable IB gateway leaves this
     # container's web server unresponsive and it does NOT self-recover once the gateway
@@ -87,7 +102,36 @@ services:
   # file's own comments for the full backstory on EXISTING_SESSION_DETECTED_ACTION,
   # BYPASS_WARNING, and READ_ONLY_API (that last one was a real live-order-blocking
   # incident on paper, found 2026-08-18 -- set here from day one, not rediscovered).
+  # Forwards the dashboard's live API connection to the WINDOWS IB Gateway (2026-10-13). See
+  # scripts/win-gateway-relay.sh for why it must resolve Windows' address at start. Same image
+  # as the parked Docker gateway (it already ships socat), so no extra pull.
+  win-gateway-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: quant-win-gateway-relay
+    restart: unless-stopped
+    network_mode: host
+    user: ibgateway
+    entrypoint: ["sh", "/relay/win-gateway-relay.sh"]
+    environment:
+      # 2026-10-14: point at the WINDOWS user-mode relay (4003), not the gateway (4001).
+      # The gateway's jts.ini has TrustedIPs=127.0.0.1, so a direct WSL->Windows:4001
+      # connection is accepted then closed on first data (EOF). The Windows relay
+      # (scripts/windows/win-api-relay.ps1, scheduled task \IBKR\API Relay) listens on
+      # 0.0.0.0:4003 and forwards to 127.0.0.1:4001, satisfying TrustedIPs. Chain:
+      #   dashboard -> host.docker.internal:4003 (this socat) -> Windows:4003 (relay)
+      #   -> 127.0.0.1:4001 (gateway).
+      - WIN_PORT=4003
+    volumes:
+      - ./scripts/win-gateway-relay.sh:/relay/win-gateway-relay.sh:ro
+
+  # PARKED 2026-10-13 behind an opt-in profile: the live gateway runs on Windows now (see the
+  # dashboard's IB_HOST comment). Kept, not deleted -- with a fingerprint (Bio) key it could
+  # complete UV without a PIN UI and come back. A plain `up` never starts it; it also stays
+  # HELD (/home/cap/.container-hold) so no watchdog revives it. Opt in with --profile docker-gateway.
   ib-gateway-live:
+    profiles: ["docker-gateway"]
     build:
       context: .
       dockerfile: Dockerfile.gateway
@@ -118,8 +162,36 @@ services:
       # late tap still lands. TWOFA_EXIT_INTERVAL is the post-tap grace before IBC terminates
       # (IBC default 60s); 120s because the tap is followed by a real IB handshake that has
       # taken ~90s to open the API port on this account.
-      - RELOGIN_AFTER_TWOFA_TIMEOUT=yes
+      #
+      # REVERSED AGAIN 2026-10-06 (spec GATEWAY_PASSKEY P0) -- the 10-03 diagnosis above was
+      # wrong. It was not a missed tap: on 2026-10-03 IBKR switched this username's only second
+      # factor to a PASSKEY (SFC HK mandate; every NS_AUTH_START since advertises exactly
+      # `token=5, tokenSubtype=4[Passkey]`). A headless gateway cannot complete a passkey, so
+      # relogin=yes turned each timeout into another guaranteed-failed login: 105 handshakes on
+      # 10-04/10-05, 89 answered "Too many failed login attempts". With `no`, IBC makes ONE
+      # attempt and then sits; gateway-login-watchdog.sh's auth probe sees the passkey-only
+      # handshake and HOLDS the gateway (scripts/gateway-hold.sh) with one page.
+      - RELOGIN_AFTER_TWOFA_TIMEOUT=no
       - TWOFA_EXIT_INTERVAL=120
+      # ONE passkey per WEEK instead of per restart (spec GATEWAY_PASSKEY P1, 2026-10-06).
+      # Without AutoRestartTime the gateway logs itself OFF daily, and every recovery after
+      # that was a full login -- measured ~10 full second-factor logins/week in the push era.
+      # With it, the gateway restarts itself daily reusing its session token (IBC: "autorestart
+      # file found: authentication will not be required"); IBKR only demands a full login on
+      # the first restart after Sunday 01:00 ET. Two preconditions, both below:
+      #   * the settings dir must SURVIVE container restarts/recreates -> named volume
+      #     (Dockerfile.gateway pre-creates the mount point owned by ibgateway)
+      #   * nothing may hard-restart the container (docker restart = full login): the 20:00
+      #     scheduled relogin no longer touches live, and the deploy script no longer
+      #     recreates the gateway unless asked (--with-gateway).
+      # 11:00 AM in the gateway's timezone (UTC, pinned by TIME_ZONE) = 19:00 HKT = 07:00 ET
+      # (06:00 in winter): outside the US session and IBKR's ~23:45-00:45 ET reset, and well
+      # before the watchdog's STALL_MIN would notice the ~1-2 min restart gap.
+      - TIME_ZONE=Etc/UTC
+      - AUTO_RESTART_TIME=11:00 AM
+      - TWS_SETTINGS_PATH=/home/ibgateway/tws_settings
+    volumes:
+      - quant_live_tws_settings:/home/ibgateway/tws_settings
     ports:
       # Host 14001 for my own debugging only (localhost-only, matches paper's 14002
       # convention) -- the dashboard service reaches this over the compose network's
@@ -132,6 +204,7 @@ services:
 volumes:
   quant_docker_live_data:
   quant_docker_live_logs:
+  quant_live_tws_settings:
   quant_shared:
     external: true
 

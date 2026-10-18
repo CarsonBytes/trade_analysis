@@ -127,9 +127,18 @@ TC 'task Docker Daily Prune at 04:00' {
     "$($times -join ',') state=$($t.State)"
 }
 TC 'task \IBKR\API Relay running' {
+    # 2026-10-18: the task's action is wscript + win-api-relay.vbs (detached hidden spawn,
+    # console-close-proof). wscript exits immediately, so the engine state settles at
+    # 'Ready' while the relay powershell lives on -- that IS the healthy steady state, and
+    # asserting -eq 'Running' here failed for weeks. Ground truth is the listener itself
+    # (check 'port 4003 relay listener' above); this check only guards the task existing
+    # and not being disabled, which is what watchdog.ps1's Start-ScheduledTask needs.
     $t = Get-ScheduledTask -TaskPath '\IBKR\' -TaskName 'API Relay' -ErrorAction Stop
-    if ($t.State -ne 'Running') { throw "state=$($t.State)" }
-    'Running'
+    if ($t.State -eq 'Disabled') { throw 'disabled' }
+    $l = @(Get-NetTCPConnection -LocalPort 4003 -State Listen -ErrorAction SilentlyContinue |
+           Where-Object { $_.LocalAddress -eq '0.0.0.0' })
+    if (-not $l) { throw "state=$($t.State) and no 0.0.0.0:4003 listener" }
+    "state=$($t.State) listener=present"
 }
 
 # ---- 8. log structure -------------------------------------------------------
@@ -154,7 +163,7 @@ $SynHealthy = "$repo\tmp\syn_verify_healthy.log"
 $SynBroken = "$repo\tmp\syn_verify_broken.log"
 @(
     "2026-10-16 20:29:02 PRE autorestart=absent ibcPids=[7000] p4001=127.0.0.1:7000 p4003v4=0.0.0.0:28192 securityWin='none' archived=C:\IBC-Live\Logs\archived [IBC-3.24.0_GATEWAY-1047_.txt, launcher.log]"
-    "2026-10-16 20:34:05 POST autorestart=absent ibcPid=7100(prev=7000) restarted=yes p4001=127.0.0.1:7100 p4003v4=0.0.0.0:28192 finding='autorestart file found C:\Jts-Live\ajanink autorestart' loginCompleted=yes 2faInitiated=no securityWin='none' cold='2026/10/18 20:30'"
+    "2026-10-16 20:34:05 POST autorestart=absent ibcPid=7100(prev=7000) restarted=yes p4001=127.0.0.1:7100 p4003v4=0.0.0.0:28192 finding='autorestart file found C:\Jts-Live\ajanink autorestart' loginCompleted=yes 2faInitiated=no securityWin='none' cold='Gateway will be cold restarted at 2026/10/18 20:30'"
     "2026-10-11 20:29:02 PRE autorestart=absent ibcPids=[7000] p4001=127.0.0.1:7000 p4003v4=0.0.0.0:28192 securityWin='none' archived=C:\IBC-Live\Logs\archived [IBC-3.24.0_GATEWAY-1047_.txt, launcher.log]"
     "2026-10-11 20:34:05 POST autorestart=absent ibcPid=7200(prev=7000) restarted=yes p4001=127.0.0.1:7200 p4003v4=0.0.0.0:28192 finding='autorestart file not found: full authentication will be required' loginCompleted=no 2faInitiated=no securityWin='none' cold='2026/10/18 20:30'"
 ) | Set-Content -Path $SynHealthy -Encoding UTF8

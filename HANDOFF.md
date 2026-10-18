@@ -9970,6 +9970,61 @@ Alternative if (1) is insufficient: bind ib_async to nicegui's OWN loop (capture
 
 ---
 
+## 2026-10-18 midday — API Relay root cause (missing VBS), stall-capture armed, watchdog probe fixed
+
+**Relay phantom-start root cause (fixed, verified).** The night chain's 20:50 verify had
+pushed a real critical (cold_schedule false page — fixed previous session). Separately the
+`\IBKR\API Relay` task's registered action was discovered to be
+`wscript.exe "D:\quant\scripts\windows\win-api-relay.vbs"` (a detached-hidden launcher in
+the house style of `ibkr-live-login.vbs`, hardening against the 0xC000013A console-close
+deaths) **but the .vbs file did not exist** — every `Start-ScheduledTask` was a no-op
+phantom (wscript sat on a file-not-found dialog; engine state flapped Running/Ready with
+no listener and no relay.log line). Manual `powershell -File win-api-relay.ps1` always
+worked, which is why the pre-restart orphan instances (pids 3436, 38196) served fine.
+Fix: recreated `scripts/windows/win-api-relay.vbs` (3-line house launcher), killed the
+stuck wscript, Start → relay pid23240 bound 0.0.0.0:4003 and logged "listening" at
+11:58:37. **Task state `Ready` with a live listener IS the healthy steady state** for the
+VBS-detach design — `test-min2fa.ps1` check rewritten accordingly (not-Disabled + listener
+present). Suite now 28/28.
+
+**Dashboard "stalls" — what they actually are (mostly NOT freezes).** Evidence:
+host-side root fetches take 8s+ while the **in-container favicon answers clean** (loop
+alive) — slow full-page renders, 3.3–11s+ per connected browser client (documented in
+docker-compose.live.yml), with the user's home tab still open (~50% CPU on the app).
+watchdog.ps1's old root+8s probe false-positived this into a **docker restart at 12:05:07**
+(its log oscillates not-responding/responding-every ~30s). At least one TRUE loop stall was
+also caught: 12:06:12 in-container favicon `TimeoutError` after accept (≥5s loop block) —
+that one will get a py-spy stack dump next time.
+
+**Fixes deployed:**
+- `watchdog.ps1` Test-DashboardUp now probes `/favicon.ico` (loop-liveness, matches the
+  container healthcheck) instead of `/`; restarted via the Startup VBS launcher (live
+  pid 16932, pid file updated). No more render-triggered restart storms.
+- `scripts/stall_capture.sh` + WSL cron every minute: in-container favicon (5s) probe; on
+  a true miss, py-spy dump of ALL dashboard.app pids + `docker top`, rate-limited 8/day,
+  self-heals py-spy after container recreates. Dumps: `/home/cap/stalls/`.
+- `docker-compose.live.yml`: `cap_add: SYS_PTRACE` on the live dashboard (py-spy needs it;
+  EPERM without). Container recreated 11:59, py-spy verified (MainThread idle; refresh_cheap
+  correctly on a worker thread mid-IB round-trip).
+- The dashboard keeps reconnecting IB through the relay chain
+  (container→host.docker.internal:4003→win-gateway-relay socat→Windows:4003 relay→127.0.0.1:4001)
+  — chain verified live at 11:58+ (relay.log pumps, ib_client connected clientId=41).
+
+**Gotchas learned today:** docker CLI exists only inside WSL (`wsl -e docker ...`); `docker
+cp` from a Windows path fails — use `/mnt/d/...`; never `Start-Process -RedirectStandardOutput`
+for an infinite process from the agent tools (the redirect handle hangs the tool ~9h);
+process-probe self-matching: a `-like '*win-api-relay*'` query matches its own command line
+— use `-match 'win-api-relay\.ps1'`; drvfs metadata caching can serve a stale script to
+WSL cron for ~1–2 min after Windows-side edits.
+
+**Pending:** next true-stall dump identifies the event-loop blocker; consider asking the
+user to close idle dashboard tabs (render cost scales per connected client); tonight
+20:29/20:30/20:45/20:50 chain is Sunday = cold restart needs passkey (expected cold
+record `2026/10/25 20:30`); changes above are uncommitted (test suites + compose + new
+relay VBS + stall_capture.sh).
+
+---
+
 ## Open items / decisions pending
 - **Whitelist (commodities+indices only) is a judgment call:** improves per-trade expR
   (+0.107→+0.149) but portfolio return ~same and DD slightly worse (lost FX diversification).
