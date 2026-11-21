@@ -3,7 +3,10 @@
 **Status:** Phase 1 SHIPPED 2026-11-21 (G7 wording/severity/digest, G6.1 untracked card,
 G8 Flex StockShort alarm). Phase 2 BUILT 2026-11-21 (G1 `place_guarded` choke point, G4
 broker-aware reprotect + 60s settle + heal leg resize; T1–T3, T6–T8 green), NOT yet deployed:
-gate is one clean week on PAPER before LIVE. See the HANDOFF entries. Phases 3–5 PROPOSED.
+gate is one clean week on PAPER before LIVE. See the HANDOFF entries. Phases 3–5 PROPOSED,
+refined 2026-11-21 in [IBKR_STRATEGY_FIDELITY_SPEC.md](IBKR_STRATEGY_FIDELITY_SPEC.md) §9:
+phase 3 gains a G3.4 fill audit (3 "VOID" trades really filled), and G6.5 moves to its F3
+shadow ledger.
 **Incident:** [RETRO_2026-11-21.md](RETRO_2026-11-21.md). LIVE has been net short (QQQ −8,
 AMLP −21, CPER −84, SPY −4) since Oct 30. This is the third unintended-short incident (PAPER
 2026-09-01, 2026-09-29).

@@ -90,6 +90,61 @@ def get_history(inst: Instrument) -> tuple[pd.Series | None, str]:
     return None, "none"
 
 
+# ---- F1: score on COMPLETED weekly bars only (IBKR_STRATEGY_FIDELITY_SPEC F1, 2026-11-21) ----
+# WHY: yfinance `interval="1wk"` (and MT5 W1) return the IN-PROGRESS week as the last bar, so
+# the scorer read a partial bar every weekday. The backtest only ever sees COMPLETED weekly
+# closes. Measured on LIVE Jul-Nov 2026 (RETRO_PERFORMANCE_2026-11-21 §7.1): 16 of 81 approved
+# signals existed ONLY on the partial bar, at -0.68R avg (12% win) vs -0.29R for the rest,
+# ~-11R in all; 13 of the 16 were blocked at the completed close by the RSI>70 filter and
+# passed only after a mid-week dip. Trimming the partial bar makes live score the same bars
+# the backtest scored. SCORE_COMPLETED_WEEKS=0 restores the old behaviour.
+_WEEK_CLOSE = {                       # exchange -> (tz, hour, minute) of the Friday close
+    "": ("America/New_York", 16, 0),          # US-listed ETFs (ib_exchange empty)
+    "LSEETF": ("Europe/London", 16, 30),      # UCITS ETFs on the LSE
+}
+
+
+def score_completed_weeks() -> bool:
+    return os.environ.get("SCORE_COMPLETED_WEEKS", "1").lower() not in ("0", "false", "no")
+
+
+def week_close_utc(bar_ts, exchange: str = "") -> pd.Timestamp:
+    """PURE: UTC time at which the weekly bar labelled `bar_ts` is complete -- the Friday close
+    of that bar's week on its exchange. Bars are labelled by their week's start (yfinance:
+    Monday; MT5: Sunday/Monday); a Sat/Sun label belongs to the FOLLOWING week."""
+    tzname, hh, mm = _WEEK_CLOSE.get(exchange or "", _WEEK_CLOSE[""])
+    ts = pd.Timestamp(bar_ts)
+    day = (ts.tz_convert(tzname) if ts.tzinfo is not None else ts).normalize()
+    wd = day.weekday()
+    to_friday = 4 - wd if wd <= 4 else 4 - wd + 7
+    friday = (day.tz_localize(None) if day.tzinfo is not None else day) + pd.Timedelta(days=to_friday)
+    close_local = (friday + pd.Timedelta(hours=hh, minutes=mm)).tz_localize(tzname)
+    return close_local.tz_convert("UTC")
+
+
+def completed_weekly(series: pd.Series | None, now=None, exchange: str = "") -> pd.Series | None:
+    """PURE: `series` (weekly closes) without any trailing bar whose week hasn't closed yet at
+    `now` (default: current UTC time). Holidays only make it wait a little longer (a week that
+    ends on Thursday is still released at the Friday close time) -- never early."""
+    if series is None or len(series) == 0:
+        return series
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    keep = len(series)
+    while keep > 0 and week_close_utc(series.index[keep - 1], exchange) > now:
+        keep -= 1
+    return series.iloc[:keep]
+
+
+def scoring_series(inst: Instrument, series: pd.Series | None, now=None) -> pd.Series | None:
+    """The series the SIGNAL scorer should see: completed weeks only (F1), unless disabled.
+    Callers keep the untrimmed series for the live price / sparkline."""
+    if series is None or not score_completed_weeks():
+        return series
+    return completed_weekly(series, now, getattr(inst, "ib_exchange", "") or "")
+
+
 def get_live_price(inst: Instrument) -> tuple[float | None, str, float | None]:
     """Return (price, source, spread). Near-tick from MT5 if available, else the
     last yfinance bar close (delayed). spread is None when unknown."""

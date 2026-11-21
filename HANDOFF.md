@@ -5,6 +5,41 @@ Last updated 2026-10-17.
 
 ---
 
+### 📉 OPEN 2026-11-21: LIVE strategy is underperforming its backtest -- and it's the signals, not the fills
+Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md). Spec:
+[IBKR_STRATEGY_FIDELITY_SPEC.md](IBKR_STRATEGY_FIDELITY_SPEC.md) (F1 built; F2 run; rest PROPOSED).
+- Jul 1 → Nov 20 (Flex): deposits HKD 280,000, NAV 288,873, **+8,833 (TWR +4.7%)** vs SPY −7.4%.
+  By source: unintended shorts ≈ +9.4k, **strategy ≈ −0.45k**, SGOV ≈ +0.1k. The strategy
+  made ~0.
+- Funded trades: **n=14, 2 wins, −0.37R/trade, −5.24R** vs backtest +0.30R / 45%.
+  `live_vs_backtest.py` says n=130 only because it counts never-filled CANCELLED rows.
+- **Decisive:** all 81 distinct approved signals replayed at their own signal prices:
+  −0.37R avg, −29.5R (Sep alone −22.8R). The funded 14 at signal price: −5.5R vs −5.24R real.
+  Execution is not the cause; the 88 never-filled entries (S2 bug + gateway, Aug 11–Oct 1)
+  actually saved ~20R.
+- Leading hypothesis **H1:** `providers.get_history()` scores yfinance `1wk`, whose last bar is
+  the **in-progress week**, while the backtest only uses completed weekly closes. Live signals
+  are spread evenly Mon–Fri. Test first: fidelity spec F1 audit, plus F2 (where −0.37R/81 sits
+  in the backtest's rolling windows).
+- Also found: 3 "VOID" trades really filled (AMLP 21, CPER 84, SPY 4) → guard phase 3 gets a
+  G3.4 fill audit. SGOV shield netted HKD 99 (55 trades, HKD 429 commission, 30% withholding
+  HKD 241). The LLM veto is the best filter (96 vetoed signals would have lost −79.5R).
+- **F1 + F2 RUN (same day, research only; retro §7.1):** the backtest's OWN signals for
+  Jul–Nov 2026 lost too (n=33, −0.43R). LIVE signal-level per instrument-week (−0.32R, n=50)
+  is the 9th percentile of 786 backtest 140-day windows, so a **bad regime within history**.
+  H1 is **confirmed**: 16/81 live signals existed only on the in-progress week, at −0.68R vs
+  −0.29R (≈ −11R), and 13 of them were RSI>70-blocked at the completed close.
+- **F1 BUILT 2026-11-21, on PAPER since 14:48 UTC, LIVE not deployed:** live scores completed weekly bars only
+  (`providers.scoring_series`, env `SCORE_COMPLETED_WEEKS=1` default) while the live price
+  still comes from the newest bar. `facts["signal_bar"]` plus `paper.signal_bar_taken()` allow
+  one funded entry per instrument per signal bar. `test_fidelity` includes a golden test
+  (every backtest signal bar = same facts + same gated signal live); full suite 343 passed.
+  PAPER got it (with guard phase 2) through the pre-push redeploy that copies the working
+  tree. LIVE waits for the PAPER week. Expect signals to appear once a week,
+  right after the Friday close, instead of any weekday. **Next:** F4 (entry fidelity).
+- **Open user decision (F7):** keep funding new LIVE entries during the investigation, or run
+  signal-only/shadow with capital parked.
+
 ### 🐕 2026-11-21: quant watchdog.ps1 died silently -- now has a heartbeat + 5-min keepalive task
 **What happened:** the watchdog (pid 8500) was last alive 19:35 HKT Sat and was gone by 21:33. No log
 line, no PowerShell engine-stop event (403), no crash record (1000/1026): a hard kill. Cause NOT proven.

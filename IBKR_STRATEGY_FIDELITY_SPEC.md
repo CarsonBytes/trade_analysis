@@ -52,6 +52,20 @@ in-progress week: −0.68R avg / 12% win, vs −0.29R / 25% for the 65 that also
 completed close. They cost about −10.9R. 13 of the 16 were RSI>70-blocked at the completed
 close and passed only after a mid-week dip. **Ship F1.**
 
+**BUILT 2026-11-21. On PAPER since 14:48 UTC (pre-push redeploy); LIVE not deployed:**
+- `providers.week_close_utc()`, `completed_weekly()` and `scoring_series()` (env
+  `SCORE_COMPLETED_WEEKS`, default on).
+- `service._score_one()` scores the trimmed series, while the live price and sparkline still
+  come from the newest bar. `facts["signal_bar"]` names the completed bar that signalled.
+- `paper.signal_bar_taken()`: one FUNDED entry per instrument+method per signal bar
+  (a never-filled attempt may retry). A completed-bar signal stays BUY all week, and the
+  backtest takes one trade per setup.
+- Tests: `test_fidelity` (week-close boundaries incl. DST/LSE/MT5 Sunday labels, trimming,
+  the env switch, the `_score_one` wiring, the signal-bar rule, and the GOLDEN test that
+  every backtest signal bar yields identical facts and the same gated signal live).
+- Not changed (F4): the journal entry is still the live price at placement, and entries can
+  still happen any day of the signal week.
+
 **Tests.** A completed-week detector at each boundary (Fri 15:59 / 16:01 ET, holidays). A
 replayed historical week produces the same signal live and in backtest (golden test against
 `backtest._signals`).
@@ -160,7 +174,7 @@ multiple, rr, MIN_STRENGTH). Any gate whose OOS contribution ≤ 0 is removed. O
 | 1 | F7 decision (shadow vs keep funding) | user | — |
 | 2 | ~~F2 rolling windows + F1 partial-bar audit~~ **DONE 2026-11-21**: F1 supported, F2 = bad regime within history | S | written verdict ✓ |
 | 3 | Guard phase 2 PAPER week (running) → LIVE | — | spec gate |
-| 4 | F1 switch (if the audit supports it) + F4 entries | S/M | golden test live = backtest |
+| 4 | F1 switch **BUILT 2026-11-21** (golden test ✓; deploy with/after guard phase 2's PAPER week) + F4 entries | S/M | golden test live = backtest |
 | 5 | Guard phase 3 incl. G3.4 fill audit | M | T4, T5, T16 |
 | 6 | F3 shadow ledger + card, F5 parity | M | card shows all three R's |
 | 7 | F6 shield fix/kill, F8 walk-forward | S/M | |

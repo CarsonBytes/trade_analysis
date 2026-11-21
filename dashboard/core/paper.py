@@ -592,6 +592,39 @@ def all_trades() -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+FUNDED_STATUSES = ("OPEN", "WIN", "LOSS", "BE", "EXPIRED", "CLOSED", "TIMEOUT")
+
+
+def signal_bar_taken(rows, signal_bar: str | None) -> bool:
+    """PURE (F1, IBKR_STRATEGY_FIDELITY_SPEC 2026-11-21): has this instrument+method already
+    traded the setup from `signal_bar` (the completed weekly bar that produced the signal)?
+    `rows` are (status, entry_facts_json). Only funded/resolved trades count -- an entry that
+    never filled (CANCELLED/VOID) may retry the same setup. With completed-bar scoring a signal
+    stays BUY all week, and without this a mid-week TP or stop would be followed by a second
+    entry on the SAME setup, which the backtest (one trade per signal bar) never takes."""
+    if not signal_bar:
+        return False
+    for status, ef in rows or []:
+        if status not in FUNDED_STATUSES:
+            continue
+        try:
+            if (json.loads(ef or "{}") or {}).get("signal_bar") == signal_bar:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _signal_bar_taken(instrument: str, method: str, signal_bar: str | None) -> bool:
+    if not signal_bar:
+        return False
+    with _LOCK, _conn() as c:
+        rows = c.execute("SELECT status, entry_facts FROM paper_trades WHERE instrument=? "
+                         "AND method=? ORDER BY id DESC LIMIT 20",
+                         (instrument, method)).fetchall()
+    return signal_bar_taken(rows, signal_bar)
+
+
 def _has_open(instrument: str, method: str) -> bool:
     with _LOCK, _conn() as c:
         return c.execute("SELECT 1 FROM paper_trades WHERE instrument=? AND method=? "
@@ -887,6 +920,10 @@ def place_from_state(state: dict) -> list[str]:
             if _has_open(key, mlabel):
                 logs.append(f"{key} {mlabel}: skip (already open)")
                 continue
+            if _signal_bar_taken(key, mlabel, score.facts.get("signal_bar")):
+                logs.append(f"{key} {mlabel}: skip (setup from bar "
+                            f"{score.facts.get('signal_bar')} already traded)")
+                continue
             risk_price = abs(entry - sl)
             size = (ACCOUNT * RISK_PER_TRADE) / risk_price if risk_price > 0 else 0
             f = score.facts
@@ -906,6 +943,7 @@ def place_from_state(state: dict) -> list[str]:
                 "obj_win": _obj[0] if _obj else None,
                 "obj_expectancy_R": _obj[1] if _obj else None,
                 "obj_n": _obj[2] if _obj else None,
+                "signal_bar": f.get("signal_bar"),      # F1: completed bar that signalled
             }, default=float)
             _insert(Trade(
                 ts=now.isoformat(timespec="seconds"), instrument=key, direction=direction,

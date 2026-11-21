@@ -113,7 +113,17 @@ def _score_one(inst):
     series, source = get_history(inst)
     if series is None:
         return inst.key, None, source, None, None, None, None, None
-    facts, text = compute_facts(series, inst.key)
+    # F1 (IBKR_STRATEGY_FIDELITY_SPEC, 2026-11-21): SCORE on completed weekly bars only -- the
+    # same bars the backtest scored. The untrimmed `series` still supplies the live price and
+    # the sparkline below (its last bar is the current, in-progress week).
+    from dashboard.data.providers import scoring_series
+    scored = scoring_series(inst, series)
+    if scored is None or len(scored) < 2:
+        return inst.key, None, source, None, None, None, None, None
+    facts, text = compute_facts(scored, inst.key)
+    # which completed weekly bar produced this signal -- paper.place_from_state() allows ONE
+    # funded entry per instrument per signal bar, like the backtest (one trade per setup)
+    facts["signal_bar"] = str(scored.index[-1])[:10]
     score = score_from_facts(inst.key, facts, text)
     # short recent close series for the per-card sparkline (last ~72 bars,
     # rounded + as a plain list to keep the page payload small)
