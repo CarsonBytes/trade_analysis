@@ -81,6 +81,19 @@ fi
 printf '%s' "$(date +%s)" > "$STATE/push.bogkey"
 run_case "unknown level coerced to critical"   critical suppressed-cooldown-key false -- bogus bogkey "test bogus message"
 
+# 4b) IBKR_WEEKLY_2FA_SPEC: gateway keys have their own budget. Shared cap exhausted (and its
+#     collapse notice already sent) must still let a gateway key through; a legacy key must not.
+#     The gateway case is pre-seeded with a cooldown so nothing is actually sent.
+hkt=$(TZ=Asia/Hong_Kong date +%Y%m%d)
+printf '%s' "$hkt" > "$STATE/cap.date"; printf '10' > "$STATE/cap.count"; touch "$STATE/cap.done"
+run_case "shared cap full: other key suppressed-cap"  critical suppressed-cap false -- critical otherkey "flood"
+export GATEWAY_PUSH_DRYRUN=1   # passes cooldown + cap for real, then stops before any send
+run_case "shared cap full: gateway key NOT capped"    critical dry-run false -- critical gateway:ibc4001 "gw down"
+unset GATEWAY_PUSH_DRYRUN
+printf '%s' "$hkt" > "$STATE/gwcap.date"; printf '20' > "$STATE/gwcap.count"; touch "$STATE/gwcap.done"
+run_case "gateway cap full: gateway key suppressed-cap" critical suppressed-cap false -- critical gateway:other "gw"
+rm -f "$STATE"/cap.* "$STATE"/gwcap.*
+
 # 5) syntax + deployed-copy identity.
 if bash -n "$REPO" 2>/dev/null; then
     pass "repo gateway-push.sh syntax"

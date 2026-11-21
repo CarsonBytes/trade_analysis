@@ -16,7 +16,11 @@
 # out-of-tree caller can never silently stop alerting.
 set -uo pipefail
 
-level="${2:-}"
+# BUGFIX (2026-10-17, MIN-2FA testing): this read `level="${2:-}"` -- the KEY, not the level.
+# The key can never match the case list below, so `*` forced EVERY 3-arg call to `critical`
+# and paged Telegram for info/error calls too (recovery notices, digest-only restarts --
+# a violation of NOTIFICATION_SPEC v1 that the watchdog failure test caught live).
+level="${1:-}"
 if [ -n "$level" ] && [ $# -ge 3 ]; then
     key="$2"; msg="$3"
 else
@@ -93,26 +97,40 @@ if [ -f "$PUSH_STATE_DIR/push.$slug" ]; then
 fi
 
 # Hard daily cap -- the structural guarantee that no single bug floods chat.
-datef=$(date +%Y%m%d)
-if [ "$(cat "$PUSH_STATE_DIR/cap.date" 2>/dev/null)" != "$datef" ]; then
-    printf '%s' "$datef" > "$PUSH_STATE_DIR/cap.date" 2>/dev/null || true
-    printf '0' > "$PUSH_STATE_DIR/cap.count" 2>/dev/null || true
-    rm -f "$PUSH_STATE_DIR/cap.done" 2>/dev/null || true
+# The day is the HKT day (IBKR_WEEKLY_2FA_SPEC 2026-11-21: WSL inherits whatever timezone
+# Windows had at boot -- PST then EST -- so `date` alone rolled the cap at random HKT hours).
+# Gateway/weekly-touch keys get their OWN budget: on 2026-11-21 the gateway-down page was
+# `suppressed-cap` because unrelated `legacy` alerts had used the shared 10/day.
+datef=$(TZ=Asia/Hong_Kong date +%Y%m%d)
+case "$key" in
+    gateway:*|weekly-touch:*) cap="gwcap"; cap_limit="${GATEWAY_DAILY_CAP:-20}" ;;
+    *)                        cap="cap";   cap_limit="$CRITICAL_DAILY_CAP" ;;
+esac
+if [ "$(cat "$PUSH_STATE_DIR/$cap.date" 2>/dev/null)" != "$datef" ]; then
+    printf '%s' "$datef" > "$PUSH_STATE_DIR/$cap.date" 2>/dev/null || true
+    printf '0' > "$PUSH_STATE_DIR/$cap.count" 2>/dev/null || true
+    rm -f "$PUSH_STATE_DIR/$cap.done" 2>/dev/null || true
 fi
 cap_count=0
-if [ -f "$PUSH_STATE_DIR/cap.count" ]; then
-    cap_count=$(tr -cd '0-9' < "$PUSH_STATE_DIR/cap.count" 2>/dev/null)
+if [ -f "$PUSH_STATE_DIR/$cap.count" ]; then
+    cap_count=$(tr -cd '0-9' < "$PUSH_STATE_DIR/$cap.count" 2>/dev/null)
     cap_count=${cap_count:-0}
 fi
-if [ "$cap_count" -ge "$CRITICAL_DAILY_CAP" ]; then
-    if [ ! -f "$PUSH_STATE_DIR/cap.done" ]; then
-        touch "$PUSH_STATE_DIR/cap.done" 2>/dev/null || true
-        msg="+${CRITICAL_DAILY_CAP} more criticals suppressed today (cap reached) -- see the dashboard"
-        key="cap:collapse"
+if [ "$cap_count" -ge "$cap_limit" ]; then
+    if [ ! -f "$PUSH_STATE_DIR/$cap.done" ]; then
+        touch "$PUSH_STATE_DIR/$cap.done" 2>/dev/null || true
+        msg="+ more criticals suppressed today (${cap} cap ${cap_limit} reached) -- see the dashboard"
+        key="$cap:collapse"
     else
         audit "suppressed-cap" false
         exit 0
     fi
+fi
+
+# Test hook: everything above (level, cooldown, cap) ran for real; stop before any network send.
+if [ -n "${GATEWAY_PUSH_DRYRUN:-}" ]; then
+    audit "dry-run" false
+    exit 0
 fi
 
 tg_status=""
@@ -136,7 +154,7 @@ if [ -n "$ntfy_url" ]; then
 fi
 
 printf '%s' "$now" > "$PUSH_STATE_DIR/push.$slug" 2>/dev/null || true
-printf '%s' "$((cap_count + 1))" > "$PUSH_STATE_DIR/cap.count" 2>/dev/null || true
+printf '%s' "$((cap_count + 1))" > "$PUSH_STATE_DIR/$cap.count" 2>/dev/null || true
 
 if [ "$tg_status" = "200" ]; then
     audit "sent" false 200

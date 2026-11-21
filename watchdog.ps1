@@ -63,10 +63,10 @@ $instances = @(
 
 New-Item -ItemType Directory -Force -Path (Split-Path $logFile) -ErrorAction SilentlyContinue | Out-Null
 
-function Write-Log($msg) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
-    Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
-}
+# HKT stamps, independent of the Windows timezone (IBKR_WEEKLY_2FA_SPEC 2026-11-21: the box
+# was moved HKT -> EST -> HKT -> PST -> EST by tzutil; the user wants HKT in every log).
+. 'D:\quant\scripts\windows\ibkr-common.ps1'
+function Write-Log($msg) { Write-IbkrLog $logFile $msg }
 
 # Best-effort push through the same Telegram/ntfy helper the in-WSL watchdogs use, so alerts
 # from here land in the same place. By contract a failed push must never break the loop --
@@ -93,6 +93,15 @@ function Send-Alert($level, $key, $msg) {
 # auto-launches the passkey login so the prompt is waiting at the PC.
 $gatewayGraceCycles = 6   # ~2 min: a healthy daily token restart (AutoRestartTime, 05:45 HKT since 2026-11-21) blips 30-60s -- must NOT alarm
 $relayGraceCycles   = 6
+# IBKR_WEEKLY_2FA_SPEC additions (2026-11-21):
+#  - WEEKEND HOLD (Sat 06:00 -> Sun weekly touch, HKT): a gateway outage launches NO login and
+#    pages nobody (digest only) -- markets are shut and IBKR's Sunday reset voids any session
+#    made before it. weekly-touch.ps1 prompts at the planned time.
+#  - weekly phases (reminder / touch / Monday report) are dispatched from this loop.
+#  - after 2h down, re-prompt + page only hourly (anti-storm; IBKR throttles repeated logins).
+#  - the touch ledger is refreshed every ~5 min; failing \IBKR\* tasks page (hourly check).
+$freezeAfterCycles = 360   # 2h
+$freezeEveryCycles = 180   # then every 1h
 
 function Test-GatewayUp {
     # BOTH conditions: port 4001 listening AND our IBC-Live java process exists. The port
@@ -116,8 +125,35 @@ function Test-RelayUp {
 
 function Test-LoginInProgress {
     $p = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'ibkr-live-login\.ps1' }
+        Where-Object { $_.CommandLine -match 'ibkr-live-(login|autostart)\.ps1' }
     return [bool]$p
+}
+
+function Start-WeeklyPhase($phase) {
+    $running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'weekly-touch\.ps1' }
+    if ($running) { return }
+    try {
+        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', 'D:\quant\scripts\windows\weekly-touch.ps1', '-Phase', $phase
+        ) -WorkingDirectory 'D:\quant' | Out-Null
+        Write-Log "weekly phase '$phase' dispatched"
+    } catch { Write-Log "weekly phase launch threw: $_" }
+}
+
+function Test-IbkrTasks {
+    # A scheduled task that keeps failing must PAGE: restart-observe/verify failed silently
+    # for 34 days (Oct 17 -> Nov 21). Disabled tasks are ignored; only runs in the last 2 days.
+    $bad = @()
+    foreach ($t in (Get-ScheduledTask -TaskPath '\IBKR\' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })) {
+        $i = $t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+        # 0 ok, 0x41301 running, 0x41303 never run
+        if ($i -and $i.LastTaskResult -notin @(0, 0x41301, 0x41303) -and $i.LastRunTime -gt (Get-Date).AddDays(-2)) {
+            $bad += ('{0}=0x{1:X}' -f $t.TaskName, $i.LastTaskResult)
+        }
+    }
+    return $bad
 }
 
 # Detached so the balloon's 16s lifetime never blocks this loop. Quotes are embedded in the
@@ -134,9 +170,11 @@ function Show-Toast($title, $text) {
 
 function Start-LiveLogin {
     try {
-        Start-Process powershell.exe -ArgumentList @(
+        # Hidden + -Unattended: no console, no MessageBox, the process always exits
+        # (GATEWAY_AUTOLOGIN §4 / IBKR_WEEKLY_2FA_SPEC §3.7).
+        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass',
-            '-File', 'D:\quant\scripts\windows\ibkr-live-login.ps1'
+            '-File', 'D:\quant\scripts\windows\ibkr-live-login.ps1', '-Unattended', '-Reason', 'watchdog'
         ) -WorkingDirectory 'D:\quant' | Out-Null
         return $true
     } catch { Write-Log "login auto-launch threw: $_"; return $false }
@@ -207,7 +245,20 @@ function Test-DockerResponding {
     } catch { return $false }
 }
 
+# Containers deliberately held stopped: one file per container name in the hold dir shared with
+# infra-watchdog.sh and gateway-hold.sh (QUANT_WEEKEND_SLEEP_SPEC 4.2, 2026-11-21). Before this,
+# the dashboard branch below `docker restart`ed a held container ~2 min after any deliberate
+# stop. Returns $null when WSL can't be asked, so the caller treats nothing as held.
+function Get-HeldContainers {
+    try {
+        $out = & wsl.exe -d $distro -- ls -1 /home/cap/.container-hold 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch { return $null }
+}
+
 $fail = @{}                     # label -> consecutive failed cycles
+$heldNoted = @{}                # label -> $true while we've logged its hold (log once, no alert)
 $cooldown = @{}                 # label -> cycles remaining before we may act again
 foreach ($i in $instances) { $fail[$i.Label] = 0; $cooldown[$i.Label] = 0 }
 $bothFail = 0
@@ -218,6 +269,7 @@ $gwFail = 0                     # consecutive cycles with gateway down
 $gwCooldown = 0                 # cycles before we may re-launch/re-alert
 $relayFail = 0
 $relayCooldown = 0
+$cycle = 0
 
 Write-Log ("watchdog started (every ${checkIntervalSec}s; paper:18080, live:18081; " +
            "container grace ${containerGraceCycles} cycles, WSL grace ${wslGraceCycles}, " +
@@ -228,7 +280,26 @@ while ($true) {
         # --- gateway + relay checks first, every cycle, independent of dashboard state ---
         if ($gwCooldown -gt 0) { $gwCooldown-- }
         if ($relayCooldown -gt 0) { $relayCooldown-- }
-        try { Set-Content -Path $heartbeatFile -Value ("{0} pid={1}" -f [DateTime]::UtcNow.ToString('o'), $PID) -ErrorAction Stop } catch { }
+
+        $cycle++
+        try { Set-Content -Path $heartbeatFile -Value ("{0} pid={1} cycle={2}" -f [DateTime]::UtcNow.ToString('o'), $PID, $cycle) -ErrorAction Stop } catch { }
+        # weekly phases every cycle; ledger every ~5 min; task health hourly
+        try { $ph = Get-DueWeeklyPhase; if ($ph) { Start-WeeklyPhase $ph } } catch { Write-Log "weekly check threw: $_" }
+        if ($cycle % 15 -eq 1) {
+            try {
+                foreach ($e in (Update-TouchLedger)) {
+                    $what = if ($e.kind -eq 'full-auth') { "cause=$($e.cause) planned=$($e.planned)" } else { "verdict=$($e.verdict)" }
+                    Write-Log "ledger: $($e.kind) $($e.hkt) $what"
+                }
+            } catch { Write-Log "ledger update threw: $_" }
+        }
+        if ($cycle % 180 -eq 2) {
+            try {
+                $bad = @(Test-IbkrTasks)
+                if ($bad.Count) { Write-Log "failing IBKR tasks: $($bad -join ', ')"; Send-Alert "critical" "gateway:tasks" "IBKR scheduled task(s) failing: $($bad -join ', ')" }
+            } catch { }
+        }
+        $hold = $false; try { $hold = (Get-WeeklyWindow).InHold } catch { }
 
         if (Test-GatewayUp) {
             if ($gwFail -ge $gatewayGraceCycles) {
@@ -243,38 +314,42 @@ while ($true) {
             if ($gwFail -eq 1) {
                 Write-Log "LIVE gateway down (4001 or IBC-Live missing) -- ${gatewayGraceCycles}-cycle grace (~2min)"
             } elseif ($gwFail -eq $gatewayGraceCycles) {
-                Write-Log "LIVE gateway still down after grace -- toast + critical alert + launch passkey prompt"
-                Show-Toast "LIVE IB Gateway down" "No API on 4001 / IBC not running -- launching the passkey prompt; touch the YubiKey when it appears."
-                Send-Alert "critical" "gateway:ibc4001" "LIVE gateway down >2min (4001/IBC missing) -- launching the passkey login; touch the YubiKey"
-# Containers deliberately held stopped: one file per container name in the hold dir shared with
-# infra-watchdog.sh and gateway-hold.sh (QUANT_WEEKEND_SLEEP_SPEC 4.2, 2026-11-21). Before this,
-# the dashboard branch below `docker restart`ed a held container ~2 min after any deliberate
-# stop. Returns $null when WSL can't be asked, so the caller treats nothing as held.
-function Get-HeldContainers {
-    try {
-        $out = & wsl.exe -d $distro -- ls -1 /home/cap/.container-hold 2>$null
-        if ($LASTEXITCODE -ne 0) { return $null }
-        return @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    } catch { return $null }
-}
-
+                # Record WHY it is down, so the full auth that follows gets a named trigger.
+                $cause = 'unknown'; try { $cause = Get-IbcDownCause } catch { }
+                try {
+                    @{ sinceHkt = (Get-HktNow).AddSeconds(-$gatewayGraceCycles * $checkIntervalSec).ToString('yyyy-MM-dd HH:mm:ss'); cause = $cause } |
+                        ConvertTo-Json | Set-Content 'C:\IBC-Live\Logs\gateway-down.state.json' -Encoding UTF8
+                } catch { }
                 $gwCooldown = $actionCooldownCycles
-$heldNoted = @{}                # label -> $true while we've logged its hold (log once, no alert)
-                if (Test-LoginInProgress) {
-                    Write-Log "a login attempt is already in progress (autostart/manual) -- not double-launching"
-                } elseif (Start-LiveLogin) {
-                    Write-Log "auto-launched ibkr-live-login.ps1 (gateway-down incident)"
+                if ($hold) {
+                    $wk = Get-WeeklyWindow
+                    Write-Log "LIVE gateway down (cause=$cause) during the WEEKEND HOLD -- no login, no page; weekly touch at $(Format-Hkt $wk.Touch)"
+                    Send-Alert "error" "gateway:hold" "LIVE gateway down (cause=$cause) during weekend hold -- weekly touch at $(Format-Hkt $wk.Touch)"
+                } else {
+                    Write-Log "LIVE gateway still down after grace (cause=$cause) -- toast + critical alert + launch passkey prompt"
+                    Show-Toast "LIVE IB Gateway down" "No API on 4001 / IBC not running ($cause) -- launching the passkey prompt; touch the YubiKey when it appears."
+                    Send-Alert "critical" "gateway:ibc4001" "LIVE gateway down >2min (cause=$cause) -- launching the passkey login; touch the YubiKey"
+                    if (Test-LoginInProgress) {
+                        Write-Log "a login attempt is already in progress (autostart/manual) -- not double-launching"
+                    } elseif (Start-LiveLogin) {
+                        Write-Log "auto-launched ibkr-live-login.ps1 (gateway-down incident)"
+                    }
                 }
             } elseif ($gwFail -gt $gatewayGraceCycles -and $gwCooldown -le 0) {
-                # Still down ~5min after the last action: re-prompt ONLY if no login attempt
-                # is running (the previous one timed out at 210s). Login guards make a launch
-                # against a pending 2FA prompt adopt it instead of duplicating IBC.
+                # Still down ~5min after the last action: re-prompt ONLY if no login attempt is
+                # running (login guards adopt a pending prompt instead of duplicating IBC).
+                # Weekend hold: silent (weekly-touch prompts at T). After 2h: hourly only.
                 $gwCooldown = $actionCooldownCycles
-                if (Test-LoginInProgress) {
+                $mins = [int]($gwFail * $checkIntervalSec / 60)
+                $frozen = ($gwFail -ge $freezeAfterCycles) -and ((($gwFail - $freezeAfterCycles) % $freezeEveryCycles) -ge $actionCooldownCycles)
+                if ($hold -or $frozen) {
+                    # deliberately quiet
+                } elseif (Test-LoginInProgress) {
                     Write-Log "gateway still down; login still in progress (human may be fetching the key) -- waiting"
                 } else {
-                    Write-Log "gateway still down and no login in progress -- re-launching passkey prompt"
-                    Send-Alert "critical" "gateway:ibc4001" "LIVE gateway still down after $([int]($gwFail * $checkIntervalSec / 60))min -- re-launching the passkey login"
+                    $tag = if ($gwFail -ge $freezeAfterCycles) { ' (down 2h+, hourly re-prompts now -- needs a human)' } else { '' }
+                    Write-Log "gateway still down after ${mins}min and no login in progress -- re-launching passkey prompt$tag"
+                    Send-Alert "critical" "gateway:ibc4001" "LIVE gateway still down after ${mins}min -- re-launching the passkey login$tag"
                     Show-Toast "LIVE IB Gateway still down" "Re-launching the passkey prompt -- touch the YubiKey when it appears."
                     if (Start-LiveLogin) { Write-Log "auto-launched ibkr-live-login.ps1 (re-prompt)" }
                 }
@@ -305,6 +380,29 @@ $heldNoted = @{}                # label -> $true while we've logged its hold (lo
 
         $state = @{}
         foreach ($inst in $instances) { $state[$inst.Label] = Test-DashboardUp $inst.Port }
+        # A held container is down on purpose (weekend sleep, manual hold): treat it as not
+        # monitored -- no fail count, no restart, no alert, and it doesn't count towards the
+        # "BOTH unreachable" WSL-level assessment. Only asked when something is down.
+        if (@($instances | Where-Object { -not $state[$_.Label] }).Count -gt 0) {
+            $held = Get-HeldContainers
+            foreach ($inst in $instances) {
+                $l = $inst.Label
+                if ($held -and ($held -contains $inst.Container)) {
+                    if (-not $state[$l] -and -not $heldNoted[$l]) {
+                        Write-Log "$l ($($inst.Container)) is HELD (/home/cap/.container-hold) -- not monitoring it until the hold is removed"
+                        $heldNoted[$l] = $true
+                    }
+                    $state[$l] = $true; $fail[$l] = 0
+                } elseif ($heldNoted[$l]) {
+                    Write-Log "$l hold removed -- monitoring again"
+                    $heldNoted[$l] = $false
+                }
+            }
+        } else {
+            foreach ($k in @($heldNoted.Keys)) {
+                if ($heldNoted[$k]) { Write-Log "$k hold removed -- monitoring again"; $heldNoted[$k] = $false }
+            }
+        }
         $downLabels = @($instances | Where-Object { -not $state[$_.Label] } | ForEach-Object { $_.Label })
 
         foreach ($k in @($cooldown.Keys)) { if ($cooldown[$k] -gt 0) { $cooldown[$k]-- } }
@@ -380,29 +478,6 @@ $heldNoted = @{}                # label -> $true while we've logged its hold (lo
             # NOTIFICATION_SPEC: `error`, not `critical` -- the restart itself succeeded, so
             # there is nothing to act on now. infra-watchdog.sh records its own restarts the
             # same way, so both layers feed one digest.
-        # A held container is down on purpose (weekend sleep, manual hold): treat it as not
-        # monitored -- no fail count, no restart, no alert, and it doesn't count towards the
-        # "BOTH unreachable" WSL-level assessment. Only asked when something is down.
-        if (@($instances | Where-Object { -not $state[$_.Label] }).Count -gt 0) {
-            $held = Get-HeldContainers
-            foreach ($inst in $instances) {
-                $l = $inst.Label
-                if ($held -and ($held -contains $inst.Container)) {
-                    if (-not $state[$l] -and -not $heldNoted[$l]) {
-                        Write-Log "$l ($($inst.Container)) is HELD (/home/cap/.container-hold) -- not monitoring it until the hold is removed"
-                        $heldNoted[$l] = $true
-                    }
-                    $state[$l] = $true; $fail[$l] = 0
-                } elseif ($heldNoted[$l]) {
-                    Write-Log "$l hold removed -- monitoring again"
-                    $heldNoted[$l] = $false
-                }
-            }
-        } else {
-            foreach ($k in @($heldNoted.Keys)) {
-                if ($heldNoted[$k]) { Write-Log "$k hold removed -- monitoring again"; $heldNoted[$k] = $false }
-            }
-        }
             Send-Alert "error" "restart:$l" "quant: $l dashboard down ~${mins}min and not recovered by infra-watchdog -- restarting $($inst.Container)"
             try {
                 & wsl.exe -d $distro -- docker restart $($inst.Container) 2>$null | Out-Null

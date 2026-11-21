@@ -136,12 +136,15 @@ services:
       context: .
       dockerfile: Dockerfile.gateway
     container_name: quant-ibgateway-live-docker
-    restart: unless-stopped
-    # Real U12991898 credentials -- NEVER paper's. Gitignored, never committed. Blank
-    # during Stage 2 (stub build/verify); populated only for Stage 3, after the explicit
-    # go/no-go checkpoint (real money, real 2FA push to the phone).
-    env_file:
-      - .env.live
+    # PARKED FOR GOOD 2026-11-21 (IBKR_WEEKLY_2FA_SPEC §3.2). With `unless-stopped` the
+    # already-created container auto-started on EVERY Docker daemon start (each Windows boot +
+    # the daily `wsl --shutdown`) -- profiles only gate `compose up`. It made 56 LIVE login
+    # attempts for U12991898 (Oct 14 -> Nov 21), each opening a passkey challenge it can never
+    # finish, colliding with the real Windows login and feeding IBKR's failed-login throttle.
+    # `restart: "no"` + NO credentials: even an explicit --with-gateway recreate cannot log in
+    # to LIVE. To revive it you must re-add `env_file: [.env.live]` by hand (and stop the
+    # Windows gateway first -- one session per username).
+    restart: "no"
     environment:
       - TRADING_MODE=live
       - VNC_SERVER_PASSWORD=
