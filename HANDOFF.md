@@ -5,6 +5,16 @@ Last updated 2026-10-17.
 
 ---
 
+### 💤 2026-11-21: quant weekend sleep LIVE (QUANT_WEEKEND_SLEEP_SPEC)
+Stops the 3 quant containers (live dash, paper dash, paper gateway, ~1.2 GB) Sat 06:30 -> Sun 20:00 HKT
+via holds in `/home/cap/.container-hold` (infra-watchdog already honours them; watchdog.ps1 now does
+too; restarted 21:33 HKT to load it). WSL cron runs `weekend-docker.sh tick` every 5 min, log
+`/home/cap/weekend-docker.log`. Manual: `weekend-docker.sh sleep|wake|status`. Tests:
+`bash scripts/weekend_docker_test.sh` 36/36. First sleep Sat 21:33 HKT: Windows free RAM +2.7 GB
+(vmmemWSL 5.3 -> 2.9 GB). First automatic wake: Sun 2026-11-22 20:00 HKT (before the 20:35 touch).
+Check then: `weekend-docker.sh status` all running, watchdog.log "hold removed -- monitoring again".
+Note: watchdog.ps1 had silently died ~19:35 HKT Sat (cause unknown); relaunched 21:33.
+
 ### 🔑 OPEN 2026-11-21: LIVE gateway needs a YubiKey touch ~daily (26 touches / 31 days, target 1/week)
 
 The gateway is **down now** (user reboot 07:25Z today). Its prompt was killed by the Docker

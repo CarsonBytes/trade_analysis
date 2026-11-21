@@ -19,6 +19,12 @@ today=$(date +%F)
 read -r lastday count < "$CNTFILE" 2>/dev/null || { lastday=""; count=0; }
 [ "$lastday" != "$today" ] && count=0
 
+# Stopped on purpose (weekend sleep / hold, QUANT_WEEKEND_SLEEP_SPEC 4.3) or simply not
+# running: nothing to capture, and a failed exec must not count as a stall.
+if [ "$(docker inspect -f '{{.State.Running}}' quant-dashboard-live-docker 2>/dev/null)" != "true" ]; then
+    exit 0
+fi
+
 # Probe = IN-CONTAINER favicon: the event-loop liveness signal (same endpoint the
 # container healthcheck uses). NOT a host-side root fetch -- a full render takes
 # 3.3-11s+ per connected browser client and routinely blows short host budgets

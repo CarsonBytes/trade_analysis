@@ -228,7 +228,20 @@ while ($true) {
                 Write-Log "LIVE gateway still down after grace -- toast + critical alert + launch passkey prompt"
                 Show-Toast "LIVE IB Gateway down" "No API on 4001 / IBC not running -- launching the passkey prompt; touch the YubiKey when it appears."
                 Send-Alert "critical" "gateway:ibc4001" "LIVE gateway down >2min (4001/IBC missing) -- launching the passkey login; touch the YubiKey"
+# Containers deliberately held stopped: one file per container name in the hold dir shared with
+# infra-watchdog.sh and gateway-hold.sh (QUANT_WEEKEND_SLEEP_SPEC 4.2, 2026-11-21). Before this,
+# the dashboard branch below `docker restart`ed a held container ~2 min after any deliberate
+# stop. Returns $null when WSL can't be asked, so the caller treats nothing as held.
+function Get-HeldContainers {
+    try {
+        $out = & wsl.exe -d $distro -- ls -1 /home/cap/.container-hold 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch { return $null }
+}
+
                 $gwCooldown = $actionCooldownCycles
+$heldNoted = @{}                # label -> $true while we've logged its hold (log once, no alert)
                 if (Test-LoginInProgress) {
                     Write-Log "a login attempt is already in progress (autostart/manual) -- not double-launching"
                 } elseif (Start-LiveLogin) {
@@ -349,6 +362,29 @@ while ($true) {
             # NOTIFICATION_SPEC: `error`, not `critical` -- the restart itself succeeded, so
             # there is nothing to act on now. infra-watchdog.sh records its own restarts the
             # same way, so both layers feed one digest.
+        # A held container is down on purpose (weekend sleep, manual hold): treat it as not
+        # monitored -- no fail count, no restart, no alert, and it doesn't count towards the
+        # "BOTH unreachable" WSL-level assessment. Only asked when something is down.
+        if (@($instances | Where-Object { -not $state[$_.Label] }).Count -gt 0) {
+            $held = Get-HeldContainers
+            foreach ($inst in $instances) {
+                $l = $inst.Label
+                if ($held -and ($held -contains $inst.Container)) {
+                    if (-not $state[$l] -and -not $heldNoted[$l]) {
+                        Write-Log "$l ($($inst.Container)) is HELD (/home/cap/.container-hold) -- not monitoring it until the hold is removed"
+                        $heldNoted[$l] = $true
+                    }
+                    $state[$l] = $true; $fail[$l] = 0
+                } elseif ($heldNoted[$l]) {
+                    Write-Log "$l hold removed -- monitoring again"
+                    $heldNoted[$l] = $false
+                }
+            }
+        } else {
+            foreach ($k in @($heldNoted.Keys)) {
+                if ($heldNoted[$k]) { Write-Log "$k hold removed -- monitoring again"; $heldNoted[$k] = $false }
+            }
+        }
             Send-Alert "error" "restart:$l" "quant: $l dashboard down ~${mins}min and not recovered by infra-watchdog -- restarting $($inst.Container)"
             try {
                 & wsl.exe -d $distro -- docker restart $($inst.Container) 2>$null | Out-Null
