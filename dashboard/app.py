@@ -635,7 +635,17 @@ def health_banner() -> None:
 
     rec = service.STATE.get("reconcile") or {}
     rec_tooltip = None
-    if rec.get("only_local") or rec.get("only_broker"):
+    if rec.get("short"):
+        # 2026-11-21 (IBKR_LONG_ONLY_GUARD_SPEC G7): a short on this long-only book is the
+        # worst desync there is -- name it, don't fold it into a generic "mismatch found".
+        rec_colour = "text-red"
+        rec_txt = "SHORT " + ", ".join(f"{s['symbol']} {s['qty']:+.0f}" for s in rec["short"])
+        rec_tooltip = ("The broker holds SHORT positions. This strategy is long-only, so these "
+                       "are unintended and have no stop. Close them during US market hours "
+                       "(see RETRO_2026-11-21.md §6). Other differences: "
+                       f"broker-only {rec.get('only_broker')}, journal-only "
+                       f"{rec.get('only_local')}, quantity {rec.get('qty_mismatch')}.")
+    elif rec.get("only_local") or rec.get("only_broker") or rec.get("qty_mismatch"):
         rec_colour, rec_txt = "text-red", "mismatch found"
         # 2026-07-23: this used to ALSO render as a separate "⚠ position mismatch" badge in
         # header_status() -- same STATE["reconcile"], same event, shown twice at once. That
@@ -648,7 +658,8 @@ def health_banner() -> None:
             f"Broker reconciliation (run on last login, or periodically -- see "
             f"RECONCILE_PERIODIC_SEC) found a desync -- "
             f"local-only (ghost, no broker position): {rec.get('only_local')}; "
-            f"broker-only (no local record): {rec.get('only_broker')}. "
+            f"broker-only (no local record): {rec.get('only_broker')}; "
+            f"quantity differs: {rec.get('qty_mismatch') or []}. "
             f"Check ib_mirror vs paper_trades and the broker's own position list "
             f"directly before trusting P&L numbers.")
     elif rec.get("skipped"):
@@ -1330,6 +1341,53 @@ def _monthly_attribution() -> list[dict]:
     return out
 
 
+def _to_base(row: dict, field: str, usd_to_base: float, base_ccy: str) -> float:
+    """A portfolio-row money field converted to the account base currency."""
+    v = float(row.get(field) or 0.0)
+    return v if (row.get("currency") or "USD") == base_ccy else v * usd_to_base
+
+
+def _untracked_positions_card(rows: list[dict], nl, usd_to_base: float, base_ccy: str,
+                              money) -> None:
+    """ADDED 2026-11-21 (IBKR_LONG_ONLY_GUARD_SPEC G6.1): every broker position the strategy
+    does not own -- orphan-order fills, manual trades, and ANY short (this book is long-only,
+    so a short is unintended by definition). The LIVE account held QQQ -8 / AMLP -21 /
+    CPER -84 / SPY -4 for 22 days while this panel said "0 open, unrealized HKD 0".
+    Hidden when empty. Data comes from STATE (refresh_cheap); no broker call here."""
+    if not rows:
+        return
+    has_short = any(float(r.get("qty") or 0) < 0 for r in rows)
+    with ui.card().classes(("bg-red-1" if has_short else "bg-orange-1") + " w-full mt-2"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("report", color="red" if has_short else "orange").classes("text-xl")
+            ui.label("Untracked broker positions" + (" — UNINTENDED SHORT" if has_short else ""))\
+                .classes("text-sm font-bold " + ("text-red" if has_short else "text-orange-9"))
+        ui.label("Held at the broker but NOT managed by the strategy: no stop, no target, "
+                 "not in the journal or the retrospective."
+                 + (" This strategy is long-only, so every short here is a fault: close it "
+                    "during US market hours." if has_short else "")).classes("text-xs text-grey-8")
+        cols = [{"name": k, "label": l, "field": k, "align": a} for k, l, a in (
+            ("symbol", "Symbol", "left"), ("qty", "Qty", "right"),
+            ("avg", "Avg cost", "right"), ("px", "Mark", "right"),
+            ("mv", f"Value ({base_ccy})", "right"), ("pnl", f"Unrealized ({base_ccy})", "right"),
+            ("nav", "% NAV", "right"))]
+        table_rows, tot_pnl = [], 0.0
+        for r in rows:
+            mv = _to_base(r, "market_value", usd_to_base, base_ccy)
+            pnl = _to_base(r, "unrealized_pnl", usd_to_base, base_ccy)
+            tot_pnl += pnl
+            table_rows.append({
+                "symbol": r.get("symbol"), "qty": f"{float(r.get('qty') or 0):+,.0f}",
+                "avg": f"{float(r.get('avg_cost') or 0):,.2f}",
+                "px": f"{float(r.get('market_price') or 0):,.2f}",
+                "mv": f"{mv:,.0f}", "pnl": f"{pnl:+,.0f}",
+                "nav": f"{(abs(mv) / nl * 100.0):.1f}%" if nl else "—"})
+        ui.table(columns=cols, rows=table_rows, row_key="symbol").props("dense flat")\
+            .classes("w-full")
+        ui.label(f"Total unrealized on untracked positions: {money(tot_pnl)}").classes(
+            "text-xs font-bold " + ("text-green" if tot_pnl >= 0 else "text-red"))
+
+
 @ui.refreshable
 def portfolio_panel() -> None:
     """IBKR portfolio overview in the account base currency (HKD): total value,
@@ -1443,6 +1501,15 @@ def portfolio_panel() -> None:
                              "window — the honest 'is this strategy earning its keep' check. "
                              "SPY return is unweighted/undiversified for comparison purposes "
                              "only, not a claim the account should hold 100% SPY.")
+        _untracked = service.STATE.get("untracked_positions") or []
+        if _untracked:
+            _u_pnl = sum(_to_base(r, "unrealized_pnl", usd_to_base, ccy) for r in _untracked)
+            ui.label(f"⚠ includes {_money(_u_pnl)} unrealized from positions the strategy "
+                     "does NOT own — see 'Untracked broker positions' below").classes(
+                "text-xs font-bold text-red mt-1")
+
+    _untracked_positions_card(service.STATE.get("untracked_positions") or [], nl,
+                              usd_to_base, ccy, _money)
 
     with ui.row().classes("w-full flex-wrap gap-6 items-stretch mt-2"):
         _stat("Total value", _money(nl), "text-grey-9",

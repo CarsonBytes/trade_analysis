@@ -398,6 +398,39 @@ def test_red_pushes_once_per_dedupe_group():
             pass
 
 
+def test_humanize_mismatch_direction():
+    print("\nhumanize(): mismatch text follows the DIRECTION of the desync (2026-11-21: "
+          "22 days of 'journal has them, broker doesn't' for broker-only shorts):")
+    from dashboard.core import notable_events as ne
+    t, d = ne.humanize("reconcile: broker/local position MISMATCH -- only_local(ghost)=[] "
+                       "only_broker(untracked)=['AMLP', 'CPER', 'QQQ', 'SPY']")
+    check("broker-only title", t, "Broker holds untracked positions (AMLP, CPER, QQQ, SPY)")
+    check("broker-only detail never claims the journal has them",
+          "journal doesn't track" in d and "journal has" not in d.lower(), True)
+    t, d = ne.humanize("reconcile: broker/local position MISMATCH -- SHORT=[QQQ -8, SPY -4] "
+                       "only_local(ghost)=[] only_broker(untracked)=['SPY'] "
+                       "qty_mismatch=[QQQ broker=-8 local=7]")
+    check("short title", t, "UNINTENDED SHORT (QQQ -8, SPY -4)")
+    check("short detail names the quantity gap", "QQQ broker -8 vs journal 7" in d, True)
+    t, d = ne.humanize("reconcile: broker/local position MISMATCH -- only_local(ghost)=[] "
+                       "only_broker(untracked)=[] qty_mismatch=[AMLP broker=652 local=37]")
+    check("qty-only title", t, "Quantity differs (AMLP)")
+    t, _ = ne.humanize("reconcile: mismatch PERSISTING for 3.0 days -- reconcile: broker/local "
+                       "position MISMATCH -- SHORT=[QQQ -8] only_local(ghost)=[] "
+                       "only_broker(untracked)=[]")
+    check("digest title", t, "Still unresolved after 3.0 days: UNINTENDED SHORT (QQQ -8)")
+    t, _ = ne.humanize("reconcile: mismatch CLEARED -- broker/local positions now match")
+    check("cleared is not a 'disagree' alarm", t, "Records match again")
+
+
+def test_short_mismatch_is_red():
+    print("\nclassify(): a reconcile message recorded at level=error (any short) is RED:")
+    from dashboard.core import notable_events as ne
+    check("error -> red", ne.classify("error", "reconcile: broker/local position MISMATCH -- "
+                                     "SHORT=[QQQ -8] only_local(ghost)=[] "
+                                     "only_broker(untracked)=[]"), "red")
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

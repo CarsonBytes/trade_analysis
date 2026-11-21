@@ -346,6 +346,48 @@ def broker_positions() -> dict | None:
     return out
 
 
+def portfolio_item_dict(item) -> dict | None:
+    """PURE: one ib_async PortfolioItem -> a plain JSON-safe dict (None for CASH/blank rows).
+    market_value / unrealized_pnl / avg_cost are in the CONTRACT currency (USD for our ETFs)."""
+    c = getattr(item, "contract", None)
+    if c is None or getattr(c, "secType", None) == "CASH" or not getattr(c, "symbol", None):
+        return None
+    qty = float(getattr(item, "position", 0.0) or 0.0)
+    if not qty:
+        return None
+
+    def _f(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    return {"symbol": c.symbol, "con_id": getattr(c, "conId", None), "qty": qty,
+            "avg_cost": _f(getattr(item, "averageCost", None)),
+            "market_price": _f(getattr(item, "marketPrice", None)),
+            "market_value": _f(getattr(item, "marketValue", None)),
+            "unrealized_pnl": _f(getattr(item, "unrealizedPNL", None)),
+            "currency": getattr(c, "currency", None) or "USD"}
+
+
+def broker_portfolio_items() -> list[dict] | None:
+    """Every non-CASH portfolio row for THIS account (account-filtered), as plain dicts.
+    None if IB down / the read failed (callers keep last-good). Reads ib.portfolio(), the
+    account-updates cache ib_exec already relies on -- no extra round-trip.
+    ADDED 2026-11-21 (IBKR_LONG_ONLY_GUARD_SPEC G6.1): feeds the Portfolio panel's
+    "Untracked broker positions" card -- the LIVE book held ~HKD 90k of shorts for 22 days
+    while the panel said "0 open / unrealized HKD 0"."""
+    with _LOCK:
+        ib = _ensure_conn()
+        if ib is None:
+            return None
+    try:
+        acct = account_id()
+        items = call(lambda: filter_by_account(ib.portfolio() or [], acct), timeout=10)
+    except Exception:                                  # noqa: BLE001
+        return None
+    return [d for d in (portfolio_item_dict(i) for i in items) if d]
+
+
 def broker_open_order_symbols() -> set[str] | None:
     """Symbols with at least one live (not yet filled/cancelled) order at the broker --
     None if IB down. FOUND 2026-07-13: reconcile.py compared local "OPEN" trade records only

@@ -165,7 +165,8 @@ def test_reconcile_with_broker_records_cleared_after_previous_mismatch():
             store.cache_set("reconcile_had_mismatch", True)   # simulate a PRIOR mismatch
             result = reconcile.reconcile_with_broker()
 
-        check("current check itself is clean", result, {"only_local": [], "only_broker": [], "qty_mismatch": []})
+        check("current check itself is clean", result, {"only_local": [], "only_broker": [], "qty_mismatch": [],
+                                       "short": []})
         check("exactly one event recorded (the follow-up)", len(recorded), 1)
         check("follow-up message says CLEARED", "CLEARED" in recorded[0][0], True)
         check("follow-up pushed at warning level (reaches Telegram)", recorded[0][1], "warning")
@@ -203,7 +204,8 @@ def test_reconcile_with_broker_no_followup_when_already_clean():
                         side_effect=lambda msg, level="info": recorded.append((msg, level))):
             result = reconcile.reconcile_with_broker()   # no prior cache entry -> defaults clean
 
-        check("clean result", result, {"only_local": [], "only_broker": [], "qty_mismatch": []})
+        check("clean result", result, {"only_local": [], "only_broker": [], "qty_mismatch": [],
+                                       "short": []})
         check("no event recorded", len(recorded), 0)
     finally:
         if old is None:
@@ -249,6 +251,70 @@ def test_compare_positions_quantity_check_is_opt_in_and_quiet_when_matched():
     check("a short recorded against a long broker position is reported, not netted",
           compare_positions({"HYD": -6402.0}, {"HYD"},
                             local_open_qty={"HYD": 66.0})["qty_mismatch"][0]["delta"], -6468.0)
+
+
+# ---- long-only guard phase 1 (IBKR_LONG_ONLY_GUARD_SPEC G7/G6.1, 2026-11-21) ------------
+
+def test_short_positions_flags_every_negative_position():
+    print("\nshort_positions(): the 2026-11-21 LIVE book -- every short flagged, longs and "
+          "the SGOV shield ignored:")
+    from dashboard.core.reconcile import short_positions
+    live = {"QQQ": -8.0, "AMLP": -21.0, "CPER": -84.0, "SPY": -4.0, "SGOV": 384.0}
+    check("all four shorts, sorted",
+          [(s["symbol"], s["qty"]) for s in short_positions(live, {"SGOV"})],
+          [("AMLP", -21.0), ("CPER", -84.0), ("QQQ", -8.0), ("SPY", -4.0)])
+    check("a short on a TRACKED symbol still counts (QQQ #79: journal long 7, broker -8)",
+          [s["symbol"] for s in short_positions({"QQQ": -8.0})], ["QQQ"])
+    check("sub-share float noise is not a short", short_positions({"QQQ": -0.2}), [])
+    check("flat / long book -> no shorts", short_positions({"DIA": 15.0}), [])
+
+
+def test_mismatch_message_and_level():
+    print("\nmismatch_message()/mismatch_level(): a short is RED and named first:")
+    from dashboard.core.reconcile import mismatch_message, mismatch_level
+    res = {"only_local": [], "only_broker": ["AMLP", "CPER", "SPY"],
+           "qty_mismatch": [{"symbol": "QQQ", "broker": -8.0, "local": 7.0, "delta": -15.0}],
+           "short": [{"symbol": "QQQ", "qty": -8.0}, {"symbol": "SPY", "qty": -4.0}]}
+    msg = mismatch_message(res)
+    check("SHORT part present", "SHORT=[QQQ -8, SPY -4]" in msg, True)
+    check("qty part present", "qty_mismatch=[QQQ broker=-8 local=7]" in msg, True)
+    check("short -> error (RED, pushes now)", mismatch_level(res), "error")
+    check("no short -> warning",
+          mismatch_level({"only_local": ["EEM"], "only_broker": [], "qty_mismatch": []}),
+          "warning")
+    check("legacy shape unchanged when nothing is short",
+          mismatch_message({"only_local": ["EIMI"], "only_broker": [], "qty_mismatch": []}),
+          "reconcile: broker/local position MISMATCH -- only_local(ghost)=['EIMI'] "
+          "only_broker(untracked)=[]")
+
+
+def test_digest_due():
+    print("\ndigest_due(): a mismatch older than 24h re-pushes once per 24h:")
+    from dashboard.core.reconcile import digest_due
+    H = 3600.0
+    check("fresh mismatch -> no digest", digest_due(1000.0, None, 1000.0 + 5 * H), False)
+    check("25h old, never digested -> digest", digest_due(1000.0, None, 1000.0 + 25 * H), True)
+    check("digested 2h ago -> wait", digest_due(1000.0, 1000.0 + 23 * H, 1000.0 + 25 * H), False)
+    check("digested 24h ago -> again", digest_due(1000.0, 1000.0 + 25 * H, 1000.0 + 49 * H), True)
+    check("no mismatch -> never", digest_due(None, None, 1e12), False)
+
+
+def test_untracked_positions():
+    print("\nuntracked_positions(): broker rows the strategy does not own, shorts first:")
+    from dashboard.core.reconcile import untracked_positions
+    items = [
+        {"symbol": "SGOV", "qty": 384.0, "market_value": 38_700.0},
+        {"symbol": "DIA", "qty": 15.0, "market_value": 8_000.0},       # tracked long
+        {"symbol": "XLK", "qty": 3.0, "market_value": 700.0},          # manual long
+        {"symbol": "SPY", "qty": -4.0, "market_value": -2_760.0},
+        {"symbol": "QQQ", "qty": -8.0, "market_value": -5_100.0},      # tracked symbol, short
+        {"symbol": "EEM", "qty": 0.0, "market_value": 0.0},
+    ]
+    got = [r["symbol"] for r in untracked_positions(items, {"DIA", "QQQ"}, {"SGOV"})]
+    check("shorts first (by |value|), then untracked longs; SGOV/tracked/flat dropped",
+          got, ["QQQ", "SPY", "XLK"])
+    check("nothing untracked -> empty",
+          untracked_positions([{"symbol": "DIA", "qty": 15.0}], {"DIA"}), [])
 
 
 if __name__ == "__main__":

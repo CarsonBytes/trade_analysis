@@ -882,6 +882,21 @@ def refresh_cheap() -> None:
     else:
         STATE["equity_usd"] = None
         STATE["portfolio_room_usd"] = None
+    # ADDED 2026-11-21 (IBKR_LONG_ONLY_GUARD_SPEC G6.1): broker positions the strategy does
+    # NOT own (orphan-order fills, manual trades, any short). Computed here so the render path
+    # never calls the broker; None on a failed read keeps last-good.
+    if broker.is_ib():
+        try:
+            from dashboard.data import ib_client as _ibc_u
+            from dashboard.execution import ib_exec as _ibx_u
+            from dashboard.core import reconcile as _rec_u
+            _items = _ibc_u.broker_portfolio_items()
+            if _items is not None:
+                STATE["untracked_positions"] = _rec_u.untracked_positions(
+                    _items, _ibx_u.mirrored_open_symbols(),
+                    excluded_symbols={_ibx_u.SGOV_SYMBOL})
+        except Exception as e:                     # noqa: BLE001
+            log.debug("untracked_positions error: %s", e)
     # broker reconciliation: on every FRESH connection (login/reconnect -- see
     # ib_client.reconcile_needed()) PLUS periodically (RECONCILE_PERIODIC_SEC) even on a
     # long-lived, never-reconnecting connection. FIXED 2026-07-21: this used to run ONLY on
@@ -1302,7 +1317,8 @@ def refresh_cheap() -> None:
                 "tbill_rate": STATE.get("tbill_rate"),
                 "spy_benchmark": STATE.get("spy_benchmark"),
                 "broker_name": STATE.get("broker_name"),
-                "broker_conn": STATE.get("broker_conn")})
+                "broker_conn": STATE.get("broker_conn"),
+                "untracked_positions": STATE.get("untracked_positions")})
     except Exception as e:
         log.debug("portfolio_snapshot save error: %s", e)
     # fingerprint-churn audit counters (see _fp_audit_tick) -- runs LAST so it
@@ -2144,7 +2160,7 @@ def restore_cache() -> None:
     snap, _sts = store.cache_get("portfolio_snapshot")
     if snap:
         for k in ("account", "cash_sweep", "fx_usd", "tbill_rate", "spy_benchmark",
-                  "broker_name", "broker_conn"):
+                  "broker_name", "broker_conn", "untracked_positions"):
             if snap.get(k) is not None and not STATE.get(k):
                 STATE[k] = snap[k]
         pos = snap.get("positions")

@@ -115,17 +115,62 @@ def _kind_symbol(message: str) -> tuple[str, str | None]:
     return "system", sym
 
 
+def _bracket_syms(m: str, label: str) -> list[str]:
+    """Symbols inside `label=[...]` -- accepts both "['AMLP', 'CPER']" and "[AMLP, CPER]"."""
+    mo = re.search(re.escape(label) + r"=\[([^\]]*)\]", m)
+    return re.findall(r"[A-Z][A-Z0-9]{1,9}", mo.group(1)) if mo else []
+
+
+def _humanize_mismatch(m: str) -> tuple[str, str]:
+    """Direction-aware reconcile text (IBKR_LONG_ONLY_GUARD_SPEC G7.1). FIXED 2026-11-21:
+    the old text said "The journal has them, the broker doesn't" for EVERY mismatch and
+    took its symbols from the only_broker part -- so 22 days of "broker holds AMLP/CPER/
+    QQQ/SPY short" pushed to Telegram as the exact opposite."""
+    if "cleared" in m.lower():
+        return ("Records match again", "Broker and journal positions agree.")
+    persisting = re.search(r"PERSISTING for ([0-9.]+) days", m)
+    prefix = f"Still unresolved after {persisting.group(1)} days: " if persisting else ""
+    short_m = re.search(r"SHORT=\[([^\]]*)\]", m)
+    shorts = [s.strip() for s in short_m.group(1).split(",") if s.strip()] if short_m else []
+    only_local = _bracket_syms(m, "only_local(ghost)")
+    only_broker = _bracket_syms(m, "only_broker(untracked)")
+    qty_m = re.search(r"qty_mismatch=\[([^\]]*)\]", m)
+    qty_items = re.findall(r"([A-Z][A-Z0-9]{1,9}) broker=(-?[0-9.]+) local=(-?[0-9.]+)",
+                           qty_m.group(1)) if qty_m else []
+    parts = []
+    if shorts:
+        parts.append(f"The broker holds SHORT positions this long-only strategy never "
+                     f"intends: {', '.join(shorts)} -- unprotected, close them.")
+    if only_broker:
+        parts.append(f"Broker holds positions the journal doesn't track: "
+                     f"{', '.join(only_broker)} -- possible orphan order fill or manual trade.")
+    if only_local:
+        parts.append(f"Journal has positions the broker doesn't: {', '.join(only_local)} "
+                     f"-- usually an unfilled order.")
+    if qty_items:
+        parts.append("Quantity differs: " + ", ".join(
+            f"{s} broker {float(b):.0f} vs journal {float(l):.0f}" for s, b, l in qty_items) + ".")
+    detail = " ".join(parts) or "Broker and journal positions disagree."
+    if shorts:
+        title = f"UNINTENDED SHORT ({', '.join(shorts)})"
+    elif only_broker:
+        title = f"Broker holds untracked positions ({', '.join(only_broker)})"
+    elif only_local:
+        title = f"Records disagree ({', '.join(sorted(set(only_local)))})"
+    elif qty_items:
+        title = f"Quantity differs ({', '.join(s for s, _b, _l in qty_items)})"
+    else:
+        title = "Records disagree"
+    return prefix + title, detail
+
+
 def humanize(message: str) -> tuple[str, str]:
     """Plain-language (title, detail) for a raw event message. Falls back to a trimmed
     copy of the raw text -- raw is ALWAYS available via details expansion in the UI."""
     m = message or ""
     ml = m.lower()
     if "mismatch" in ml:
-        syms = ", ".join(sorted(set(re.findall(r"[A-Z]{2,6}", m.split("only_local")[-1])))
-                         ) if "only_local" in m else ""
-        syms = syms or "unknown instruments"
-        return (f"Records disagree ({syms})",
-                "The journal has them, the broker doesn't -- usually an unfilled order.")
+        return _humanize_mismatch(m)
     mm = re.match(r"^([A-Z][A-Z0-9]{1,9})\s*:\s*(.*)$", m)
     if mm and "auto-cancelled" in ml:
         return f"{mm.group(1)} order cancelled", \

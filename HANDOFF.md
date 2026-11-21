@@ -5,6 +5,90 @@ Last updated 2026-10-17.
 
 ---
 
+### 🔑 OPEN 2026-11-21: LIVE gateway needs a YubiKey touch ~daily (26 touches / 31 days, target 1/week)
+
+The gateway is **down now** (user reboot 07:25Z today). Its prompt was killed by the Docker
+gateway's competing challenge, and the gateway-down page was `suppressed-cap`. The shared
+10/day cap had been used up by `D:\claude\task-heartbeat-check.ps1`, which uses the legacy
+1-arg `gateway-push.sh` call (critical, key `legacy`). It sent RustDesk/router heartbeat
+pages every 10 min, so this was not the short-position alerts. Gateway keys now have their own
+cap. Spec follow-up, not done: give that job a real key + `error` level. Recommendation: touch once **after** IBKR's Sunday reset (Nov 22)
+and before Mon US open (22:30 HKT). A touch today is invalidated tomorrow.
+
+Only 4 of the 26 touches were the weekly IBKR re-auth. Causes:
+- 7 daily-token rejections by IBKR (`security tokens ... expired (routinely)`)
+- 5 power losses and 6 user reboots/sleeps
+- 3 redundant `ColdRestartTime` touches, 2 of them shifted to Monday 12:30 HKT after Windows
+  moved to PST
+- 1 manual close
+
+Also found:
+- The **parked Docker LIVE gateway still auto-starts** (`restart=unless-stopped`, no hold file).
+  It has made 56 LIVE login attempts since Oct 14, one per daily `wsl --shutdown` plus one per
+  boot.
+- `Restart Observe/Verify` have been failing silently since Oct 17.
+- Windows timezone changed via `tzutil` (PST Nov 4 → EST today).
+- None of the GATEWAY_AUTOLOGIN phases were implemented.
+
+**Retro:** [RETRO_2FA_2026-11-21.md](RETRO_2FA_2026-11-21.md).
+**Spec:** [IBKR_WEEKLY_2FA_SPEC.md](IBKR_WEEKLY_2FA_SPEC.md).
+
+**DEPLOYED 2026-11-21 16:50 HKT (spec §10).** All logs and schedules are now HKT, independent
+of the Windows TZ.
+- Docker live gateway parked for good.
+- `ColdRestartTime` removed.
+- Login is non-blocking `-Unattended`, with a login mutex and a 3-launches-per-30-min budget.
+- **Weekend hold** Sat 06:00 → Sun 20:35 HKT: no auto-login, digest only.
+- **Weekly touch Sun 20:35 HKT**, reminder 20:25, configured in `C:\IBC-Live\weekly-touch.json`.
+  Monday 09:00 report from `C:\IBC-Live\Logs\touch-ledger.jsonl`.
+- Gateway pages have their own Telegram cap.
+- Observe/verify tasks are disabled; failing tasks now page.
+
+Suite `scripts\windows\test-weekly2fa.ps1`: 44/44. The first live run is Sun Nov 22 20:35.
+Check the ledger shows `planned=true`. Open: the 2-week token-rejection measurement (G1);
+E3/D5/D6/D9 need user decisions. Nothing committed.
+
+---
+
+### 🚨 OPEN 2026-11-21: LIVE has been net SHORT since Oct 30 (QQQ −8, AMLP −21, CPER −84, SPY −4, ~31% NAV, no stop)
+
+Third unintended-short incident (after PAPER 2026-09-01/09-29). Found while explaining the
+Nov 20 "+HKD 2.8k" jump: **>100% of that day's gain, and ~all of the headline "+8,059" P&L,
+is from the shorts.** Confirmed via Flex (EQUT StockShort, STFU fills). Causes: orphan GTC
+stops of trades VOIDed without confirming the cancel (AMLP #16, CPER #12, SPY #33 filled
+at exactly their old SLs); QQQ: the stop was never resized after the 8→7 qty heal, plus reprotect
+re-armed SELL 7 against a −1 broker position; the exit `BUY 7 MKT` was "discarded" 100+
+times. Reconcile flagged it YELLOW every 10 min for 22 days, and the Telegram text says the reverse of what's true.
+**Retro:** [RETRO_2026-11-21.md](RETRO_2026-11-21.md). **Fix spec:**
+[IBKR_LONG_ONLY_GUARD_SPEC.md](IBKR_LONG_ONLY_GUARD_SPEC.md). **Still open:** user to cancel
+orphans and cover during RTH (retro §6). Possible remaining orphan: #34 QQQ SL 657.63.
+
+**Phase 1 of the guard spec SHIPPED 2026-11-21 (detection only, no order-path changes):**
+- `core/reconcile.py`: `short_positions()` → `result["short"]`; any short records the
+  mismatch at level=error (RED, pushes now); `digest_due()` re-pushes a RED "PERSISTING for
+  N days" digest once per 24h for any mismatch older than 24h (`reconcile_mismatch_since`,
+  `reconcile_digest_last` store keys). `untracked_positions()` pure helper.
+- `core/notable_events.py`: `_humanize_mismatch()`, direction-aware titles ("UNINTENDED
+  SHORT (…)", "Broker holds untracked positions (…)", "Records disagree (…)" for journal-only,
+  "Quantity differs (…)", "Records match again").
+- `data/ib_client.py`: `broker_portfolio_items()` / `portfolio_item_dict()`;
+  `web/service.py` caches `STATE["untracked_positions"]` in refresh_cheap (+ snapshot/restore);
+  `app.py`: "Untracked broker positions" card under the P&L headline (red when short), a red
+  "includes HKD X from positions the strategy does NOT own" line in the headline, and the
+  System Health reconcile line reads `SHORT QQQ -8, …` (also counts qty_mismatch now).
+- `scripts/flex_nav_reconcile.py`: one fetch feeds NAV + `_short_stock_by_day()`;
+  `short_alarm()` on the latest day → RED push + exit 2; the weekly wrapper now keeps the
+  exit code and always deletes the token from the container (`|| rc=$?` under `set -e`).
+  Verified against the real Nov statement: would have alarmed from 2026-10-30.
+- Tests: new `test_long_only_guard`, additions in `test_reconcile` / `test_notable_events`;
+  full suite 29/29 modules green.
+- NOT a phase-1 cause: the gateway-down page at 07:31Z on Nov 21 was `suppressed-cap` because
+  `D:\claude\task-heartbeat-check.ps1` used up gateway-push's daily cap of 10 criticals
+  (`legacy` key, every 10 min), not the short alerts (which go through Python notify, not
+  gateway-push). That was passed to the weekly-2FA session for its spec.
+
+---
+
 ### SHIPPED 2026-10-14: LIVE gateway end-to-end -- passkey login, TrustedIPs relay chain, dark-period P&L backfill
 
 **Passkey login works reliably.** `ibkr-live-login.ps1` (KeepAlive default, 210s timeout)
