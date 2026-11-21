@@ -103,6 +103,44 @@ orphans and cover during RTH (retro §6). Possible remaining orphan: #34 QQQ SL 
   (`legacy` key, every 10 min), not the short alerts (which go through Python notify, not
   gateway-push). That was passed to the weekly-2FA session for its spec.
 
+**Phase 2 of the guard spec BUILT 2026-11-21 (order-path changes; NOT deployed yet):**
+- `execution/ib_exec.py` G1: `place_guarded()` is now the ONLY caller of `ib.placeOrder()`
+  (T1 AST-scans `dashboard/` for it). Every order is checked by the pure `guard_check()`
+  against `order_book_snapshot()` = every client's resting orders (`reqAllOpenOrdersAsync`) +
+  signed positions, read off the loop thread just before the send. A SELL may not exceed
+  long − resting SELLs (OCA/bracket siblings count once, children of an unfilled parent are
+  exempt). Exit/reprotect/roll/resize are clamped, while entry/sweep/withdraw are refused. A failed
+  or unknown read refuses (an empty order read with a long held is re-read once after 2s).
+  `intent="cover"` BUYs can't exceed the open short minus resting cover BUYs. Refusals log
+  `GUARD: refused …`, then `flush_guard_events()` records them RED off the loop (`call_guarded()`).
+  Routed: the 3 entry brackets (`place_bracket_guarded`), `manual_close_position` (asks
+  `guard_verdict()` BEFORE cancelling its legs, so a refused exit leaves protection in place;
+  another client's orphan stop still counts against it), `_roll_position` (now a real
+  bracket: the new month's SL/TP used to rest unlinked before the parent filled, a naked
+  SELL), `_reprotect_bracket`, `keep_cash_usd` (FX passes), `sweep_cash`, `prepare_withdrawal`,
+  `ops/unwind_shorts.py` (cover clamp = the 2026-09-29 overshoot fix).
+- G4: `reprotect_naked_positions()` reads the broker's SIGNED position
+  (`reprotect_position_action`). Opposite side → nothing placed + RED "reprotect REFUSED …
+  UNINTENDED SHORT", flat → skip. A fill/cancel on the conId within 60s → deferred
+  (`settle_blocked`, `_recent_order_events` = broker-wide fills + own order log). Legs clamp to
+  the broker long. `heal_mirror_quantities()` now calls `_resize_resting_legs()`: modify this
+  trade's legs in place to the healed qty through the guard, or (refused / owned by another
+  client) cancel this client's legs + RED so reprotect re-arms at the right size.
+- Tests: `test_long_only_guard` T1–T3, T6–T8 (11 cases). The fakes in `test_ib_exec` and
+  `test_unwind_shorts` were updated for order sides / signed positions / the snapshot.
+  `pytest dashboard/tests`: 338 passed.
+- FOUND + FIXED while testing: `tests/hermetic.py` didn't blank TELEGRAM_BOT_TOKEN/CHAT_ID/
+  NTFY_URL, so a test that raised a RED event pushed to the real phone (2 pushes, "[?] GUARD:
+  refused SELL 8.0 QQQ / 66.0 HYD", 2026-11-21 ~08:36 UTC; test fakes, no real orders).
+  hermetic now blanks them, and `test_ib_exec` / `test_long_only_guard` import hermetic for
+  script-style runs.
+- NOT deployed: both quant dashboards were stopped (Exited 143) when this was built. Images
+  are baked (`build: .`), so LIVE changes only on `wsl2-docker-deploy-live.sh`, and PAPER
+  redeploys on `git push` (pre-push hook). Gate: PAPER one clean week (no unexpected
+  `GUARD: refused`, reprotect still re-arms real naked positions) → then LIVE. Watch for an
+  exit refused because another client's orphan stop is resting (phase 3's sweeper is what
+  cancels those). Any LIVE rebuild for another reason would ship phase 2 too.
+
 ---
 
 ### SHIPPED 2026-10-14: LIVE gateway end-to-end -- passkey login, TrustedIPs relay chain, dark-period P&L backfill

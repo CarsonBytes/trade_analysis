@@ -11,6 +11,8 @@ Run:  uv run python -m dashboard.tests.test_ib_exec
 """
 from __future__ import annotations
 
+from dashboard.tests import hermetic  # noqa: F401  (before any app module: no real pushes)
+
 import os
 import sys
 import time
@@ -1433,6 +1435,8 @@ def test_bracket_parent_tif_is_day_children_gtc():
         def __init__(self, kind):
             self.orderType, self.lmtPrice, self.tif, self.orderRef, self.account = (
                 "LMT", 0.0, None, None, None)
+            self.action = "BUY" if kind == "parent" else "SELL"   # G1 reads the side
+            self.totalQuantity = 10
 
     class _Bracket(list):
         def __init__(self):
@@ -1675,13 +1679,14 @@ def test_s1_unconfirmed_entry_is_never_mirrored():
     from dashboard.execution import ib_exec
 
     class _Leg:
-        def __init__(self):
+        def __init__(self, action="SELL"):
             self.orderType, self.lmtPrice, self.tif, self.orderRef, self.account = (
                 "LMT", 0.0, None, None, None)
+            self.action, self.totalQuantity = action, 10        # G1 reads the side
 
     class _Bracket(list):
         def __init__(self):
-            self.parent = _Leg()
+            self.parent = _Leg("BUY")
             super().__init__([self.parent, _Leg(), _Leg()])
 
     bracket = _Bracket()
@@ -1911,6 +1916,8 @@ def test_s1_unconfirmed_exit_is_reported_as_unprotected():
                            side_effect=lambda *a, **k: alerted.append(a) or "x"), \
          mock.patch.object(ib_exec, "record_order_exec"), \
          mock.patch.object(ib_exec, "_guard", return_value=_IB()), \
+         mock.patch.object(ib_exec, "order_book_snapshot",
+                           side_effect=lambda ib, acct: ib_exec.make_snapshot({7: 8.0}, [])), \
          mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
          mock.patch.object(ib_exec.store, "cache_set"):
         msg = ib_exec.manual_close_position({"id": 900001, "instrument": "QQQ"},
@@ -1944,6 +1951,8 @@ def test_s1_unconfirmed_exit_is_reported_as_unprotected():
                            side_effect=lambda *a, **k: alerted.append(a)), \
          mock.patch.object(ib_exec, "record_order_exec"), \
          mock.patch.object(ib_exec, "_guard", return_value=_IBOK()), \
+         mock.patch.object(ib_exec, "order_book_snapshot",
+                           side_effect=lambda ib, acct: ib_exec.make_snapshot({7: 8.0}, [])), \
          mock.patch.object(ib_exec.store, "cache_get", return_value=(None, None)), \
          mock.patch.object(ib_exec.store, "cache_set"):
         msg2 = ib_exec.manual_close_position({"id": 900002, "instrument": "QQQ"},
@@ -2222,9 +2231,10 @@ def test_reprotect_naked_positions():
             self.contract = _Contract(con_id)
 
     class _PortfolioItem:
-        def __init__(self, con_id, market_price):
+        def __init__(self, con_id, market_price, position=10.0):
             self.contract = _Contract(con_id)
             self.marketPrice = market_price
+            self.position = position              # G4.1: broker long -> reprotect may act
 
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -2427,9 +2437,10 @@ def test_heal_flagged_positions():
             self.avgCost = avg_cost
 
     class _PortfolioItem:
-        def __init__(self, con_id, market_price):
+        def __init__(self, con_id, market_price, position=10.0):
             self.contract = _Contract(con_id)
             self.marketPrice = market_price
+            self.position = position              # G4.1: broker long -> reprotect may act
             self.unrealizedPNL = 1.56
 
     fd, path = tempfile.mkstemp(suffix=".db")
@@ -2649,7 +2660,10 @@ def _manual_close_order(real_position, mirror_qty, direction="long"):
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="DU1"), \
              mock.patch.object(ib_exec.ib_client, "filter_by_account",
                               side_effect=lambda items, a: items), \
-             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+             mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+             mock.patch.object(ib_exec, "order_book_snapshot",
+                               side_effect=lambda ib, acct: ib_exec.make_snapshot(
+                                   {555: float(real_position)}, [])):
             ib_exec.manual_close_position({"id": 1, "instrument": "HYD",
                                            "direction": direction}, "test")
         return sent.get("order")
@@ -2804,16 +2818,21 @@ def test_zero_order_snapshot_must_persist_before_it_is_believed():
           act(None, has_positions=True, any_open_orders=False), ("skip", 1))
 
 
-def _reprotect_decision(journal_status, price, sl, tp, direction="long", has_order=False):
+def _reprotect_decision(journal_status, price, sl, tp, direction="long", has_order=False,
+                        broker_pos=None):
     """Drive reprotect_naked_positions()' decision for ONE row and report which branch it
-    takes: "skip" | "close" | "rearm". Everything else is mocked out."""
+    takes: "skip" | "close" | "rearm". Everything else is mocked out. broker_pos defaults to
+    the journal's own side (100 long / -100 short) -- G4.1 reads it."""
     from dashboard.execution import ib_exec
+    if broker_pos is None:
+        broker_pos = 100.0 if direction == "long" else -100.0
 
     class _C:
         def __init__(self, cid): self.conId = cid
 
     class _PF:
-        def __init__(self, cid, px): self.contract, self.marketPrice = _C(cid), px
+        def __init__(self, cid, px, pos):
+            self.contract, self.marketPrice, self.position = _C(cid), px, pos
 
     con_id = 555
     rows = [(9, con_id, 100.0, "VNQ", direction, sl, tp, journal_status)]
@@ -2823,7 +2842,7 @@ def _reprotect_decision(journal_status, price, sl, tp, direction="long", has_ord
         calls["close"] += 1
         return "closed %s: %s" % (trade["instrument"], reason)
 
-    def _fake_rearm(ib, trade, con_id_, qty, d, sl_, tp_, acct):
+    def _fake_rearm(ib, trade, con_id_, qty, d, sl_, tp_, acct, snap=None):
         calls["rearm"] += 1
         return "rearmed"
 
@@ -2832,7 +2851,7 @@ def _reprotect_decision(journal_status, price, sl, tp, direction="long", has_ord
          mock.patch.object(ib_exec.ib_client, "account_id", return_value="DU1"), \
          mock.patch.object(ib_exec.ib_client, "_run", return_value=[]), \
          mock.patch.object(ib_exec.ib_client, "call",
-                           return_value=(open_ids, {con_id: _PF(con_id, price)})), \
+                           return_value=(open_ids, {con_id: _PF(con_id, price, broker_pos)})), \
          mock.patch.object(ib_exec, "manual_close_position", side_effect=_fake_close), \
          mock.patch.object(ib_exec, "_reprotect_bracket", side_effect=_fake_rearm), \
          mock.patch.object(ib_exec, "_conn"), mock.patch.object(ib_exec.paper, "_LOCK"), \

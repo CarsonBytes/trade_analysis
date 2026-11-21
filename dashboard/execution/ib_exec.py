@@ -361,6 +361,301 @@ def alert_order_failure(res: dict, context: str = "") -> str:
     return msg
 
 
+# ---- G1: long-only ORDER GUARD (IBKR_LONG_ONLY_GUARD_SPEC §1, phase 2, 2026-11-21) -----------
+# THE INVARIANT (I1): for every contract, at every moment, the broker position is >= 0 AND the
+# resting SELL quantity is <= the broker's long position. Bracket legs still attached to an
+# UNFILLED parent BUY are the only exception (IBKR keeps them inactive until the parent fills).
+#
+# WHY: LIVE went net short on 2026-10-30 (QQQ -8, AMLP -21, CPER -84, SPY -4, ~31% NAV) through
+# separate SELL paths, each applying its own idea of "how much do we hold" -- a re-protect that
+# armed SELL 7 against a broker position of -1, a stop left at 8 after a heal cut the record to
+# 7, and orphan stops from VOIDed trades firing on positions that no longer existed (see
+# RETRO_2026-11-21.md). place_guarded() is now the ONLY code allowed to call ib.placeOrder()
+# (test_long_only_guard.test_only_place_guarded_calls_placeOrder greps for it), so every order
+# is checked against the SAME broker-truth snapshot by the SAME rule.
+GUARD_INTENTS = frozenset({"entry", "reprotect", "exit", "cover", "sweep", "fx",
+                           "withdraw", "roll", "resize"})
+# intents that may be CUT DOWN to what's allowed instead of refused outright: each exists to
+# reduce or protect an existing long, so sending less is always safer than sending nothing.
+GUARD_CLAMP_INTENTS = frozenset({"reprotect", "exit", "roll", "resize"})
+GUARD_EMPTY_REREAD_SEC = 2.0   # an EMPTY open-order read while a long is held is re-read once
+                               # this many seconds later before it is believed (2026-09-01: an
+                               # empty read during a post-reconnect sync gap is NOT "no orders")
+GUARD_EVENTS: list[dict] = []  # refusals raised on the IB loop thread, flushed off it (below)
+
+
+def order_keys(o) -> set:
+    """Identities of an order across clients/views: ("perm", permId) once IBKR assigned one,
+    and ("id", clientId, orderId). Two views of the same order share at least one."""
+    o = getattr(o, "order", o)
+    keys = {("id", getattr(o, "clientId", 0), getattr(o, "orderId", 0))}
+    perm = int(getattr(o, "permId", 0) or 0)
+    if perm:
+        keys.add(("perm", perm))
+    return keys
+
+
+def order_group_key(o):
+    """The fill-exclusive group an order belongs to: its OCA group, else its bracket parent
+    (IBKR makes a bracket's children one-cancels-all), else just itself."""
+    o = getattr(o, "order", o)
+    oca = getattr(o, "ocaGroup", "") or ""
+    if oca:
+        return ("oca", oca)
+    pid = int(getattr(o, "parentId", 0) or 0)
+    if pid:
+        return ("parent", getattr(o, "clientId", 0), pid)
+    return ("order", min(order_keys(o), key=repr))
+
+
+def resting_qty_by_con(trades, exclude=(), exclude_group=None) -> dict[int, dict[str, float]]:
+    """PURE: {conId: {"SELL": qty, "BUY": qty}} still resting at the broker that COULD fill.
+
+    - An OCA group (ocaGroup) or a bracket's sibling legs (same parentId) count ONCE -- at most
+      one of them can fill, so TP 8 + SL 8 is 8 shares of resting SELL, not 16.
+    - Legs attached to a parent that is itself still resting are skipped: they are inactive
+      until the parent fills (the I1 exception).
+    - Orders whose key is in `exclude` are ignored: the caller is cancelling/replacing them in
+      the same operation (an exit's own TP/SL legs, a resize's old leg).
+    - Orders in group `exclude_group` (order_group_key) are ignored: when checking a leg of
+      that group, its siblings don't add exposure (only one of the group can fill)."""
+    trades = list(trades or [])
+    excl = set(exclude or ())
+    resting_parents = set()
+    for t in trades:
+        o = getattr(t, "order", t)
+        resting_parents.add((getattr(o, "clientId", 0), getattr(o, "orderId", 0)))
+    groups: dict[tuple, float] = {}
+    for t in trades:
+        o = getattr(t, "order", t)
+        c = getattr(t, "contract", None)
+        con = int(getattr(c, "conId", 0) or 0)
+        side = str(getattr(o, "action", "") or "").upper()
+        if side not in ("BUY", "SELL") or (order_keys(o) & excl):
+            continue
+        cid, pid = getattr(o, "clientId", 0), int(getattr(o, "parentId", 0) or 0)
+        if pid and (cid, pid) in resting_parents:
+            continue                                   # inactive until its parent fills
+        st = getattr(t, "orderStatus", None)
+        rem = getattr(st, "remaining", None) if st is not None else None
+        try:
+            rem = float(rem)
+        except (TypeError, ValueError):
+            rem = 0.0
+        if rem <= 0:
+            filled = float(getattr(st, "filled", 0.0) or 0.0) if st is not None else 0.0
+            rem = float(getattr(o, "totalQuantity", 0.0) or 0.0) - filled
+        if rem <= 0:
+            continue
+        gkey = order_group_key(o)
+        if exclude_group is not None and gkey == exclude_group:
+            continue
+        k = (con, side, gkey)
+        groups[k] = max(groups.get(k, 0.0), rem)
+    out: dict[int, dict[str, float]] = {}
+    for (con, side, _g), q in groups.items():
+        d = out.setdefault(con, {"SELL": 0.0, "BUY": 0.0})
+        d[side] += q
+    return out
+
+
+def guard_check(action: str, qty: float, intent: str, *, sec_type: str = "STK",
+                position: float | None = None, resting_sell: float | None = None,
+                resting_buy: float = 0.0, attached_to_unfilled_parent: bool = False
+                ) -> tuple[str, float, str]:
+    """PURE decision behind place_guarded(): ("ok" | "clamp" | "refuse", qty_to_send, why).
+
+    SELL (not attached to an unfilled parent): allowed = max(0, long - resting SELL). Over the
+    limit -> clamp (exit/reprotect/roll/resize) or refuse. FAILS CLOSED: an unknown position or
+    an unknown resting-order picture refuses (2026-09-01: an empty read is not "nothing there").
+    BUY: no I1 check, but intent="cover" may never exceed the open short minus resting cover
+    BUYs, so a cover cannot overshoot into a long (the 2026-09-29 HYD -4,502 -> +4,767)."""
+    action = (action or "").upper()
+    try:
+        qty = float(qty)
+    except (TypeError, ValueError):
+        return ("refuse", 0.0, f"invalid quantity {qty!r}")
+    if intent not in GUARD_INTENTS:
+        return ("refuse", 0.0, f"unknown order intent {intent!r}")
+    if qty <= 0:
+        return ("refuse", 0.0, f"non-positive quantity {qty:g}")
+    if sec_type == "CASH":
+        return ("ok", qty, "FX conversion (no share position)")
+    if action == "SELL":
+        if attached_to_unfilled_parent:
+            return ("ok", qty, "bracket child of an unfilled parent BUY")
+        if position is None or resting_sell is None:
+            return ("refuse", 0.0, "position/open-order read unavailable -- guard fails closed")
+        long_pos = max(float(position), 0.0)
+        allowed = max(0.0, long_pos - float(resting_sell))
+        if qty <= allowed + 1e-6:
+            return ("ok", qty, f"long={position:g} resting_sell={resting_sell:g}")
+        whole = math.floor(allowed + 1e-6)
+        if whole < 1:
+            return ("refuse", 0.0, f"would open/extend a short (long={position:g}, "
+                                   f"resting_sell={resting_sell:g})")
+        if intent in GUARD_CLAMP_INTENTS:
+            return ("clamp", float(whole), f"clamped {qty:g} -> {whole} (long={position:g}, "
+                                           f"resting_sell={resting_sell:g})")
+        return ("refuse", 0.0, f"SELL {qty:g} exceeds the {whole} allowed (long={position:g}, "
+                               f"resting_sell={resting_sell:g})")
+    if action == "BUY":
+        if intent != "cover":
+            return ("ok", qty, "")
+        if position is None:
+            return ("refuse", 0.0, "position read unavailable -- cover refused (fails closed)")
+        open_short = max(0.0, -float(position)) - float(resting_buy or 0.0)
+        whole = math.floor(open_short + 1e-6)
+        if whole < 1:
+            return ("refuse", 0.0, f"nothing left to cover (position={position:g}, "
+                                   f"resting_buy={resting_buy:g})")
+        if qty > whole:
+            return ("clamp", float(whole), f"cover clamped {qty:g} -> {whole} so it cannot "
+                                           f"flip the position long")
+        return ("ok", qty, "")
+    return ("refuse", 0.0, f"unknown order action {action!r}")
+
+
+def make_snapshot(positions: dict, orders) -> dict:
+    """PURE: the broker picture place_guarded() checks against -- {conId: signed position} and
+    the raw resting-order list (every API client's, from reqAllOpenOrdersAsync)."""
+    return {"positions": {int(k): float(v) for k, v in (positions or {}).items()},
+            "orders": list(orders or [])}
+
+
+def order_book_snapshot(ib, acct: str | None) -> dict | None:
+    """Fresh broker read for the guard: every client's resting orders + this account's signed
+    positions. Must be called OFF the IB loop thread (it uses ib_client._run). None on failure,
+    which makes every SELL check fail closed. An EMPTY order list while a long is held is
+    re-read once GUARD_EMPTY_REREAD_SEC later (two consecutive empties are believed)."""
+    async def _req():
+        return await ib.reqAllOpenOrdersAsync()
+    try:
+        orders = list(ib_client._run(_req(), timeout=15) or [])
+        positions = ib_client.call(lambda: {
+            p.contract.conId: float(p.position)
+            for p in ib_client.filter_by_account(ib.positions() or [], acct)}, timeout=10)
+        if not orders and any(v > 0 for v in positions.values()):
+            time.sleep(GUARD_EMPTY_REREAD_SEC)
+            orders = list(ib_client._run(_req(), timeout=15) or [])
+    except Exception as e:                             # noqa: BLE001
+        log.warning("ib_exec: guard snapshot failed (%s) -- SELL orders will be refused", e)
+        return None
+    return make_snapshot(positions, orders)
+
+
+def guard_verdict(contract, order, *, intent: str, snap: dict | None = None, replacing=(),
+                  con_id: int | None = None, attached_to_unfilled_parent: bool = False
+                  ) -> tuple[str, float, str]:
+    """guard_check() for a concrete (contract, order) against a snapshot. No I/O, no side
+    effects -- callers that must decide BEFORE doing something irreversible (an exit cancels
+    the position's protective legs first) ask this, then send via place_guarded()."""
+    con = int(con_id or getattr(contract, "conId", 0) or 0)
+    sec = getattr(contract, "secType", "") or "STK"
+    action = str(getattr(order, "action", "") or "").upper()
+    qty = getattr(order, "totalQuantity", 0)
+    pos = rs = None
+    rb = 0.0
+    if snap is not None:
+        pos = snap["positions"].get(con, 0.0)
+        g = order_group_key(order)
+        r = resting_qty_by_con(snap["orders"], exclude=replacing,
+                               exclude_group=(g if g[0] != "order" else None)).get(con, {})
+        rs, rb = r.get("SELL", 0.0), r.get("BUY", 0.0)
+    return guard_check(action, qty, intent, sec_type=sec, position=pos, resting_sell=rs,
+                       resting_buy=rb, attached_to_unfilled_parent=attached_to_unfilled_parent)
+
+
+def queue_guard_refusal(sym, action, qty, intent, why) -> str:
+    """Log a refusal now and queue its RED event for flush_guard_events() (off the loop)."""
+    msg = f"GUARD: refused {action} {qty} {sym} [{intent}] -- {why}"
+    log.error("ib_exec: %s", msg)
+    GUARD_EVENTS.append({"symbol": sym, "action": action, "qty": qty, "msg": msg})
+    return msg
+
+
+def place_guarded(ib, contract, order, *, intent: str, snap: dict | None = None,
+                  replacing=(), con_id: int | None = None,
+                  attached_to_unfilled_parent: bool = False):
+    """The ONLY caller of ib.placeOrder(). Runs on the IB loop thread (inside ib_client.call),
+    so it does no I/O of its own: it checks `order` against `snap` (order_book_snapshot(),
+    taken just before) and either sends it, sends it with a reduced totalQuantity, or refuses.
+    Returns the Trade, or None when refused (the refusal is queued for flush_guard_events())."""
+    verdict, send_qty, why = guard_verdict(contract, order, intent=intent, snap=snap,
+                                           replacing=replacing, con_id=con_id,
+                                           attached_to_unfilled_parent=attached_to_unfilled_parent)
+    con = int(con_id or getattr(contract, "conId", 0) or 0)
+    sec = getattr(contract, "secType", "") or "STK"
+    action = str(getattr(order, "action", "") or "").upper()
+    qty = getattr(order, "totalQuantity", 0)
+    sym = getattr(contract, "symbol", None) or getattr(contract, "localSymbol", None) or str(con)
+    if verdict == "refuse":
+        queue_guard_refusal(sym, action, qty, intent, why)
+        return None
+    if verdict == "clamp":
+        log.warning("ib_exec: GUARD: %s %s %s [%s] -- %s", action, qty, sym, intent, why)
+        order.totalQuantity = int(send_qty) if float(send_qty).is_integer() else send_qty
+    if snap is not None and action in ("BUY", "SELL") and sec != "CASH" \
+            and not attached_to_unfilled_parent:
+        # count this order in the snapshot so a SECOND order in the same operation (a roll's
+        # open after its close, another leg outside an OCA) sees it as already resting
+        snap["orders"].append(_PendingOrder(order, con))
+    return ib.placeOrder(contract, order)
+
+
+class _PendingOrder:
+    """Snapshot stand-in for an order place_guarded() has just sent (same shape as a Trade)."""
+    def __init__(self, order, con_id: int):
+        self.order = order
+        self.contract = type("_C", (), {"conId": con_id})()
+        self.orderStatus = None
+
+
+def place_bracket_guarded(ib, contract, bracket, *, intent: str = "entry",
+                          snap: dict | None = None, con_id: int | None = None) -> list:
+    """A parent order plus its attached TP/SL children. The PARENT is checked by the guard; the
+    children ride on it (inactive until it fills -- the I1 exception). Refused parent -> no
+    child is sent and [] comes back."""
+    legs = list(bracket)
+    parent = getattr(bracket, "parent", None) or legs[0]
+    first = place_guarded(ib, contract, parent, intent=intent, snap=snap, con_id=con_id)
+    if first is None:
+        return []
+    out = [first]
+    for o in legs:
+        if o is parent:
+            continue
+        out.append(place_guarded(ib, contract, o, intent=intent, snap=snap, con_id=con_id,
+                                 attached_to_unfilled_parent=True))
+    return out
+
+
+def flush_guard_events() -> list[str]:
+    """Record queued guard refusals as RED notable events (OFF the loop thread -- notify does
+    network I/O). Returns the messages. Never raises."""
+    out = []
+    while GUARD_EVENTS:
+        ev = GUARD_EVENTS.pop(0)
+        out.append(ev["msg"])
+        try:
+            record_order_exec(ev["symbol"], ev["action"], ev["qty"], "REFUSED", ev["msg"])
+            from dashboard.core import notable_events
+            notable_events.record(ev["msg"], level="error", kind="order-guard",
+                                  symbol=ev["symbol"])
+        except Exception:                              # noqa: BLE001
+            log.debug("guard: event flush failed", exc_info=True)
+    return out
+
+
+def call_guarded(fn, timeout: float = 15):
+    """ib_client.call() + flush_guard_events() afterwards, so a refusal raised on the loop
+    thread always reaches the event log, even when fn raises."""
+    try:
+        return ib_client.call(fn, timeout=timeout)
+    finally:
+        flush_guard_events()
+
+
 def _guard():
     """Return the connected IB handle iff safe to trade, else None.
 
@@ -833,11 +1128,16 @@ def _place_bracket(ib, t: dict, spec: contracts.FutureSpec, equity: float,
             o.orderRef = f"quant#{t['id']}"
             if acct:
                 o.account = acct
-        return [ib.placeOrder(contract, o) for o in bracket]   # non-blocking; loop transmits
+        # G1 (2026-11-21): through the long-only guard -- a SELL parent (short entry) is
+        # checked against the broker position and refused; children ride on the parent.
+        return place_bracket_guarded(ib, contract, bracket, intent="entry", snap=snap)
+    snap = order_book_snapshot(ib, acct) if action == "SELL" else None
     try:
-        trades = ib_client.call(send, timeout=15)
+        trades = call_guarded(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
+    if not trades:
+        return f"{t['instrument']}: {action} entry REFUSED by the long-only guard, SKIP"
     # S1: the broker's own verdict, BEFORE we write a mirror row or report a placement.
     _conf = confirm_bracket(ib, trades, t["instrument"], action, qty)
     if not _conf["ok"]:
@@ -965,11 +1265,16 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
             o.orderRef = f"quant#{t['id']}"
             if acct:
                 o.account = acct
-        return [ib.placeOrder(contract, o) for o in bracket]
+        # G1 (2026-11-21): through the long-only guard -- a SELL parent (short entry) is
+        # checked against the broker position and refused; children ride on the parent.
+        return place_bracket_guarded(ib, contract, bracket, intent="entry", snap=snap)
+    snap = order_book_snapshot(ib, acct) if action == "SELL" else None
     try:
-        trades = ib_client.call(send, timeout=15)
+        trades = call_guarded(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: order send failed ({e}), retry"
+    if not trades:
+        return f"{t['instrument']}: {action} entry REFUSED by the long-only guard, SKIP"
     # S1: ask the broker whether the parent is actually working, and refuse to mirror a trade
     # whose entry never reached the book. Replaces the 2026-08-26 immediate-status peek below,
     # which only caught statuses already visible at submit time (IBKR kills these 40ms LATER --
@@ -1082,11 +1387,13 @@ def _place_sleeve_bracket(ib, t: dict, equity_usd: float, acct: str | None = Non
             o.orderRef = f"sleeve#{t['id']}"
             if acct:
                 o.account = acct
-        return [ib.placeOrder(contract, o) for o in bracket]
+        return place_bracket_guarded(ib, contract, bracket, intent="entry")   # G1 (BUY parent)
     try:
-        trades = ib_client.call(send, timeout=15)
+        trades = call_guarded(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{t['instrument']}: sleeve order send failed ({e}), retry"
+    if not trades:
+        return f"{t['instrument']}: sleeve entry REFUSED by the long-only guard, SKIP"
     # S1: confirm the parent is really working before mirroring (same contract as the core ETF
     # path). A sleeve trade that never reached the broker must not look OPEN locally.
     _conf = confirm_bracket(ib, trades, t["instrument"], action, qty)
@@ -1132,6 +1439,8 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
     if row is None or row[2] != "OPEN":
         return None
     con_id, qty, _ = row
+    # G1 (2026-11-21): broker-truth snapshot for the long-only guard, read OFF the loop thread.
+    snap = order_book_snapshot(ib, acct)
 
     def _do():
         held = next((p for p in ib_client.filter_by_account(ib.positions() or [], acct)
@@ -1162,9 +1471,7 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
         # passive in-memory cache (ib.openTrades(), same shape as reqAllOpenOrders()'s
         # result) instead -- no I/O, just reads what the account-sync subscription has
         # already delivered, same pattern as ib.positions()/ib.fills() elsewhere here.
-        for o in (ib.openTrades() or []):
-            if o.contract.conId == con_id:
-                ib.cancelOrder(o.order)
+        own = [o for o in (ib.openTrades() or []) if o.contract.conId == con_id]
         import ib_async
         market = ib_async.MarketOrder(side, close_qty)
         # FIXED 2026-08-18: found live -- an ib_async MarketOrder with tif left unset gets
@@ -1179,13 +1486,29 @@ def manual_close_position(trade: dict, reason: str) -> str | None:
         market.orderRef = f"exit#{trade['id']}"
         if acct:
             market.account = acct
-        return ib.placeOrder(contract, market)
+        # G1: ask the guard BEFORE cancelling anything. The legs this exit is about to cancel
+        # don't count against it (`replacing`), but resting SELLs it CAN'T cancel -- another
+        # client's orphan stop, the AMLP #16 class -- do. A refused exit must leave the
+        # position's protection exactly as it was, so the cancel only happens after a yes.
+        replacing = set().union(*(order_keys(o.order) for o in own)) if own else set()
+        verdict, _q, why = guard_verdict(contract, market, intent="exit", snap=snap,
+                                         replacing=replacing, con_id=con_id)
+        if verdict == "refuse":
+            queue_guard_refusal(trade["instrument"], side, close_qty, "exit", why)
+            return "REFUSED"
+        for o in own:
+            ib.cancelOrder(o.order)
+        return place_guarded(ib, contract, market, intent="exit", snap=snap,
+                             replacing=replacing, con_id=con_id)
     try:
-        sent = ib_client.call(_do, timeout=15)
+        sent = call_guarded(_do, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{trade['instrument']}: dynamic exit send failed ({e}), retry"
     if sent is None:
         return None
+    if sent == "REFUSED":
+        return (f"{trade['instrument']}: DYNAMIC EXIT REFUSED by the long-only guard ({reason}) "
+                f"-- protection left in place; see the GUARD event")
     # S1 (2026-10-01): an exit that never reached the book is the WORST kind of silent failure --
     # this function cancels the position's protective TP/SL children *before* submitting the
     # flatten, so an unconfirmed order here means a real position left with NO protection. Say so
@@ -1525,28 +1848,48 @@ def _roll_position(ib, trade: dict, spec: contracts.FutureSpec, old_con_id: int,
     ib_async = ib_client._mod()
     close_act = "SELL" if trade["direction"] == "long" else "BUY"
     open_act = "BUY" if trade["direction"] == "long" else "SELL"
+    # G1 (2026-11-21): the old contract's own resting legs are cancelled-and-replaced by this
+    # roll, so they don't count against its close; anything else resting still does.
+    snap = order_book_snapshot(ib, acct)
+
     def do_roll():
         old = next((p.contract for p in ib_client.filter_by_account(ib.positions() or [], acct)
                     if p.contract.conId == old_con_id), None)
         if old is not None:
+            own = [o for o in (ib.openTrades() or []) if o.contract.conId == old_con_id]
+            replacing = set().union(*(order_keys(o.order) for o in own)) if own else set()
             close_o = ib_async.MarketOrder(close_act, qty)
+            close_o.tif = "DAY"
             if acct:
                 close_o.account = acct
-            ib.placeOrder(old, close_o)
-        parent = ib_async.MarketOrder(open_act, qty)
-        sl = ib_async.StopOrder(close_act, qty, float(trade["sl"]))
-        tp = ib_async.LimitOrder(close_act, qty, float(trade["tp"]))
-        for o in (parent, sl, tp):
-            o.orderRef = f"quant#{trade['id']}"; o.tif = "GTC"
+            if place_guarded(ib, old, close_o, intent="roll", snap=snap, replacing=replacing,
+                             con_id=old_con_id) is None:
+                return "REFUSED"                   # don't open the new month on a failed close
+            for o in own:
+                ib.cancelOrder(o.order)
+        # FIXED 2026-11-21 (G1): the new month's SL/TP used to be sent as three UNLINKED orders,
+        # so for a long roll the SELL stop/limit rested live before the parent BUY filled -- a
+        # naked SELL that would short the new contract if the parent never filled. A real
+        # bracket (children attached to the parent) is inactive until the parent fills; the
+        # parent is DAY (S2: a GTC market order is discarded with its children).
+        bracket = ib.bracketOrder(open_act, qty, limitPrice=0.0,
+                                  takeProfitPrice=float(trade["tp"]),
+                                  stopLossPrice=float(trade["sl"]))
+        bracket.parent.orderType = "MKT"
+        bracket.parent.lmtPrice = 0.0
+        for o in bracket:
+            o.orderRef = f"quant#{trade['id']}"
+            o.tif = "DAY" if o is bracket.parent else "GTC"
             if acct:
                 o.account = acct
-        ib.placeOrder(new_contract, parent)
-        ib.placeOrder(new_contract, sl)
-        ib.placeOrder(new_contract, tp)
+        return place_bracket_guarded(ib, new_contract, bracket, intent="entry", snap=snap)
     try:
-        ib_client.call(do_roll, timeout=15)
+        res = call_guarded(do_roll, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"#{trade['id']} {trade['instrument']}: ROLL FAILED ({e}), retry"
+    if res == "REFUSED" or not res:
+        return (f"#{trade['id']} {trade['instrument']}: ROLL REFUSED by the long-only guard "
+                f"-- old contract kept, retry next cycle")
     with paper._LOCK, _conn() as c:
         c.execute("UPDATE ib_mirror SET con_id=?, local_symbol=?, expiry=?, "
                   "note='rolled' WHERE paper_id=?",
@@ -1726,6 +2069,84 @@ def mirror_qty_action(real: float, group: list[tuple]) -> tuple[str, float]:
     return ("update", real_abs)
 
 
+def legs_to_resize(trades, con_id: int, paper_id, new_qty: float) -> list:
+    """PURE (G4.3): this trade's resting protective legs on con_id whose remaining quantity
+    differs from new_qty. Matched by orderRef (quant#/sleeve#/reprotect#<id>), so another
+    trade sharing the conId is never touched."""
+    refs = {f"quant#{paper_id}", f"sleeve#{paper_id}", f"reprotect#{paper_id}"}
+    out = []
+    for t in trades or []:
+        o = getattr(t, "order", t)
+        if int(getattr(getattr(t, "contract", None), "conId", 0) or 0) != int(con_id):
+            continue
+        if (getattr(o, "orderRef", "") or "") not in refs:
+            continue
+        if str(getattr(o, "orderType", "")).upper() == "MKT":
+            continue                                   # an unfilled entry parent, not a leg
+        st = getattr(t, "orderStatus", None)
+        try:
+            rem = float(getattr(st, "remaining", 0.0) or 0.0) if st is not None else 0.0
+        except (TypeError, ValueError):
+            rem = 0.0
+        if rem <= 0:
+            rem = float(getattr(o, "totalQuantity", 0.0) or 0.0)
+        if abs(rem - float(new_qty)) > 0.5:
+            out.append(t)
+    return out
+
+
+def _resize_resting_legs(ib, acct, con_id: int, paper_id, new_qty: float,
+                         symbol: str) -> str | None:
+    """G4.3 (2026-11-21): after heal_mirror_quantities() changes a mirror qty, bring the resting
+    TP/SL legs to the same size. RETRO_2026-11-21 RC2: QQQ's heal cut the record 8 -> 7 and
+    left the stop at 8 -- a stop larger than the position is a latent short. Each leg is
+    modified in place (same orderId) through the guard; anything that can't be resized (the
+    guard refuses, or another client owns it) gets this client's legs CANCELLED instead, so
+    reprotect re-arms a correctly sized pair next cycle. Never leaves a stop larger than the
+    position."""
+    snap = order_book_snapshot(ib, acct)
+    if snap is None:
+        return f"{symbol}: leg resize skipped -- broker read failed (retry next cycle)"
+    stale = legs_to_resize(snap["orders"], con_id, paper_id, new_qty)
+    if not stale:
+        return None
+    stale_keys = set().union(*(order_keys(t) for t in stale))
+
+    def _do():
+        own = [t for t in (ib.openTrades() or [])
+               if int(getattr(t.contract, "conId", 0) or 0) == int(con_id)
+               and (order_keys(t) & stale_keys)]
+        foreign = len(stale) - len(own)
+        ok = foreign == 0
+        if ok:
+            for t in own:
+                o = t.order
+                o.totalQuantity = int(new_qty) if float(new_qty).is_integer() else new_qty
+                if place_guarded(ib, t.contract, o, intent="resize", snap=snap,
+                                 replacing=order_keys(o), con_id=con_id) is None:
+                    ok = False
+                    break
+        if not ok:
+            for t in own:
+                try:
+                    ib.cancelOrder(t.order)
+                except Exception:                      # noqa: BLE001
+                    log.debug("resize: cancel failed", exc_info=True)
+        return ok, len(own), foreign
+    try:
+        ok, n_own, foreign = call_guarded(_do, timeout=15)
+    except Exception as e:                             # noqa: BLE001
+        return f"{symbol}: leg resize failed ({e}), retry"
+    if ok:
+        return f"{symbol}: resized {n_own} resting leg(s) to {new_qty:g} (G4.3)"
+    msg = (f"{symbol}: could NOT resize {len(stale)} resting leg(s) to {new_qty:g}"
+           f"{f' ({foreign} owned by another API client)' if foreign else ''} -- cancelled "
+           f"{n_own} of this client's legs so reprotect re-arms at the right size")
+    from dashboard.core import notable_events
+    notable_events.record(msg, level="error", kind="order-guard", symbol=symbol)
+    return msg
+
+
 def heal_mirror_quantities() -> list[str]:
     """Make ib_mirror.qty agree with what the broker ACTUALLY holds -- bookkeeping only, this
     function never sends an order.
@@ -1796,6 +2217,11 @@ def heal_mirror_quantities() -> list[str]:
         log.warning("ib_exec: %s", msg)
         from dashboard.core import notable_events
         notable_events.record(msg, level="warning")
+        # G4.3: the protective legs must follow the corrected quantity.
+        rmsg = _resize_resting_legs(ib, acct, con_id, paper_id, real_abs, local_symbol)
+        if rmsg:
+            logs.append(rmsg)
+            log.warning("ib_exec: %s", rmsg)
     return logs
 
 
@@ -1942,6 +2368,65 @@ def zero_order_streak_action(prev_streak, has_positions: bool,
 
 REPROTECT_ZERO_KEY = "reprotect_zero_orders_streak"
 REPROTECT_ZERO_CONFIRM = 3   # consecutive empty order snapshots before believing them
+REPROTECT_SETTLE_SEC = 60    # G4.2 (2026-11-21): no re-protect/close within this many seconds of
+                             # a fill or cancel on the same contract. On 2026-10-30 the QQQ re-arm
+                             # fired 4s after its stop filled, against a position that had just
+                             # gone to -1, and armed SELL 7 on top of it (RETRO_2026-11-21 RC3).
+
+
+def reprotect_position_action(direction: str, broker_pos: float) -> str:
+    """PURE (G4.1): may reprotect touch this position at all? Decided from the BROKER's signed
+    position, never the journal's quantity.
+    -> "proceed" (broker holds the journal's side), "flat" (nothing held; sync_closures owns
+    it), or "opposite" (broker holds the OTHER side -- e.g. journal long, broker short: an
+    unintended-exposure incident; never place anything, raise RED)."""
+    pos = float(broker_pos or 0.0)
+    if abs(pos) < 0.5:
+        return "flat"
+    return "proceed" if (pos > 0) == (direction == "long") else "opposite"
+
+
+def settle_blocked(last_event_ts, now: dt.datetime, settle_sec: float = REPROTECT_SETTLE_SEC
+                   ) -> bool:
+    """PURE (G4.2): True while a fill/cancel on the contract is younger than settle_sec."""
+    if last_event_ts is None:
+        return False
+    if last_event_ts.tzinfo is None:
+        last_event_ts = last_event_ts.replace(tzinfo=dt.timezone.utc)
+    return (now - last_event_ts).total_seconds() < settle_sec
+
+
+def _recent_order_events(ib) -> dict[int, dt.datetime]:
+    """{conId: time of the latest fill or cancel} from broker-wide executions (last day, every
+    client) plus this client's own order log (cancels). Best-effort: {} on any failure, which
+    means "no recent event known" -- the guard's position check still applies."""
+    out: dict[int, dt.datetime] = {}
+
+    def _bump(con, ts):
+        if not con or not isinstance(ts, dt.datetime):
+            return
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        if con not in out or ts > out[con]:
+            out[con] = ts
+    try:
+        for f in _broker_fills(ib, days=1):
+            ex = getattr(f, "execution", None)
+            if ex is not None:
+                _bump(getattr(getattr(f, "contract", None), "conId", 0), getattr(ex, "time", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        trades = ib_client.call(lambda: list(ib.trades() or []), timeout=10)
+        for t in trades:
+            con = getattr(getattr(t, "contract", None), "conId", 0)
+            for e in (getattr(t, "log", None) or []):
+                if str(getattr(e, "status", "")).lower() in ("filled", "cancelled",
+                                                              "apicancelled"):
+                    _bump(con, getattr(e, "time", None))
+    except Exception:                                  # noqa: BLE001
+        pass
+    return out
 
 
 def reprotect_naked_positions() -> list[str]:
@@ -2047,6 +2532,12 @@ def reprotect_naked_positions() -> list[str]:
                     "not an unsynced snapshot; re-arming brackets.", _streak, len(rows))
     logs: list[str] = []
     from dashboard.core import notable_events
+    # G1/G4 (2026-11-21): the guard's broker picture, built from the reads above (no extra I/O):
+    # every client's resting orders + this account's SIGNED positions.
+    snap = make_snapshot({k: float(getattr(v, "position", 0.0) or 0.0)
+                          for k, v in portfolio.items()}, all_orders)
+    settle_events = None                               # fetched lazily, only if needed
+    now = dt.datetime.now(dt.timezone.utc)
     for paper_id, con_id, qty, instrument, direction, sl, tp, jstatus in rows:
         if con_id in open_con_ids:
             continue                                   # already protected, nothing to do
@@ -2054,6 +2545,29 @@ def reprotect_naked_positions() -> list[str]:
         price = float(pf.marketPrice) if pf and pf.marketPrice else None
         if price is None:
             continue                                   # no live mark yet, retry next cycle
+        # G4.1: what does the BROKER hold? A journal-long row on a short (or flat) broker
+        # position must never get a SELL bracket -- that is exactly how QQQ went 7 -> -1 -> -8.
+        broker_pos = float(getattr(pf, "position", 0.0) or 0.0)
+        side_action = reprotect_position_action(direction, broker_pos)
+        if side_action == "flat":
+            continue                                   # nothing held: sync_closures' job
+        if side_action == "opposite":
+            kind_word = "SHORT" if broker_pos < 0 else "LONG"
+            msg = (f"#{paper_id} {instrument}: reprotect REFUSED -- journal is {direction} but "
+                   f"the broker position is {broker_pos:g} (UNINTENDED {kind_word}); "
+                   f"no order placed")
+            logs.append(msg)
+            log.error("ib_exec: %s", msg)
+            notable_events.record(msg, level="error", kind="order-guard", symbol=instrument)
+            continue
+        # G4.2: settle delay -- never act on a contract that filled/cancelled seconds ago; the
+        # position and order book are still moving under us.
+        if settle_events is None:
+            settle_events = _recent_order_events(ib)
+        if settle_blocked(settle_events.get(con_id), now):
+            log.info("ib_exec: reprotect #%s %s deferred -- fill/cancel on this contract "
+                     "within %ss", paper_id, instrument, REPROTECT_SETTLE_SEC)
+            continue
         long = (direction == "long")
         past_tp = (price >= float(tp)) if long else (price <= float(tp))
         past_sl = (price <= float(sl)) if long else (price >= float(sl))
@@ -2091,7 +2605,8 @@ def reprotect_naked_positions() -> list[str]:
                 log.warning("ib_exec: %s", msg)
                 notable_events.record(f"Naked position closed: {msg}", level="warning")
         else:
-            msg = _reprotect_bracket(ib, trade, con_id, qty, direction, sl, tp, acct)
+            msg = _reprotect_bracket(ib, trade, con_id, qty, direction, sl, tp, acct,
+                                     snap=snap)
             if msg:
                 logs.append(msg)
                 log.warning("ib_exec: %s", msg)
@@ -2099,9 +2614,12 @@ def reprotect_naked_positions() -> list[str]:
 
 
 def _reprotect_bracket(ib, trade: dict, con_id: int, qty: float, direction: str,
-                       sl: float, tp: float, acct: str | None) -> str | None:
+                       sl: float, tp: float, acct: str | None,
+                       snap: dict | None = None) -> str | None:
     """Re-arm a resting TP/SL OCA pair for a position the broker already holds but which
-    lost its protective orders -- no market parent (we already own the shares/units)."""
+    lost its protective orders -- no market parent (we already own the shares/units).
+    G1/G4 (2026-11-21): both legs go through the long-only guard against `snap`, which CLAMPS
+    them to min(mirror qty, broker long - resting SELLs) and refuses when nothing is held."""
     contract = _stock_contract_for(trade["instrument"])
     if contract is None:
         return f"{trade['instrument']}: no stock contract (market data?), retry"
@@ -2121,11 +2639,24 @@ def _reprotect_bracket(ib, trade: dict, con_id: int, qty: float, direction: str,
             o.orderRef = f"reprotect#{trade['id']}"
             if acct:
                 o.account = acct
-        return [ib.placeOrder(contract, o) for o in (tp_order, sl_order)]
+        out = [place_guarded(ib, contract, o, intent="reprotect", snap=snap, con_id=con_id)
+               for o in (tp_order, sl_order)]
+        return [t for t in out if t is not None]
+    if snap is None:
+        snap = order_book_snapshot(ib, acct)
     try:
-        trades = ib_client.call(send, timeout=15)
+        trades = call_guarded(send, timeout=15)
     except Exception as e:                     # noqa: BLE001
         return f"{trade['instrument']}: reprotect order send failed ({e}), retry"
+    if len(trades or []) < 2:
+        for tr in (trades or []):                      # never leave half an OCA pair resting
+            try:
+                ib.cancelOrder(getattr(tr, "order", tr))
+            except Exception:                          # noqa: BLE001
+                log.debug("reprotect: half-pair cancel failed", exc_info=True)
+        return (f"{trade['instrument']}: re-protect REFUSED by the long-only guard -- see the "
+                f"GUARD event")
+    qty = getattr(getattr(trades[0], "order", trades[0]), "totalQuantity", qty)  # post-clamp
     # S1 (2026-10-01): confirm BOTH legs. This function exists to restore PROTECTION to a real,
     # held position, so "placed" without a verdict is exactly the false comfort it's meant to
     # prevent -- and it's called on a loop, so a broker that discards these would otherwise
@@ -2254,7 +2785,7 @@ def keep_cash_usd() -> dict:
         o.tif = "GTC"
         if acct:
             o.account = acct
-        trade = ib_client.call(lambda: ib.placeOrder(fx, o))
+        trade = call_guarded(lambda: place_guarded(ib, fx, o, intent="fx"))
     except Exception as e:                             # noqa: BLE001
         status["log"] = f"keep-cash-usd: FX order failed ({e})"
         log.warning("ib_exec: %s", status["log"])
@@ -2484,6 +3015,7 @@ def sweep_cash() -> dict:
     except Exception:                                  # noqa: BLE001
         pass                                           # if we can't check, proceed (fail-open)
     import ib_async
+    snap = order_book_snapshot(ib, acct) if action == "SELL" else None   # G1 (2026-11-21)
 
     def _send():
         o = ib_async.MarketOrder(action, qty)
@@ -2491,12 +3023,17 @@ def sweep_cash() -> dict:
         o.tif = "DAY"
         if acct:
             o.account = acct
-        return ib.placeOrder(contract, o)
+        return place_guarded(ib, contract, o, intent="sweep", snap=snap, con_id=con_id)
     try:
-        trade = ib_client.call(_send)
+        trade = call_guarded(_send)
     except Exception as e:                         # noqa: BLE001
         status["log"] = f"cash-sweep: order failed ({e})"
         _sweep_note_failure(f"send raised: {e}")
+        return status
+    if trade is None:
+        status["log"] = f"cash-sweep: {action} {qty} SGOV REFUSED by the long-only guard"
+        _sweep_note_failure(status["log"])
+        log.warning("ib_exec: %s", status["log"])
         return status
     # S1 (2026-10-01): CONFIRM before claiming the sweep ran. This is the exact spot that logged
     # `BUY 149 SGOV` 17x on 2026-09-30 while SGOV never left 60 shares and nothing alerted --
@@ -2603,16 +3140,23 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     if sell_shares > 0 and contract is not None:
         import ib_async
 
+        snap = order_book_snapshot(ib, acct)      # G1 (2026-11-21)
+
         def _send():
             o = ib_async.MarketOrder("SELL", sell_shares)
             o.orderRef = "withdraw-sgov"; o.tif = "DAY"
             if acct:
                 o.account = acct
-            return ib.placeOrder(contract, o)
+            return place_guarded(ib, contract, o, intent="withdraw", snap=snap, con_id=con_id)
         try:
-            _t = ib_client.call(_send)
+            _t = call_guarded(_send)
         except Exception as e:                     # noqa: BLE001
             out["log"] = f"withdrawal: SGOV sell failed ({e}); reserve set, sell SGOV manually"
+            return out
+        if _t is None:
+            out["log"] = ("withdrawal: SGOV sell REFUSED by the long-only guard -- reserve is "
+                          "set but the cash is NOT freed; do NOT withdraw yet")
+            log.warning("ib_exec: %s", out["log"])
             return out
         # S1 (2026-10-01): confirm the sell actually worked. The operator is told
         # "sold N SGOV... now withdraw MANUALLY" off the back of this line -- an unconfirmed

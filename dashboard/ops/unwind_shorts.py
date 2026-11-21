@@ -172,6 +172,12 @@ def main() -> None:
                 print("       BLOCKED: market closed and FORCE_RTH not set.")
                 break
 
+            # G1 (IBKR_LONG_ONLY_GUARD_SPEC, 2026-11-21): through the long-only guard as a
+            # "cover" -- it clamps the BUY to the open short MINUS any cover BUYs still resting
+            # from an earlier tranche, which is exactly the 2026-09-29 overshoot (HYD -4,502 ->
+            # +4,767 LONG). Fresh snapshot per tranche.
+            snap = ib_exec.order_book_snapshot(ib, acct)
+
             def _send():
                 import ib_async
                 o = ib_async.MarketOrder("BUY", take)
@@ -179,9 +185,12 @@ def main() -> None:
                 o.orderRef = f"unwind-short#{sym}"
                 if acct:
                     o.account = acct
-                return ib.placeOrder(contract, o)
+                return ib_exec.place_guarded(ib, contract, o, intent="cover", snap=snap,
+                                             con_id=con_id)
 
-            ib_client.call(_send, timeout=20)
+            if ib_exec.call_guarded(_send, timeout=20) is None:
+                print(f"       REFUSED by the long-only guard (see the GUARD event) -- stopping.")
+                break
             log.warning("unwind_shorts: sent BUY %s %s to reduce an unintended short", take, sym)
             print(f"       SENT BUY {take:,} {sym}; waiting {SETTLE_SEC}s to re-read...")
             time.sleep(SETTLE_SEC)

@@ -40,6 +40,12 @@ class _PF:
         self.marketPrice = px
 
 
+def _no_orders(coro, timeout=None):
+    """Stand-in for ib_client._run(reqAllOpenOrdersAsync()): no resting orders (G1 snapshot)."""
+    coro.close()
+    return []
+
+
 def _run_tool(positions, buying_power_hkd, apply_=False, only="", force_rth=True,
               max_tranches=6):
     """Run main() against a fake broker; return the list of (action, qty, symbol) sent."""
@@ -76,7 +82,7 @@ def _run_tool(positions, buying_power_hkd, apply_=False, only="", force_rth=True
          mock.patch.object(U.broker, "is_live", return_value=False), \
          mock.patch.object(U.ib_client, "account_id", return_value="DU1"), \
          mock.patch.object(U.ib_client, "filter_by_account", side_effect=lambda i, a: i), \
-         mock.patch.object(U.ib_client, "call", side_effect=lambda fn, **kw: fn()), \
+         mock.patch.object(U.ib_client, "call", side_effect=lambda fn, **kw: fn()),          mock.patch.object(U.ib_client, "_run", side_effect=_no_orders), \
          mock.patch.object(U.ib_client, "account_summary",
                            return_value={"BuyingPower": buying_power_hkd, "_ccy": "HKD"}), \
          mock.patch.object(U.ib_client, "fx_to_usd", return_value=1.0 / 7.8):

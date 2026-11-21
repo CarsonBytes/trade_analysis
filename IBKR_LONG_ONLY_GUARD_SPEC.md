@@ -1,7 +1,9 @@
 # IBKR Long-Only Guard — spec (2026-11-21)
 
 **Status:** Phase 1 SHIPPED 2026-11-21 (G7 wording/severity/digest, G6.1 untracked card,
-G8 Flex StockShort alarm; see the HANDOFF entry). Phases 2–5 PROPOSED.
+G8 Flex StockShort alarm). Phase 2 BUILT 2026-11-21 (G1 `place_guarded` choke point, G4
+broker-aware reprotect + 60s settle + heal leg resize; T1–T3, T6–T8 green), NOT yet deployed:
+gate is one clean week on PAPER before LIVE. See the HANDOFF entries. Phases 3–5 PROPOSED.
 **Incident:** [RETRO_2026-11-21.md](RETRO_2026-11-21.md). LIVE has been net short (QQQ −8,
 AMLP −21, CPER −84, SPY −4) since Oct 30. This is the third unintended-short incident (PAPER
 2026-09-01, 2026-09-29).

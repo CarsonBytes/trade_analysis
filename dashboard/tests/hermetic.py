@@ -40,6 +40,13 @@ def apply() -> None:
     (docker-compose sets DASH_DB_NAME for the real deployment, and
     test_app_mode.py asserts explicit values survive)."""
     os.environ.setdefault("LLM_LEDGER_DISABLED", "1")
+    # 3. Real phone pushes. FOUND 2026-11-21: a test that drives a RED notable event (the
+    # long-only guard refusing a fake order) reached notify.send() with the host's real
+    # TELEGRAM_BOT_TOKEN/CHAT_ID and pushed "[?] GUARD: refused SELL ..." to the operator's
+    # phone. Blank (not unset) so a later load_dotenv() -- override=False -- can't refill them;
+    # test_notify patches its own values in explicitly.
+    for _k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NTFY_URL"):
+        os.environ[_k] = ""
     if not os.environ.get("DASH_DB_NAME"):
         fd, path = tempfile.mkstemp(prefix="quant_test_dash_", suffix=".db")
         os.close(fd)
