@@ -102,13 +102,14 @@ touch as user input; no console/MessageBox remains >3s after the terminal log li
 
 **Phase 1 -- 05:30 migration** -- **DONE 2026-11-21 ~19:30 HKT** (never applied in October;
 see IBKR_WEEKLY_2FA_SPEC §10). Step 1: cold restart removed entirely (`ColdRestartTime=`),
-because the weekly touch is now driven by `weekly-touch.ps1`. Step 2: `AutoRestartTime=05:30 AM`
-(the JVM is pinned to HKT via vmoptions). Step 3: Observe/Verify tasks and `test-min2fa.ps1` are
+because the weekly touch is now driven by `weekly-touch.ps1`. Step 2: `AutoRestartTime=05:45 AM`.
+That is 15 min after the 05:30 router reboot, by the user's choice. The JVM is pinned to HKT via
+vmoptions. Step 3: Observe/Verify tasks and `test-min2fa.ps1` are
 retired, not re-anchored, and `Autorestart Check 20261014` was a one-shot. The new suite
 `test-weekly2fa.ps1` checks the restart time against US RTH and the router reboot. Step 4 is
-pending: the first 05:30 restart is Mon 2026-11-23. Step 5 root cause: in RETRO_2FA §3.6.
+pending: the first 05:45 restart is Mon 2026-11-23. Step 5 root cause: in RETRO_2FA §3.6.
 The weekly touch did **not** move to Mon 05:30. It stays Sun 20:35 HKT until the user picks a
-slot. Open: the router reboot is also 05:30 HKT (collision).
+slot.
 1. Read `C:\IBC-Live\config.ini` ~595-660 (AutoRestartTime/ColdRestartTime comments) and
    resolve the cold-day open point (spec S3).
 2. Edit `AutoRestartTime=08:30 PM -> 05:30 AM` (+ ColdRestartTime per step 1).

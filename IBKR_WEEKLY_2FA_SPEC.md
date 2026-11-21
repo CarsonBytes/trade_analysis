@@ -402,17 +402,16 @@ Other decisions taken with the spec's recommendations, all changeable:
 - **Daily restart moved to 05:30 HKT (user decision, 2026-11-21 ~19:20 HKT, relayed from the
   main session: "Move to 05:30", because the 20:30 restart prompt is annoying).** This is the
   `AutoRestartTime` half of option B and the GATEWAY_AUTOLOGIN Phase 1 migration.
-  `C:\IBC-Live\config.ini:609` `AutoRestartTime=05:30 AM` (backup `config.ini.bak-20261121-0530`);
-  `ColdRestartTime` stays empty. It takes effect at the next gateway start (the weekly touch,
-  Sun Nov 22 20:35, unless you log in earlier), so the **first 05:30 restart is Mon 2026-11-23
-  05:30 HKT**. The **weekly touch was NOT moved** to Mon 05:30: under B the planned 2FA prompt
+  `C:\IBC-Live\config.ini:609` `AutoRestartTime=05:45 AM` (05:45, not 05:30: see the router
+  bullet; backup `config.ini.bak-20261121-0530`); `ColdRestartTime` stays empty. It takes effect
+  at the next gateway start (the weekly touch, Sun Nov 22 20:35, unless you log in earlier). The **weekly touch was NOT moved** to Mon 05:30: under B the planned 2FA prompt
   would fire while you are asleep and time out. It stays Sun 20:35 until you choose a slot
   (A Sun 20:35 / C Mon 09:00 / custom).
-  - **Collision, open:** the router reboot is also 05:30 HKT (`Xiaomi Router Restart Daily 0530`,
-    UTC-anchored). Same-minute router + warm restart cost 2 touches in October (RETRO §3.2 H3).
-    Retiming the task was refused by the session's permission check; the user decides: move the
-    router task to 06:00 HKT (`StartBoundary` `…T06:00:00+08:00`), or the gateway to 05:45.
-    The suite check `router reboot >= 20 min away from the gateway daily restart` fails until then.
+  - **Router collision → user chose gateway 05:45 (2026-11-21 ~19:40 HKT).** The router reboot
+    stays 05:30 HKT (`Xiaomi Router Restart Daily 0530`, UTC-anchored); same-minute router + warm
+    restart cost 2 touches in October (RETRO §3.2 H3). So `AutoRestartTime=05:45 AM`, 15 min after
+    the router starts (longest logged outage 102 s). **First restart: Mon 2026-11-23 05:45 HKT.**
+    Suite check `router reboot >= 10 min away from the gateway daily restart` guards it.
   - Night risk: a token rejection at 05:30 now starts an unattended 2FA prompt while you sleep;
     it times out and the watchdog retries within the launch budget (3 per 30 min). The market
     is closed until 21:30/22:30 HKT, so a night quiet window (no auto-prompt until morning) is a
@@ -435,7 +434,7 @@ Other decisions taken with the spec's recommendations, all changeable:
 | §3.8 | Gateway and weekly-touch keys get their own 20/day cap (today's page was eaten by the shared cap). Cap day is the HKT day. `GATEWAY_PUSH_DRYRUN` test hook. Synced to `/home/cap/quant/scripts/` | `scripts/gateway-push.sh` |
 | §3.8 | `\IBKR\Restart Observe` / `\IBKR\Restart Verify` **disabled** (failing silently since Oct 17). They are replaced by the ledger and the task-failure page | Task Scheduler |
 | §5 | New suite. `test-min2fa.ps1` is marked superseded | `scripts/windows/test-weekly2fa.ps1` |
-| §8 | (added 19:30 HKT, user decision) Daily `AutoRestartTime` 08:30 PM → **05:30 AM**; weekly touch unchanged. Suite +2 checks: router reboot ≥ 20 min from the daily restart (fails: both 05:30), router guard dry run. Watchdog liveness check no longer needs a fresh log line (the watchdog logs on state changes only); it checks CPU across 45 s. 45/46 | `C:\IBC-Live\config.ini`, `scripts/windows/test-weekly2fa.ps1`, `watchdog.ps1` (comment only) |
+| §8 | (added 19:30 HKT, user decisions) Daily `AutoRestartTime` 08:30 PM → **05:45 AM** (05:30 requested, then 05:45 to clear the 05:30 router reboot); weekly touch unchanged. Suite +2 checks: router reboot ≥ 10 min from the daily restart, router guard dry run. Watchdog liveness check no longer needs a fresh log line (the watchdog logs on state changes only); it checks CPU across 45 s. **46/46** | `C:\IBC-Live\config.ini`, `scripts/windows/test-weekly2fa.ps1`, `watchdog.ps1` (comment only) |
 | §3.4 | (added 19:15 HKT, user request) Router reboot guard uses HKT from UTC, not the Windows clock. Since Nov 4 it had been rebooting at 04:30 HKT = 15:30 New York (in RTH); back to 05:30 HKT. Both router logs stamped `... HKT`. `/dryrun` + `/hkt:` test hooks. Outside this repo; backups `*.bak-20261121`. RETRO §3.2 H3: the router reboot colliding with the old 05:30 warm restart caused 2 of the 7 "token rejected" touches | `D:\claude\xiaomi-router-reboot.vbs`, `.ps1` (Write-Log only) |
 
 Login script (`ibkr-live-login.ps1`):

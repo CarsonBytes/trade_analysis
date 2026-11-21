@@ -44,14 +44,13 @@ of the Windows TZ.
 - Gateway pages have their own Telegram cap.
 - Observe/verify tasks are disabled; failing tasks now page.
 
-**19:30 HKT: daily gateway restart moved 20:30 → 05:30 HKT** (user decision; `AutoRestartTime=05:30 AM`).
-It loads at the next gateway start, so the **first 05:30 restart is Mon Nov 23 05:30 HKT**. Check
-`launcher.log` then for `initialTokenType=TST` → `Login has completed`. Weekly touch unchanged
-(Sun 20:35). **Open before Mon 05:30:** the router reboot is also 05:30 HKT. The same collision cost
-2 touches in October. Move the router task to 06:00 or the gateway to 05:45 (user's call). Router
+**19:40 HKT: daily gateway restart moved 20:30 → 05:45 HKT** (user decisions: "Move to 05:30", then
+"Gateway to 05:45" to clear the 05:30 router reboot, which cost 2 touches in October). It loads at
+the next gateway start, so the **first one is Mon Nov 23 05:45 HKT**. Check `launcher.log` then
+for `initialTokenType=TST` → `Login has completed`. Weekly touch unchanged (Sun 20:35). Router
 launcher now uses HKT (it had been rebooting at 15:30 New York, during US trading).
 
-Suite `scripts\windows\test-weekly2fa.ps1`: 45/46 (the failure is the router collision above). The first live run is Sun Nov 22 20:35.
+Suite `scripts\windows\test-weekly2fa.ps1`: 46/46. The first live run is Sun Nov 22 20:35.
 Check the ledger shows `planned=true`. Open: the 2-week token-rejection measurement (G1);
 E3/D5/D6/D9 need user decisions. Nothing committed.
 
