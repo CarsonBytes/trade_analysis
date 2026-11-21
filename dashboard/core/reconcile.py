@@ -174,9 +174,9 @@ def reconcile_with_broker() -> dict:
     # too before concluding a real desync.
     broker_pending = ib_client.broker_open_order_symbols()
     result = compare_positions(broker_pos, local_open, broker_pending,
-                               excluded_symbols={ib_exec.SGOV_SYMBOL},
+                               excluded_symbols=ib_exec.shield_symbols(),
                                local_open_qty=ib_exec.mirrored_open_qty())
-    result["short"] = short_positions(broker_pos, excluded_symbols={ib_exec.SGOV_SYMBOL})
+    result["short"] = short_positions(broker_pos, excluded_symbols=ib_exec.shield_symbols())
     from dashboard.core import store
     had_mismatch, _ts = store.cache_get("reconcile_had_mismatch")
     is_mismatch = bool(result["only_local"] or result["only_broker"]

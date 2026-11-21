@@ -39,6 +39,31 @@ Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md
   right after the Friday close, instead of any weekday. **Next:** F4 (entry fidelity).
 - **Open user decision (F7):** keep funding new LIVE entries during the investigation, or run
   signal-only/shadow with capital parked.
+- **Improvement options explored 2026-11-21 → [STRATEGY_IMPROVEMENT_SPEC.md](STRATEGY_IMPROVEMENT_SPEC.md)**
+  (PROPOSED, nothing built). Backtest at live caps: CAGR 5.1% / DD −7.6% / Sharpe ~0.91. Sharpe
+  is flat across pos caps (a leverage dial), and the top 10% of trades = 100% of R.
+  - **I1** "let winners run" was never truly tested before: every exit test kept TP3/5wk.
+    TP5/13wk and chandelier+TP5/26wk double OOS expR (+0.40 → +0.77R) and lift Sharpe
+    (1.30 → 1.51), but OOS Calmar drops (1.34 → 0.93) because of deeper DD. Next: a
+    risk-matched re-test.
+  - **I2/I3** recover the 30% US withholding (−0.88pp/yr measured) with accumulating UCITS
+    classes, the cash shield first, and fix the SGOV churn. This is the most certain gain.
+  - **I4** test a core allocation for the idle half of the capital.
+  - **I3 BUILT 2026-11-21 (not on LIVE):** the cash shield is configurable
+    (`CASH_SHIELD_SYMBOL`, default SGOV). IB01 (Irish accumulating T-bill UCITS, USD on LSE)
+    earned the same gross as SGOV (4.05% vs 4.04%/yr) with no 30% withholding, worth
+    +1.1–1.2%/yr on the shield. Migration sells legacy SGOV first. Anti-churn: max(USD 2.5k, 5%
+    NAV) band + one rebalance per week. PAPER compose sets IB01 (deploys on next push); LIVE
+    follows after a clean PAPER migration. Tests: `test_cash_shield`, suite 348 passed.
+  - **I1 risk-matched re-test (full universe):** chandelier 3×ATR + TP5/26wk at 0.5% risk =
+    same CAGR (5.21% vs 5.11%), Sharpe 0.91 → 1.33, bootstrap Calmar 0.63 → 1.58 (median DD
+    −10.3% → −6.2%). But the single historical worst DD is −9.0% vs −7.6%, so it fails the
+    single-path Calmar bar. Next: find the −9% episode, walk-forward, PAPER shadow exit.
+  - **Universe scan:** no adds worth it (sectors hurt). Drop IDTL/PRFD/TIPS: negative
+    expectancy, and removing them improves both windows (Full 0.674→0.721, OOS 1.344→1.533).
+    Needs user approval. DIA/QQQ removals are non-additive (each helps, both hurt), so
+    bootstrap/walk-forward them first.
+  - The inventory of ~150 already-tested ideas is in §6.
 
 ### 🐕 2026-11-21: quant watchdog.ps1 died silently -- now has a heartbeat + 5-min keepalive task
 **What happened:** the watchdog (pid 8500) was last alive 19:35 HKT Sat and was gone by 21:33. No log

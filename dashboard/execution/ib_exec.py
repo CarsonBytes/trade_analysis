@@ -759,7 +759,8 @@ def mirrored_open_qty() -> dict[str, float]:
 # ---- actions ----------------------------------------------------------------
 
 def within_entry_execution_window(now: dt.datetime | None = None,
-                                  instrument: str | None = None) -> bool:
+                                  instrument: str | None = None,
+                                  exchange: str | None = None) -> bool:
     """ADDED 2026-07-31, user-requested execution-quality gate -- holds new-entry ORDER
     SUBMISSION to 10:00am-3:30pm ET, deliberately narrower than app.py's LLM-hours gate
     (9:30am-3:30pm): this window additionally excludes the first 30min too, matching the
@@ -789,7 +790,10 @@ def within_entry_execution_window(now: dt.datetime | None = None,
     from dashboard.core.market_calendar import is_us_trading_day, is_lse_trading_day
     from dashboard.instruments import active_by_key
     inst = active_by_key(instrument) if instrument else None
-    if inst is not None and inst.ib_exchange:
+    # `exchange` (ADDED 2026-11-21, I3): for symbols outside the strategy universe (the cash
+    # shield, e.g. IB01 on LSEETF). Non-empty -> the LSE window; "" -> NYSE; None -> as before.
+    lse = bool(exchange) if exchange is not None else bool(inst is not None and inst.ib_exchange)
+    if lse:
         now_lse = now.astimezone(ZoneInfo("Europe/London")) if now else \
             dt.datetime.now(ZoneInfo("Europe/London"))
         if not is_lse_trading_day(now_lse.date()):    # weekend OR UK market holiday
@@ -1005,7 +1009,7 @@ def _strategy_deployed_usd(ib, acct: str | None = None) -> float:
             mv = float(getattr(i, "marketValue", 0.0) or 0.0)
             if mv <= 0:                                # shorts (signed negative) excluded
                 continue
-            if getattr(i.contract, "symbol", "") == SGOV_SYMBOL:
+            if getattr(i.contract, "symbol", "") in shield_symbols():
                 continue                               # cash-shield != strategy deployment
             ccy = getattr(i.contract, "currency", "USD") or "USD"
             rate = 1.0 if ccy == "USD" else (ib_client.fx_to_usd(ccy) or 1.0)
@@ -2817,8 +2821,83 @@ def keep_cash_usd() -> dict:
 SGOV_SYMBOL = "SGOV"
 SGOV_PX_EST = 100.5            # SGOV ~ $100.4 and barely moves; sizing only (MKT fills real)
 CASH_SWEEP_TARGET = 0.80      # park 80% of (idle cash + SGOV); keep 20% buffer for the strategy
-CASH_SWEEP_MIN_USD = 1500     # don't churn the order for small deltas (anti-churn ONLY -- not a
+CASH_SWEEP_MIN_USD = 2500     # don't churn the order for small deltas (anti-churn ONLY -- not a
                               # substitute for CASH_SWEEP_MIN_NAV_USD below; see 2026-07-08 HANDOFF)
+                              # RAISED 1500 -> 2500 2026-11-21 with the % band + weekly cadence below.
+
+# ---- I3 (STRATEGY_IMPROVEMENT_SPEC, 2026-11-21): cash-shield tax + churn ---------------------
+# WHY: on LIVE Jul-Nov 2026 the SGOV shield netted HKD +99 on ~HKD 150-300k parked (Flex):
+# HKD 804 of distributions, minus HKD 241 US withholding (30% -- SGOV is US-domiciled and pays
+# out), minus HKD 429 commissions over 55 SGOV trades (35 in August alone). An Irish-domiciled
+# ACCUMULATING T-bill UCITS fund (IB01: iShares $ Treasury Bond 0-1yr, USD on LSE) earned the
+# same gross (4.05% vs 4.04%/yr, Nov 2024-Nov 2026) but distributes nothing, so nothing is
+# withheld: ~+1.1-1.2%/yr on the shield. CASH_SHIELD_SYMBOL picks the instrument; any legacy
+# shield still held is sold (one leg per cycle) and the proceeds re-parked in the new one.
+_KNOWN_SHIELDS = {"SGOV": "", "IB01": "LSEETF"}     # symbol -> IBKR primary exchange
+LEGACY_SHIELD_SYMBOLS = ("SGOV",)
+CASH_SWEEP_BAND_PCT = 0.05            # rebalance only when |delta| >= max(MIN_USD, 5% of NAV)
+CASH_SWEEP_MIN_INTERVAL_SEC = 7 * 86400   # at most one rebalance order per week ...
+CASH_SWEEP_DEBIT_URGENT_USD = 500     # ... unless cash is this far NEGATIVE (a margin debit
+                                      # costs ~5-6%/yr) -- then a SELL may go any time
+CASH_SWEEP_LAST_KEY = "cash_sweep_last_confirmed_ts"   # persists across restarts
+
+
+def shield_symbol() -> str:
+    return (os.environ.get("CASH_SHIELD_SYMBOL") or "SGOV").strip().upper()
+
+
+def shield_exchange(symbol: str | None = None) -> str:
+    sym = symbol or shield_symbol()
+    env = os.environ.get("CASH_SHIELD_EXCHANGE")
+    if env is not None and sym == shield_symbol():
+        return env.strip().upper()
+    return _KNOWN_SHIELDS.get(sym, "")
+
+
+def shield_symbols() -> set[str]:
+    """Every symbol that is cash-shield, not strategy: the configured one plus legacy ones
+    still being migrated out. Reconcile/untracked/deployed-capital all exclude these."""
+    return {shield_symbol(), *LEGACY_SHIELD_SYMBOLS}
+
+
+def sweep_band_usd(nav_usd: float) -> float:
+    """PURE: the no-trade band for a shield rebalance."""
+    return max(float(CASH_SWEEP_MIN_USD), CASH_SWEEP_BAND_PCT * max(float(nav_usd or 0.0), 0.0))
+
+
+def sweep_cadence_ok(last_ts, now_ts: float, urgent: bool = False) -> bool:
+    """PURE: may a rebalance order go now? At most once per CASH_SWEEP_MIN_INTERVAL_SEC,
+    except `urgent` (selling to clear a margin debit)."""
+    if urgent or not last_ts:
+        return True
+    try:
+        return (float(now_ts) - float(last_ts)) >= CASH_SWEEP_MIN_INTERVAL_SEC
+    except (TypeError, ValueError):
+        return True
+
+
+def _shield_px_estimate(symbol: str, exchange: str) -> float | None:
+    """A sizing price when the shield isn't held yet (no portfolio mark): live quote, else
+    yfinance's last close, else the old SGOV constant for SGOV only. None = can't size."""
+    try:
+        t = ib_client.get_stock_tick(symbol, primary_exchange=exchange)
+        if t and (t.get("mid") or t.get("last")):
+            return float(t.get("mid") or t.get("last"))
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        import yfinance as yf
+        tk = f"{symbol}.L" if exchange == "LSEETF" else symbol
+        h = yf.download(tk, period="10d", interval="1d", progress=False, auto_adjust=False)
+        if h is not None and len(h):
+            c = h["Close"]
+            c = c.iloc[:, 0] if hasattr(c, "columns") else c
+            v = float(c.dropna().iloc[-1])
+            if v > 0:
+                return v
+    except Exception:                                  # noqa: BLE001
+        pass
+    return SGOV_PX_EST if symbol == "SGOV" else None
 CASH_SWEEP_COOLDOWN_SEC = 300  # 5 min cooldown between sweep order submissions (prevents ghost
                                # order flood -- confirmed live: 160 identical BUY orders placed
                                # every ~65s because no pending-order guard existed)
@@ -2869,10 +2948,10 @@ def _sweep_note_failure(why: str) -> None:
     try:
         from dashboard.core import notable_events
         notable_events.record(
-            f"{SGOV_SYMBOL}: cash shield NOT executing -- {_sweep_fail_streak} consecutive "
+            f"{shield_symbol()}: cash shield NOT executing -- {_sweep_fail_streak} consecutive "
             f"orders never reached the book ({why}). Idle cash is not being parked; check "
             f"order_exec_log for the broker's status.",
-            level="error", kind="cash-sweep-failed", symbol=SGOV_SYMBOL)
+            level="error", kind="cash-sweep-failed", symbol=shield_symbol())
     except Exception:                                    # noqa: BLE001
         log.debug("cash-sweep alert failed", exc_info=True)
 CASH_SWEEP_MIN_NAV_USD = 10_000   # LOWERED 2026-08-06 (was 75_000): the ORIGINAL "T+1
@@ -2897,106 +2976,159 @@ def _sweep_on() -> bool:
 
 
 def sweep_cash() -> dict:
-    """Park idle cash in SGOV so it earns ~T-bill yield, keeping a buffer so the
-    strategy ALWAYS has cash. Rebalances SGOV toward CASH_SWEEP_TARGET of (idle cash
-    + SGOV) each cycle. Paper-guarded + opt-in (CASH_SWEEP=1). Returns a status dict
-    for the dashboard. NB: IB *paper* may not credit the actual distribution -- this
-    runs the MECHANICS; the real yield materialises on a funded account."""
+    """Park idle cash in the CASH SHIELD (a T-bill ETF) so it earns ~T-bill yield, keeping a
+    buffer so the strategy ALWAYS has cash. Rebalances the shield toward CASH_SWEEP_TARGET of
+    (idle cash + shield). Paper-guarded + opt-in (CASH_SWEEP=1). Returns a status dict for the
+    dashboard (keys keep their historical `sgov_*` names; they describe the shield).
+
+    CHANGED 2026-11-21 (I3, STRATEGY_IMPROVEMENT_SPEC):
+    - the shield instrument is CASH_SHIELD_SYMBOL (default SGOV; IB01 = accumulating Irish
+      UCITS, no US withholding). A legacy shield still held is SOLD first, one leg per cycle,
+      in its own (US) market window; the next eligible cycle re-parks the cash.
+    - anti-churn: a rebalance needs |delta| >= max(CASH_SWEEP_MIN_USD, 5% NAV) AND at most one
+      confirmed rebalance per week (persisted), except a SELL that clears a margin debit."""
     import time as _time
+    from dashboard.core import store
+    shield, exch = shield_symbol(), shield_exchange()
     status = {"enabled": _sweep_on(), "ok": False, "sgov_qty": 0.0, "sgov_value_base": 0.0,
-              "ccy": "", "log": ""}
+              "ccy": "", "log": "", "shield": shield, "legacy": {}}
     if not _sweep_on():
         return status
-    log.info("cash-sweep: cycle start")
+    log.info("cash-sweep: cycle start (shield %s)", shield)
     ib = _guard()
     if ib is None:
         status["log"] = "cash-sweep: broker unreachable"
         log.warning("cash-sweep: %s", status["log"])
         return status
     acct = ib_client.account_id()          # see mirror_new()'s comment re: Error 435
-    contract = ib_client.stock_contract(SGOV_SYMBOL)
+    contract = ib_client.stock_contract(shield, primary_exchange=exch)
     if contract is None:
-        status["log"] = "cash-sweep: SGOV contract unavailable, retry"
+        status["log"] = f"cash-sweep: {shield} contract unavailable, retry"
         log.warning("cash-sweep: %s", status["log"])
         return status
     con_id = getattr(contract, "conId", 0)
+    legacy_syms = [x for x in LEGACY_SHIELD_SYMBOLS if x != shield]
 
     def _snap():
-        pos = next((p for p in ib_client.filter_by_account(ib.positions() or [], acct)
-                   if p.contract.conId == con_id), None)
-        pf = next((i for i in ib_client.filter_by_account(ib.portfolio() or [], acct)
-                  if i.contract.conId == con_id), None)
-        qty = float(pos.position) if pos else 0.0
-        px = float(pf.marketPrice) if (pf and pf.marketPrice and pf.marketPrice == pf.marketPrice
-                                       and pf.marketPrice > 0) else SGOV_PX_EST
-        return qty, px
-    # READ THE SGOV HOLDING FIRST (robust) so its value is ALWAYS reported, even if the
+        poss = ib_client.filter_by_account(ib.positions() or [], acct)
+        pfs = ib_client.filter_by_account(ib.portfolio() or [], acct)
+
+        def _mark(con):
+            pf = next((i for i in pfs if i.contract.conId == con), None)
+            mp = getattr(pf, "marketPrice", None) if pf else None
+            return float(mp) if (mp and mp == mp and mp > 0) else None
+        pos = next((p for p in poss if p.contract.conId == con_id), None)
+        legacy = [(getattr(p.contract, "symbol", ""), float(p.position), _mark(p.contract.conId))
+                  for p in poss
+                  if getattr(p.contract, "symbol", "") in legacy_syms and float(p.position or 0) > 0]
+        return (float(pos.position) if pos else 0.0), _mark(con_id), legacy
+    # READ THE SHIELD HOLDING FIRST (robust) so its value is ALWAYS reported, even if the
     # account-summary read below fails on a flaky cycle -- otherwise the dashboard flickers to 0.
-    sgov_qty, px = ib_client.call(_snap)
+    sgov_qty, px, legacy = ib_client.call(_snap)
+    if px is None:
+        px = _shield_px_estimate(shield, exch)
     summ = ib_client.account_summary()
     ccy = (summ or {}).get("_ccy", "") or "HKD"                  # default base = HKD
     status["ccy"] = ccy
     base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)    # USD -> base ccy
-    sgov_usd = sgov_qty * px
-    status["ok"] = True                                          # SGOV holding read OK
+    legacy_usd = sum(q * (lp or (SGOV_PX_EST if sym == "SGOV" else 0.0)) for sym, q, lp in legacy)
+    sgov_usd = sgov_qty * (px or 0.0)
+    status["ok"] = True                                          # shield holding read OK
     status["sgov_qty"] = sgov_qty
-    status["sgov_value_base"] = sgov_usd * base_per_usd
+    status["legacy"] = {sym: q for sym, q, _lp in legacy}
+    status["sgov_value_base"] = (sgov_usd + legacy_usd) * base_per_usd
     if not summ or summ.get("TotalCashValue") is None:           # account unavailable: report
         log.info("cash-sweep: account summary unavailable, skipping rebalance")
-        return status                                            # SGOV value, skip rebalancing
-    # ADDED 2026-08-27: SGOV is a US-listed ETF -- placing MARKET orders when NYSE is
-    # closed just fails/retries every 30s tick. The read-only reporting above (SGOV qty,
-    # value, ccy) still runs so the pie chart and stats stay accurate around the clock;
-    # only the order placement below is skipped.
-    if not within_entry_execution_window():
-        status["log"] = "cash-sweep: market closed, rebalance deferred to next US session"
-        log.info("cash-sweep: %s", status["log"])
-        return status
+        return status                                            # value, skip rebalancing
     nav_usd = float(summ.get("NetLiquidation", 0.0) or 0.0) / base_per_usd
     if nav_usd < CASH_SWEEP_MIN_NAV_USD:
         status["log"] = (f"cash-sweep: paused until NAV reaches ${CASH_SWEEP_MIN_NAV_USD:,.0f} "
                          f"(currently ~${nav_usd:,.0f}) -- T+1 friction isn't worth it yet")
         log.info("cash-sweep: %s", status["log"])
-        return status                                            # SGOV value already reported above
+        return status
     cash_usd = float(summ["TotalCashValue"]) / base_per_usd
 
+    # --- I3 migration: a legacy shield (SGOV, US-listed) is sold first, in the US window ---
+    if legacy:
+        sym, lq, lp = legacy[0]
+        if not within_entry_execution_window(exchange=""):
+            status["log"] = (f"cash-sweep: migrating {sym} -> {shield}: US market closed, "
+                             f"sell deferred")
+            log.info("cash-sweep: %s", status["log"])
+            return status
+        lc = ib_client.stock_contract(sym)                 # SMART-qualified (RC4: never reuse
+        if lc is None:                                     # positions().contract for orders)
+            status["log"] = f"cash-sweep: {sym} contract unavailable for migration, retry"
+            return status
+        return _sweep_send(ib, acct, lc, "SELL", int(lq), getattr(lc, "conId", 0), sym, status,
+                           px=lp or SGOV_PX_EST, base_per_usd=base_per_usd, stamp_cadence=False,
+                           note=f"migration {sym} -> {shield}")
+
+    if not px:
+        status["log"] = f"cash-sweep: no price for {shield} yet, rebalance deferred"
+        log.warning("cash-sweep: %s", status["log"])
+        return status
+    # ADDED 2026-08-27 (generalized 2026-11-21): only submit while the shield's own exchange is
+    # open. The read-only reporting above still runs around the clock.
+    if not within_entry_execution_window(exchange=exch):
+        status["log"] = f"cash-sweep: {shield} market closed, rebalance deferred"
+        log.info("cash-sweep: %s", status["log"])
+        return status
+
     # exclude any cash earmarked for a pending manual withdrawal so the sweep does NOT
-    # re-buy SGOV with money you're about to take out (and will SELL SGOV to free it).
+    # re-buy the shield with money you're about to take out.
     reserve_usd = _withdraw_reserve_usd()
     investable = max(cash_usd + sgov_usd - reserve_usd, 0.0)
     if reserve_usd > 0:
         status["log"] = f"(withdrawal reserve ${reserve_usd:,.0f} held aside) "
     target_usd = investable * CASH_SWEEP_TARGET
     delta_usd = target_usd - sgov_usd
-    if abs(delta_usd) < CASH_SWEEP_MIN_USD:
-        status["log"] = f"cash-sweep: delta ${abs(delta_usd):,.0f} < ${CASH_SWEEP_MIN_USD:,.0f} min"
+    band = sweep_band_usd(nav_usd)
+    if abs(delta_usd) < band:
+        status["log"] = f"cash-sweep: delta ${abs(delta_usd):,.0f} < ${band:,.0f} band"
         log.info("cash-sweep: %s", status["log"])
         return status
     shares = int(delta_usd // px) if delta_usd > 0 else -int((-delta_usd) // px)
-    shares = max(-int(sgov_qty), shares)          # never sell more SGOV than we hold
+    shares = max(-int(sgov_qty), shares)          # never sell more of the shield than we hold
     if shares == 0:
         status["log"] = f"cash-sweep: shares=0 (delta={delta_usd:.0f}, px={px:.2f})"
         log.info("cash-sweep: %s", status["log"])
         return status
     action, qty = ("BUY", shares) if shares > 0 else ("SELL", -shares)
+    urgent = action == "SELL" and cash_usd < -CASH_SWEEP_DEBIT_URGENT_USD
+    last_ts, _lts = store.cache_get(CASH_SWEEP_LAST_KEY)
+    if not sweep_cadence_ok(last_ts, _time.time(), urgent):
+        nxt = dt.datetime.fromtimestamp(float(last_ts) + CASH_SWEEP_MIN_INTERVAL_SEC,
+                                        dt.timezone.utc)
+        status["log"] = (f"cash-sweep: weekly cadence -- {action} {qty} {shield} waits until "
+                         f"{nxt:%Y-%m-%d %H:%M}Z")
+        log.info("cash-sweep: %s", status["log"])
+        return status
     if os.environ.get("CASH_SWEEP_DRYRUN", "").lower() in ("1", "true", "yes"):
-        status["log"] = (f"cash-sweep DRYRUN: would {action} {qty} SGOV @~{px:.2f} "
-                         f"(idle ${cash_usd:,.0f} -> target SGOV ${target_usd:,.0f})")
+        status["log"] = (f"cash-sweep DRYRUN: would {action} {qty} {shield} @~{px:.2f} "
+                         f"(idle ${cash_usd:,.0f} -> target ${target_usd:,.0f})")
         log.info("ib_exec: %s", status["log"])
         return status
-    # ADDED 2026-09-22: guard against ghost order flood. Without this, every cycle places
-    # a new MARKET BUY that IB silently accepts but never fills (confirmed live: 160 identical
-    # orders in one session). Check: (1) existing pending SGOV order, (2) cooldown timer.
-    # 2026-10-02: the cooldown now also covers REFUSED submissions, with a doubling backoff and
-    # a breaker (see CASH_SWEEP_BACKOFF_BASE_SEC / CASH_SWEEP_BREAKER_AFTER).
+    return _sweep_send(ib, acct, contract, action, qty, con_id, shield, status, px=px,
+                       base_per_usd=base_per_usd, stamp_cadence=True,
+                       note=f"idle cash parked at ~{CASH_SWEEP_TARGET:.0%}")
+
+
+def _sweep_send(ib, acct, contract, action: str, qty: int, con_id: int, sym: str, status: dict,
+                *, px: float, base_per_usd: float, stamp_cadence: bool, note: str) -> dict:
+    """Submit ONE shield order with every existing guard: breaker, cooldown/backoff, pending-
+    order check, the long-only guard (G1), and the S1 broker confirmation. Factored out of
+    sweep_cash() 2026-11-21 so the I3 migration leg and the rebalance share it."""
+    import time as _time
     global _sweep_last_order_ts
+    # ADDED 2026-09-22: guard against ghost order flood (160 identical orders in one session).
+    # 2026-10-02: the cooldown also covers REFUSED submissions, with backoff + breaker.
     now_mono = _time.monotonic()
     if _sweep_fail_streak >= CASH_SWEEP_BREAKER_AFTER:
-        wait = int(_sweep_backoff_sec(_sweep_fail_streak)
-                   - (now_mono - _sweep_last_order_ts))
+        wait = int(_sweep_backoff_sec(_sweep_fail_streak) - (now_mono - _sweep_last_order_ts))
         status["log"] = (f"cash-sweep: breaker OPEN after {_sweep_fail_streak} consecutive "
                          f"refusals -- not submitting for another {max(wait, 0)}s. The broker "
-                         f"is refusing SGOV orders; check order_exec_log, then restart the "
+                         f"is refusing {sym} orders; check order_exec_log, then restart the "
                          f"instance (or re-arm) once it is fixed.")
         log.warning("cash-sweep: %s", status["log"])
         return status
@@ -3008,8 +3140,8 @@ def sweep_cash() -> dict:
         return status
     try:
         pending_syms = ib_client.broker_open_order_symbols()
-        if pending_syms is not None and SGOV_SYMBOL in pending_syms:
-            status["log"] = f"cash-sweep: pending {SGOV_SYMBOL} order already live, skipping"
+        if pending_syms is not None and sym in pending_syms:
+            status["log"] = f"cash-sweep: pending {sym} order already live, skipping"
             log.info("cash-sweep: %s", status["log"])
             return status
     except Exception:                                  # noqa: BLE001
@@ -3019,7 +3151,7 @@ def sweep_cash() -> dict:
 
     def _send():
         o = ib_async.MarketOrder(action, qty)
-        o.orderRef = "cash-sweep-sgov"
+        o.orderRef = f"cash-sweep-{sym.lower()}"
         o.tif = "DAY"
         if acct:
             o.account = acct
@@ -3031,30 +3163,30 @@ def sweep_cash() -> dict:
         _sweep_note_failure(f"send raised: {e}")
         return status
     if trade is None:
-        status["log"] = f"cash-sweep: {action} {qty} SGOV REFUSED by the long-only guard"
+        status["log"] = f"cash-sweep: {action} {qty} {sym} REFUSED by the long-only guard"
         _sweep_note_failure(status["log"])
         log.warning("ib_exec: %s", status["log"])
         return status
-    # S1 (2026-10-01): CONFIRM before claiming the sweep ran. This is the exact spot that logged
-    # `BUY 149 SGOV` 17x on 2026-09-30 while SGOV never left 60 shares and nothing alerted --
-    # placeOrder() returning was treated as the order working. IBKR can discard a submission
-    # milliseconds later ("Order was discarded."), so the verdict has to be read, not assumed.
-    _conf = confirm_order(ib, trade, SGOV_SYMBOL, action, qty, timeout=ORDER_CONFIRM_SEC)
+    # S1 (2026-10-01): CONFIRM before claiming the sweep ran (IBKR can discard a submission
+    # milliseconds later -- 17 unconfirmed "BUY 149 SGOV" lines on 2026-09-30, nothing moved).
+    _conf = confirm_order(ib, trade, sym, action, qty, timeout=ORDER_CONFIRM_SEC)
     if not _conf["ok"]:
-        status["log"] = (f"cash-sweep: {action} {qty} SGOV NOT working at broker "
+        status["log"] = (f"cash-sweep: {action} {qty} {sym} NOT working at broker "
                          f"(status {_conf['status'] or 'unconfirmed'}"
                          f"{' -- ' + _conf['message'] if _conf['message'] else ''})")
         _sweep_note_failure(status["log"])
         log.warning("ib_exec: %s", status["log"])
         return status
     _sweep_note_success()
-    record_order_exec(SGOV_SYMBOL, action, qty, _conf["status"],
-                      f"orderId={_conf['order_id']} cash-sweep")
+    record_order_exec(sym, action, qty, _conf["status"],
+                      f"orderId={_conf['order_id']} cash-sweep ({note})")
     _sweep_last_order_ts = _time.monotonic()   # start cooldown after a CONFIRMED submission
-    status["sgov_qty"] = sgov_qty + (qty if action == "BUY" else -qty)
-    status["sgov_value_base"] = status["sgov_qty"] * px * base_per_usd
-    status["log"] = (status["log"] + f"cash-sweep: {action} {qty} SGOV @~{px:.2f} "
-                     f"(idle cash parked at ~{CASH_SWEEP_TARGET:.0%})")
+    if stamp_cadence:
+        from dashboard.core import store
+        store.cache_set(CASH_SWEEP_LAST_KEY, int(_time.time()))
+    if sym == status.get("shield"):
+        status["sgov_qty"] = status.get("sgov_qty", 0.0) + (qty if action == "BUY" else -qty)
+    status["log"] = (status["log"] + f"cash-sweep: {action} {qty} {sym} @~{px:.2f} ({note})")
     log.info("ib_exec: %s", status["log"])
     return status
 
@@ -3106,7 +3238,19 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
     ccy = (summ or {}).get("_ccy", "") or "HKD"
     base_per_usd = 1.0 / ib_client._PEG_USD_PER.get(ccy, 1.0)
     idle_usd = float(summ["TotalCashValue"]) / base_per_usd
-    contract = ib_client.stock_contract(SGOV_SYMBOL)
+    # I3 (2026-11-21): free cash from whichever shield is actually held -- the configured one,
+    # or a legacy one (SGOV) still waiting to be migrated.
+    shield_sym = shield_symbol()
+    try:
+        held = ib_client.call(lambda: {
+            getattr(p.contract, "symbol", ""): float(p.position or 0.0)
+            for p in ib_client.filter_by_account(ib.positions() or [], acct)
+            if getattr(p.contract, "symbol", "") in shield_symbols()}, timeout=10)
+    except Exception:                                  # noqa: BLE001
+        held = {}
+    if held.get(shield_sym, 0.0) <= 0 and any(held.get(s_, 0.0) > 0 for s_ in LEGACY_SHIELD_SYMBOLS):
+        shield_sym = next(s_ for s_ in LEGACY_SHIELD_SYMBOLS if held.get(s_, 0.0) > 0)
+    contract = ib_client.stock_contract(shield_sym, primary_exchange=shield_exchange(shield_sym))
     con_id = getattr(contract, "conId", 0) if contract else 0
 
     def _snap():
@@ -3116,7 +3260,7 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
                   if i.contract.conId == con_id), None)
         qty = float(pos.position) if pos else 0.0
         mp = pf.marketPrice if pf else None
-        px = float(mp) if (mp and mp == mp and mp > 0) else SGOV_PX_EST
+        px = float(mp) if (mp and mp == mp and mp > 0) else (_shield_px_estimate(shield_sym, shield_exchange(shield_sym)) or SGOV_PX_EST)
         return qty, px
     sgov_qty, px = ib_client.call(_snap) if con_id else (0.0, SGOV_PX_EST)
 
@@ -3144,7 +3288,7 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
 
         def _send():
             o = ib_async.MarketOrder("SELL", sell_shares)
-            o.orderRef = "withdraw-sgov"; o.tif = "DAY"
+            o.orderRef = f"withdraw-{shield_sym.lower()}"; o.tif = "DAY"
             if acct:
                 o.account = acct
             return place_guarded(ib, contract, o, intent="withdraw", snap=snap, con_id=con_id)
@@ -3161,17 +3305,17 @@ def prepare_withdrawal(amount_usd: float, dry_run: bool = False) -> dict:
         # S1 (2026-10-01): confirm the sell actually worked. The operator is told
         # "sold N SGOV... now withdraw MANUALLY" off the back of this line -- an unconfirmed
         # sell would leave them withdrawing against cash that never materialised.
-        _conf = confirm_order(ib, _t, SGOV_SYMBOL, "SELL", sell_shares,
+        _conf = confirm_order(ib, _t, shield_sym, "SELL", sell_shares,
                               timeout=ORDER_CONFIRM_SEC)
         if not _conf["ok"]:
-            alert_order_failure({**_conf, "symbol": SGOV_SYMBOL},
+            alert_order_failure({**_conf, "symbol": shield_sym},
                                 f"withdrawal reserve ${amount_usd:,.0f}")
             out["log"] = (f"withdrawal: SGOV sell NOT working at broker (status "
                           f"{_conf['status'] or 'unconfirmed'}) -- reserve is set but the cash "
                           f"is NOT freed; do NOT withdraw yet")
             log.warning("ib_exec: %s", out["log"])
             return out
-        record_order_exec(SGOV_SYMBOL, "SELL", sell_shares, _conf["status"],
+        record_order_exec(shield_sym, "SELL", sell_shares, _conf["status"],
                           f"orderId={_conf['order_id']} prepare_withdrawal")
         out["sgov_sold"] = sell_shares
     out["log"] = (f"withdrawal READY: reserved ${amount_usd:,.0f}, sold {sell_shares} SGOV. "

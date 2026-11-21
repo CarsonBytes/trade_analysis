@@ -559,7 +559,7 @@ def compute_today_pnl() -> dict:
             out["breakdown"] = [
                 {"label": "Strategy", "value": round(strategy_total, 2),
                  "pct": round(strategy_total / total_abs * 100, 1)},
-                {"label": "SGOV", "value": round(sgov_pnl, 2),
+                {"label": "Cash shield", "value": round(sgov_pnl, 2),
                  "pct": round(sgov_pnl / total_abs * 100, 1)},
                 {"label": "Interest", "value": round(interest_daily, 2),
                  "pct": round(interest_daily / total_abs * 100, 1)},
@@ -904,7 +904,7 @@ def refresh_cheap() -> None:
             if _items is not None:
                 STATE["untracked_positions"] = _rec_u.untracked_positions(
                     _items, _ibx_u.mirrored_open_symbols(),
-                    excluded_symbols={_ibx_u.SGOV_SYMBOL})
+                    excluded_symbols=_ibx_u.shield_symbols())
         except Exception as e:                     # noqa: BLE001
             log.debug("untracked_positions error: %s", e)
     # broker reconciliation: on every FRESH connection (login/reconnect -- see
