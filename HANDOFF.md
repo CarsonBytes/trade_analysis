@@ -5,6 +5,23 @@ Last updated 2026-10-17.
 
 ---
 
+### 🐕 2026-11-21: quant watchdog.ps1 died silently -- now has a heartbeat + 5-min keepalive task
+**What happened:** the watchdog (pid 8500) was last alive 19:35 HKT Sat and was gone by 21:33. No log
+line, no PowerShell engine-stop event (403), no crash record (1000/1026): a hard kill. Cause NOT proven.
+Only correlate: PUBG's anti-cheat drivers (BattlEye `BEDaisy.sys`, `navagio.sys`) loaded at 19:30 HKT;
+the game crashed 21:19. The Windows PowerShell event log keeps only ~3 h (15 MB), so older deaths
+can't be checked. The same process dispatches the weekly touch (Sun 20:35) and dashboard supervision.
+**Fix:** watchdog.ps1 writes `D:\quant\logs\watchdog.heartbeat` every cycle; task
+`\IBKR\Quant Watchdog Keepalive` (logon + every 5 min, `scripts\windows\ensure-quant-watchdog.ps1`)
+relaunches it via the Startup VBS when the heartbeat is >5 min stale (kills it first if the process is
+hung). Each restart logs the last heartbeat and whether TslGame/BEService is running, to confirm or
+rule out the anti-cheat theory. `error` digest per restart; `critical` if 3 in 1 h or relaunch fails.
+Log `D:\quant\logs\watchdog-keepalive.log`. Tests: `scripts\windows\test-watchdog-keepalive.ps1`.
+**Also fixed:** the watchdog's single-instance lock exited if ANY process held the old pid (pid reuse
+could block every relaunch); it now checks the command line, or the start time when WMI fails.
+Bug found while building: PS 5.1 `.Count` is $null for a single object, so one live watchdog counted
+as 0 (two false relaunches at 22:10/22:13, harmless: the lock made them exit). Fixed with `@()`.
+
 ### 💤 2026-11-21: quant weekend sleep LIVE (QUANT_WEEKEND_SLEEP_SPEC)
 Stops the 3 quant containers (live dash, paper dash, paper gateway, ~1.2 GB) Sat 06:30 -> Sun 20:00 HKT
 via holds in `/home/cap/.container-hold` (infra-watchdog already honours them; watchdog.ps1 now does

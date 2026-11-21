@@ -32,6 +32,11 @@
 
 $logFile  = "D:\quant\logs\watchdog.log"
 $lockFile = "D:\quant\logs\watchdog.pid"
+# Written every cycle (UTC ISO + pid). scripts\windows\ensure-quant-watchdog.ps1 (task
+# \IBKR\Quant Watchdog Keepalive, every 5 min) restarts the watchdog when this goes stale or the
+# process is gone, and the file's age gives the time of death to +-20 s. ADDED 2026-11-21: the
+# process was hard-killed ~19:35 HKT with no log line, no engine-stop event and no crash record.
+$heartbeatFile = "D:\quant\logs\watchdog.heartbeat"
 $checkIntervalSec = 20
 $httpTimeoutSec   = 8
 
@@ -142,9 +147,21 @@ function Start-LiveLogin {
 # launch) -- same PID-lock-file pattern as event-radar's watchdog, checked from the INSIDE
 # rather than relying on an external "is it already running" scan (which is inherently racy).
 if (Test-Path $lockFile) {
-    $existingPid = Get-Content $lockFile -ErrorAction SilentlyContinue
-    if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
-        exit
+    $existingPid = "$(Get-Content $lockFile -ErrorAction SilentlyContinue)".Trim()
+    # FIXED 2026-11-21: this used to exit whenever ANY process held the old pid. Windows reuses
+    # pids, so after the watchdog died a relaunch could silently exit because an unrelated
+    # process now owned that number. Only a live powershell running THIS script counts.
+    if ($existingPid -match '^\d+$' -and [int]$existingPid -ne $PID) {
+        $other = Get-Process -Id ([int]$existingPid) -ErrorAction SilentlyContinue
+        if ($other -and $other.ProcessName -in 'powershell', 'pwsh') {
+            $cmd = $null
+            try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$existingPid" -OperationTimeoutSec 20 -ErrorAction Stop).CommandLine } catch { }
+            # Command line readable: trust it. Unreadable (WMI failure): fall back to start time --
+            # the real owner started before it wrote the pid file; a reused pid started after.
+            $isWatchdog = if ($cmd) { $cmd -match 'quant\\watchdog\.ps1' }
+                          else { $other.StartTime -le (Get-Item $lockFile).LastWriteTime.AddSeconds(5) }
+            if ($isWatchdog) { exit }
+        }
     }
 }
 Set-Content -Path $lockFile -Value $PID -ErrorAction SilentlyContinue
@@ -211,6 +228,7 @@ while ($true) {
         # --- gateway + relay checks first, every cycle, independent of dashboard state ---
         if ($gwCooldown -gt 0) { $gwCooldown-- }
         if ($relayCooldown -gt 0) { $relayCooldown-- }
+        try { Set-Content -Path $heartbeatFile -Value ("{0} pid={1}" -f [DateTime]::UtcNow.ToString('o'), $PID) -ErrorAction Stop } catch { }
 
         if (Test-GatewayUp) {
             if ($gwFail -ge $gatewayGraceCycles) {
