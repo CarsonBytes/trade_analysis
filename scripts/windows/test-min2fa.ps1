@@ -1,3 +1,6 @@
+# SUPERSEDED 2026-11-21 by test-weekly2fa.ps1 (IBKR_WEEKLY_2FA_SPEC): its trigger-time checks
+# assume the Windows clock is HKT (it is not -- tzutil moved it to PST/EST) and the
+# restart-observe/verify chain it tests is retired (tasks disabled). Kept for archaeology.
 # Test suite for the MIN-2FA stack + operational guards (2026-10-17).
 # Coverage: script parse checks, live handshake, gateway-push level matrix (offline,
 # cannot page), port ownership, watchdog liveness, WU policy, task triggers/states,

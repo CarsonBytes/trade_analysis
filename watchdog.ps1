@@ -86,7 +86,7 @@ function Send-Alert($level, $key, $msg) {
 # 0xC000013A the same minute. This layer detects either, toasts, pages Telegram (critical
 # key -> one buzz per incident via gateway-push.sh's 15min per-key cooldown), and
 # auto-launches the passkey login so the prompt is waiting at the PC.
-$gatewayGraceCycles = 6   # ~2 min: a healthy 20:30 token restart blips 30-60s -- must NOT alarm
+$gatewayGraceCycles = 6   # ~2 min: a healthy daily token restart (AutoRestartTime, 05:30 HKT since 2026-11-21) blips 30-60s -- must NOT alarm
 $relayGraceCycles   = 6
 
 function Test-GatewayUp {
