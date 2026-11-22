@@ -287,7 +287,8 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
                      "(1,0,111,'CPER',84.0,50.0,'','2026-06-01T00:00:00','OPEN','etf')")
 
         cancelled = []
-        fake_order = SimpleNamespace(orderId=1)
+        fake_order = SimpleNamespace(orderId=1, orderRef="quant#1", action="SELL",
+                                     totalQuantity=84)
         fake_trade = SimpleNamespace(
             contract=SimpleNamespace(conId=111),
             orderStatus=SimpleNamespace(status="Submitted"),
@@ -309,11 +310,23 @@ def test_sync_closures_cancels_stale_order_when_paper_already_resolved():
 
         check("cancelled exactly one order", len(cancelled), 1)
         check("cancelled the correct order object", cancelled[0] is fake_order, True)
-        check("logged the cancellation, naming the resolved status",
-              any("cancelled stale unfilled order" in l and "EXPIRED" in l for l in logs), True)
+        check("logged the cancel request, naming the resolved status",
+              any("cancelling stale unfilled order" in l and "EXPIRED" in l for l in logs), True)
         with ib_exec._conn() as c:
             status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
-        check("ib_mirror row marked VOID (never actually filled), not CLOSED", status, "VOID")
+        check("GUARD PHASE 3 / G2: NOT VOID yet -- CANCEL_PENDING until the broker confirms",
+              status, "CANCEL_PENDING")
+        from dashboard.execution import broker
+        with mock.patch.object(broker, "mirror_table", return_value="ib_mirror"):
+            check("a CANCEL_PENDING row is not 'executed' either", 1 in broker.executed_ids(),
+                  False)
+        for _ in range(2):                    # the order is gone: two clean reads -> VOID
+            with mock.patch.object(ib_exec, "_guard", return_value=fake_ib),                  mock.patch.object(ib_exec, "CANCEL_CONFIRM_GAP_SEC", 0),                  mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"),                  mock.patch.object(ib_exec.ib_client, "_run", return_value=[]),                  mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+                logs = ib_exec.sync_closures()
+        with ib_exec._conn() as c:
+            status = c.execute("SELECT status FROM ib_mirror WHERE paper_id=1").fetchone()[0]
+        check("after two clean reads: VOID (never actually filled), not CLOSED", status, "VOID")
+        check("logged the confirmed cancel", any("cancel CONFIRMED" in l for l in logs), True)
         from dashboard.execution import broker
         with mock.patch.object(broker, "mirror_table", return_value="ib_mirror"):
             ids = broker.executed_ids()
@@ -358,7 +371,8 @@ def test_sync_closures_void_backfills_signal_only_suffix():
             c.execute("INSERT INTO ib_mirror VALUES "
                      "(1,0,111,'SPY',4.0,167.6,'','2026-07-31T00:18:39+00:00','OPEN','etf')")
 
-        fake_order = SimpleNamespace(orderId=1)
+        fake_order = SimpleNamespace(orderId=1, orderRef="quant#1", action="SELL",
+                                     totalQuantity=84)
         fake_trade = SimpleNamespace(
             contract=SimpleNamespace(conId=111),
             orderStatus=SimpleNamespace(status="Submitted"),
@@ -377,6 +391,9 @@ def test_sync_closures_void_backfills_signal_only_suffix():
              mock.patch.object(ib_exec.ib_client, "_run", return_value=[fake_trade]), \
              mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
             ib_exec.sync_closures()
+        for _ in range(2):                    # G2: VOID (and the backfill) after 2 clean reads
+            with mock.patch.object(ib_exec, "_guard", return_value=fake_ib),                  mock.patch.object(ib_exec, "CANCEL_CONFIRM_GAP_SEC", 0),                  mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"),                  mock.patch.object(ib_exec.ib_client, "_run", return_value=[]),                  mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, **kw: fn()):
+                ib_exec.sync_closures()
 
         with ib_exec._conn() as c:
             reason = c.execute("SELECT exit_reason FROM paper_trades WHERE id=1").fetchone()[0]
@@ -818,6 +835,34 @@ def test_stale_signal_check_leaves_fresh_signals_alone():
     check("favorable drift is positive R", drifted_r_s > 0, True)
 
 
+def test_f4_stale_check_now_runs_for_etfs_and_refuses_chasing():
+    print("\nF4 (2026-11-21): _stale_signal_check() looked ETFs up in the MT5 universe and so "
+          "NEVER ran for them. Replays of the two live trades it should have stopped, plus the "
+          "chase rule:")
+    from dashboard.execution import ib_exec
+    qqq141 = {"instrument": "QQQ", "direction": "long", "entry": 747.58, "sl": 729.84,
+              "tp": 800.80}
+    with mock.patch("dashboard.data.providers.get_live_price",
+                    return_value=(736.45, "test", None)):
+        reason, _p, dr = ib_exec._stale_signal_check(qqq141)
+    check("QQQ #141 (funded at -0.63R) is now cancelled", reason is not None and
+          "stale signal" in reason, True)
+    dia139 = {"instrument": "DIA", "direction": "long", "entry": 508.55, "sl": 500.18,
+              "tp": 533.65}
+    with mock.patch("dashboard.data.providers.get_live_price",
+                    return_value=(516.04, "test", None)):
+        reason, _p, dr = ib_exec._stale_signal_check(dia139)
+    check("DIA #139 (filled +0.90R up, live R:R 1.11) is cancelled as chased",
+          reason is not None and "chased" in reason, True)
+    with mock.patch("dashboard.data.providers.get_live_price",
+                    return_value=(510.0, "test", None)):
+        reason, _p, _d = ib_exec._stale_signal_check(dia139)
+    check("a small favourable move (live R:R still >= 1.5) is allowed", reason, None)
+    check("entry_limit_price = entry + 0.6R for an rr-3 trade",
+          round(ib_exec.entry_limit_price({"direction": "long", "entry": 100, "sl": 95,
+                                           "tp": 115}), 4), 103.0)
+
+
 def test_stale_signal_check_fails_open_on_no_live_price():
     print("\n_stale_signal_check(): no live price available (data gap) -> fails OPEN, never "
           "blocks a real entry over missing data:")
@@ -1226,7 +1271,9 @@ def test_mirror_new_places_entry_inside_execution_window():
              mock.patch.object(ib_exec, "_pending_entry_notional_usd", return_value=0.0), \
              mock.patch.object(ib_exec.ib_client, "account_id", return_value="U123"), \
              mock.patch.object(ib_exec, "within_entry_execution_window", return_value=True), \
-             mock.patch.object(ib_exec, "_place_etf_bracket",
+             mock.patch.object(ib_exec, "_stale_signal_check",          # F4: the check now
+                               return_value=(None, None, 0.0)), \
+             mock.patch.object(ib_exec, "_place_etf_bracket",            # runs for ETFs too
                               side_effect=lambda *a, **kw: etf_calls.append(1)):
             ib_exec.mirror_new()
 
@@ -1450,7 +1497,7 @@ def test_bracket_parent_tif_is_day_children_gtc():
     # positional: (key, symbol, exchange, currency, multiplier, tick_size, asset_class)
     spec = contracts.FutureSpec("MES", "MES", "CME", "USD", 5.0, 0.25, "index")
 
-    def _run(label, bracket, invoke):
+    def _run(label, bracket, invoke, want_type="MKT", want_lmt=0.0):
         class _Trade:
             def __init__(self, order):
                 self.order = order
@@ -1473,15 +1520,18 @@ def test_bracket_parent_tif_is_day_children_gtc():
             msg = invoke(_IB())
         check(f"{label}: order actually sent (guard: msg is a placement)",
               "placed" in (msg or ""), True)
-        check(f"{label}: parent is MKT", bracket.parent.orderType, "MKT")
+        check(f"{label}: parent is {want_type}", bracket.parent.orderType, want_type)
         check(f"{label}: parent tif=DAY (NOT GTC -- the 2026-09-22 entry killer)",
               bracket.parent.tif, "DAY")
         check(f"{label}: children tif=GTC",
               [leg.tif for leg in list(bracket)[1:]], ["GTC", "GTC"])
-        check(f"{label}: parent lmtPrice cleared for MKT", bracket.parent.lmtPrice, 0.0)
+        check(f"{label}: parent lmtPrice", bracket.parent.lmtPrice, want_lmt)
 
+    # F4 (2026-11-21): the ETF core entry is a marketable LIMIT capped where the trade still
+    # offers MIN_RR to its own SL/TP: (74.87 + 1.5 x 60.63) / 2.5 = 66.33 (entry + 0.6R).
     _run("_place_etf_bracket", _Bracket(),
-         lambda ib: ib_exec._place_etf_bracket(ib=ib, t=t, equity_usd=50000.0, acct="U123"))
+         lambda ib: ib_exec._place_etf_bracket(ib=ib, t=t, equity_usd=50000.0, acct="U123"),
+         want_type="LMT", want_lmt=66.33)
     _run("_place_bracket", _Bracket(),
          lambda ib: ib_exec._place_bracket(ib=ib, t=t, spec=spec, equity=50000.0,
                                            acct="U123"))

@@ -828,6 +828,26 @@ def mirror_new() -> list[str]:
             from dashboard.core import notable_events
             notable_events.record(msg, level="warning")
             return [msg]
+    # F7 (IBKR_STRATEGY_FIDELITY_SPEC, 2026-11-21): the pre-registered kill rule. Once there are
+    # >= KILL_RULE_MIN_N funded, closed core trades, halt NEW entries if we're KILL_RULE_CONF
+    # sure the live expectancy is negative. Existing positions and their protection are
+    # untouched. KILL_RULE=0 disables it (a user decision, not a code change).
+    if os.environ.get("KILL_RULE", "1").lower() not in ("0", "false", "no"):
+        try:
+            from dashboard.web import drift as _drift
+            kr = _drift.kill_rule(_drift.funded_core_rs())
+        except Exception as e:                         # noqa: BLE001 -- never block on a bug here
+            kr = {"verdict": "error"}
+            log.debug("kill rule unavailable: %s", e)
+        if kr.get("verdict") == "halt":
+            msg = (f"KILL RULE: {kr['n']} funded core trades, expectancy {kr['mean']:+.2f}R, "
+                   f"{_drift.KILL_RULE_CONF:.0%} upper bound {kr['upper']:+.2f}R < 0 -- new "
+                   f"entries HALTED (existing positions untouched). Re-research before "
+                   f"resuming; set KILL_RULE=0 only by decision.")
+            log.error("ib_exec: %s", msg)
+            from dashboard.core import notable_events
+            notable_events.record(msg, level="error", kind="kill-rule")
+            return [msg]
     done = _mirrored_ids()
     logs: list[str] = []
     equity = _equity_usd(ib)                    # USD (US futures/ETFs price in USD)
@@ -1172,9 +1192,14 @@ def _stale_signal_check(t: dict) -> tuple[str | None, float | None, float | None
     intended, or if a live price isn't available (fails open -- never blocks a real entry
     over a data gap). live_price/drifted_r are returned alongside the reason so the caller
     doesn't need a second live-price fetch to record the cancellation."""
-    from dashboard.instruments import BY_KEY
+    from dashboard.instruments import BY_KEY, active_by_key
     from dashboard.data import providers
-    inst = BY_KEY.get(t["instrument"])
+    # FIXED 2026-11-21 (F4, IBKR_STRATEGY_FIDELITY_SPEC): this looked the key up in BY_KEY --
+    # the MT5 spot universe -- which contains NO ETF, so for every ETF trade it returned here
+    # ("no instrument -> fail open") and the -0.5R check never ran on LIVE or PAPER. Measured:
+    # QQQ #141 was funded at -0.63R of drift and DIA #143 at -0.68R; both stopped out the same
+    # day (RETRO_PERFORMANCE_2026-11-21 §4.2).
+    inst = active_by_key(t["instrument"]) or BY_KEY.get(t["instrument"])
     if inst is None:
         return None, None, None
     price, _src, _spread = providers.get_live_price(inst)
@@ -1189,7 +1214,44 @@ def _stale_signal_check(t: dict) -> tuple[str | None, float | None, float | None
         reason = (f"stale signal auto-cancelled: drifted {drifted_r:+.2f}R against its own "
                  f"entry/stop before ever being funded (threshold {STALE_SIGNAL_CANCEL_R}R)")
         return reason, price, drifted_r
+    # F4 (2026-11-21): the other side. A fill far ABOVE the signal keeps the signal's TP, so the
+    # trade the backtest measured (rr 3.0) becomes a much worse one (DIA #139 filled +0.90R up
+    # and its 3R target paid +1.1R). Refuse when the live reward:risk to the trade's own SL/TP
+    # has fallen below paper.MIN_RR -- the same floor a fresh signal must clear.
+    live_rr = entry_live_rr(t, price)
+    if live_rr is not None and live_rr < paper.MIN_RR:
+        reason = (f"chased signal auto-cancelled: price moved {drifted_r:+.2f}R in its favour "
+                  f"before funding, live reward:risk {live_rr:.2f} < {paper.MIN_RR}")
+        return reason, price, drifted_r
     return None, price, drifted_r
+
+
+def entry_live_rr(t: dict, price: float) -> float | None:
+    """PURE: reward:risk of entering trade `t` (its own SL/TP) at `price`. None if unknown."""
+    try:
+        sl, tp = float(t["sl"]), float(t["tp"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if t.get("direction", "long") == "long":
+        risk, reward = price - sl, tp - price
+    else:
+        risk, reward = sl - price, price - tp
+    if risk <= 0:
+        return 0.0
+    return reward / risk
+
+
+def entry_limit_price(t: dict, min_rr: float | None = None) -> float | None:
+    """PURE (F4): the worst price at which trade `t` still offers min_rr (default
+    paper.MIN_RR) to its own SL/TP: long -> (tp + m*sl)/(1+m). For an rr-3.0 signal that is
+    entry + 0.6R. Used as the entry's marketable LIMIT, so a gap above it never fills."""
+    m = paper.MIN_RR if min_rr is None else min_rr
+    try:
+        sl, tp = float(t["sl"]), float(t["tp"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    # long: (tp - p) = m (p - sl);  short: (p - tp) = m (sl - p)  -> the same closed form
+    return (tp + m * sl) / (1 + m)
 
 
 def _stock_contract_for(key: str):
@@ -1253,12 +1315,23 @@ def _place_etf_bracket(ib, t: dict, equity_usd: float, acct: str | None = None,
     tp_px = round(float(t["tp"]), 2)
     sl_px = round(float(t["sl"]), 2)
 
+    # F4 (2026-11-21): a marketable LIMIT instead of MKT -- fills like a market order in normal
+    # conditions, but never above the price where the trade's own SL/TP still give MIN_RR
+    # (entry + 0.6R for rr 3.0). A gap through it leaves the DAY order unfilled; the ghost path
+    # cancels it and the stale/chase check decides on the next cycle.
+    lmt_cap = entry_limit_price(t) if (action == "BUY" and os.environ.get(
+        "ENTRY_LMT_CAP", "1").lower() not in ("0", "false", "no")) else None
+
     def send():
         bracket = ib.bracketOrder(action, qty, limitPrice=0.0,
                                   takeProfitPrice=tp_px,
                                   stopLossPrice=sl_px)
-        bracket.parent.orderType = "MKT"
-        bracket.parent.lmtPrice = 0.0
+        if lmt_cap:
+            bracket.parent.orderType = "LMT"
+            bracket.parent.lmtPrice = round(lmt_cap, 2)
+        else:
+            bracket.parent.orderType = "MKT"
+            bracket.parent.lmtPrice = 0.0
         # FIXED 2026-10-01 (S2 in IBKR_EXECUTION_SPEC.md): was tif="GTC" on EVERY leg. A MARKET
         # order must be DAY -- IBKR discards it otherwise and cascade-cancels the children, which
         # is exactly how every live ETF entry died at age 0.2-0.7s since 2026-09-22 (parent-side
@@ -1574,6 +1647,316 @@ def cancel_pending_order(trade_id: int) -> str | None:
     return f"cancelled {n} resting broker order(s) for paper trade #{trade_id}"
 
 
+# ---- GUARD PHASE 3: confirmed cancels, orphan sweeper, fill audit -------------------------------
+# (IBKR_LONG_ONLY_GUARD_SPEC §2/§3 + STRATEGY_FIDELITY_SPEC §9 G3.4, built 2026-11-21)
+# WHY: three of the four LIVE shorts of 2026-10-30..11-17 (AMLP -21, CPER -84, SPY -4) were stops
+# of trades this app had marked VOID -- "cancelled" -- without ever checking the cancel worked.
+# cancelOrder() only works from the clientId that placed the order (Error 10147 otherwise), so the
+# stops kept resting for ~4 months and then sold shares that no longer existed. And the journal
+# never noticed that those same "VOID" entries had in fact FILLED (AMLP 21 / CPER 84 Jul 13, SPY 4
+# Jul 31). Phase 2 (place_guarded) stops NEW bad SELLs; this phase removes the ones already
+# resting and catches fills the journal missed.
+OWN_REF_PREFIXES = ("quant#", "sleeve#", "reprotect#", "exit#")
+SHIELD_REF_PREFIXES = ("cash-sweep", "keep-cash", "withdraw-", "unwind-short", "cover#")
+CANCEL_CONFIRM_GAP_SEC = 30        # two order reads at least this far apart must both be clean
+CANCEL_ESCALATE_CYCLES = 3         # still resting after this many cycles -> RED
+CANCEL_STATE_KEY = "cancel_pending_state"   # {paper_id: {"absent","last","cycles","alerted"}}
+ORPHAN_STATE_KEY = "orphan_orders_state"    # {order key repr: {"cycles","alerted","class"}}
+FILL_AUDIT_KEY = "fill_audit_last_ts"
+FILL_AUDIT_SEEN_KEY = "fill_audit_seen"     # [exec ids already reported]
+FILL_AUDIT_EVERY_SEC = 3600
+
+
+def orphan_sweep_mode() -> str:
+    """ORPHAN_SWEEP=act (default: cancel dangerous orphans) | report (alert only)."""
+    return (os.environ.get("ORPHAN_SWEEP") or "act").strip().lower()
+
+
+def trade_refs(paper_id) -> set[str]:
+    return {f"{p}{paper_id}" for p in OWN_REF_PREFIXES}
+
+
+def parse_own_ref(ref: str) -> int | None:
+    """paper_id from an app-owned orderRef ('quant#16' -> 16), else None."""
+    ref = (ref or "").strip()
+    for p in OWN_REF_PREFIXES:
+        if ref.startswith(p):
+            try:
+                return int(ref[len(p):])
+            except ValueError:
+                return None
+    return None
+
+
+def cancel_pending_step(state: dict | None, present: bool, now_ts: float,
+                        gap: float | None = None,
+                        escalate_after: int | None = None) -> tuple[dict, str]:
+    """PURE (G2): advance one CANCEL_PENDING row by one observation of the broker's open orders.
+    -> (new_state, action): "void" once two reads >= `gap` seconds apart both show no order with
+    the trade's refs; "escalate" (once) when orders are still resting after `escalate_after`
+    cycles; "recancel" while they rest; "wait" otherwise. Never VOID on one empty read -- a
+    post-reconnect sync gap returns empty lists (2026-09-01)."""
+    gap = CANCEL_CONFIRM_GAP_SEC if gap is None else gap          # read at CALL time
+    escalate_after = CANCEL_ESCALATE_CYCLES if escalate_after is None else escalate_after
+    st = dict(state or {})
+    st.setdefault("absent", 0); st.setdefault("last", 0.0)
+    st.setdefault("cycles", 0); st.setdefault("alerted", False)
+    if present:
+        st["absent"] = 0
+        st["cycles"] += 1
+        if st["cycles"] >= escalate_after and not st["alerted"]:
+            st["alerted"] = True
+            return st, "escalate"
+        return st, "recancel"
+    if st["absent"] == 0 or (now_ts - float(st["last"])) >= gap:
+        st["absent"] += 1
+        st["last"] = now_ts
+    return st, ("void" if st["absent"] >= 2 else "wait")
+
+
+def classify_open_orders(trades, mirror_status: dict, positions: dict) -> list[dict]:
+    """PURE (G3.1): one row per resting order with its class:
+      OWNED         app ref -> a mirror row that is OPEN
+      CANCELLING    app ref -> a mirror row in CANCEL_PENDING (G2 is handling it)
+      SHIELD        cash-sweep / FX / withdrawal / unwind refs (own lifecycle)
+      ORPHAN_SELL   SELL that no open trade owns AND that would breach I1 if it filled
+      ORPHAN_SELL_COVERED  SELL nobody owns, but the broker long covers it (e.g. a manual stop)
+      ORPHAN_BUY    app ref whose trade is resolved/VOID (a BUY nobody wants)
+      FOREIGN       no orderRef (placed by hand in TWS/mobile) -- never touched
+    `mirror_status` is {paper_id: status}; `positions` {conId: signed qty}."""
+    rows = []
+    owned_sell = {}                      # resting SELL qty per con that an OPEN trade owns
+    parsed = []
+    for t in trades or []:
+        o = getattr(t, "order", t)
+        con = int(getattr(getattr(t, "contract", None), "conId", 0) or 0)
+        ref = (getattr(o, "orderRef", "") or "").strip()
+        side = str(getattr(o, "action", "") or "").upper()
+        st = getattr(t, "orderStatus", None)
+        try:
+            rem = float(getattr(st, "remaining", 0.0) or 0.0) if st is not None else 0.0
+        except (TypeError, ValueError):
+            rem = 0.0
+        if rem <= 0:
+            rem = float(getattr(o, "totalQuantity", 0.0) or 0.0)
+        pid = parse_own_ref(ref)
+        parsed.append((t, o, con, ref, side, rem, pid))
+        if pid is not None and mirror_status.get(pid) == "OPEN" and side == "SELL":
+            owned_sell[con] = max(owned_sell.get(con, 0.0), rem)
+    for t, o, con, ref, side, rem, pid in parsed:
+        sym = getattr(getattr(t, "contract", None), "symbol", "") or str(con)
+        if pid is not None:
+            ms = mirror_status.get(pid)
+            if ms == "OPEN":
+                cls = "OWNED"
+            elif ms == "CANCEL_PENDING":
+                cls = "CANCELLING"
+            elif side == "SELL":
+                cls = None                    # decided below (danger check)
+            else:
+                cls = "ORPHAN_BUY"
+        elif any(ref.startswith(p) for p in SHIELD_REF_PREFIXES):
+            cls = "SHIELD"
+        elif not ref:
+            cls = "FOREIGN"
+        else:
+            cls = "FOREIGN"                   # some other tool's ref: hands off
+        if cls is None:
+            long_pos = max(float(positions.get(con, 0.0) or 0.0), 0.0)
+            spare = long_pos - owned_sell.get(con, 0.0)
+            cls = "ORPHAN_SELL_COVERED" if rem <= spare + 1e-6 else "ORPHAN_SELL"
+        rows.append({"class": cls, "symbol": sym, "con_id": con, "ref": ref, "side": side,
+                     "qty": rem, "order": o, "paper_id": pid,
+                     "type": str(getattr(o, "orderType", "") or ""),
+                     "px": getattr(o, "auxPrice", None) or getattr(o, "lmtPrice", None),
+                     "key": repr(sorted(order_keys(o)))})
+    return rows
+
+
+def void_fill_findings(fills, mirror_rows: dict) -> list[dict]:
+    """PURE (G3.4): broker BUY fills whose orderRef names a trade the mirror calls VOID or a
+    never-filled ghost. `mirror_rows` = {paper_id: (status, note, con_id)}. One finding per
+    (paper_id), with the summed quantity and average price."""
+    agg: dict[int, dict] = {}
+    for f in fills or []:
+        ex = getattr(f, "execution", None)
+        if ex is None:
+            continue
+        side = str(getattr(ex, "side", "") or "").upper()
+        if side not in ("BOT", "BUY"):
+            continue
+        pid = parse_own_ref(getattr(ex, "orderRef", "") or "")
+        if pid is None or pid not in mirror_rows:
+            continue
+        status, note, _con = mirror_rows[pid]
+        ghost = status == "CLOSED" and (note or "").startswith("entry never filled")
+        if status != "VOID" and not ghost:
+            continue
+        q = float(getattr(ex, "shares", 0.0) or 0.0)
+        px = float(getattr(ex, "price", 0.0) or 0.0)
+        a = agg.setdefault(pid, {"paper_id": pid, "qty": 0.0, "notional": 0.0,
+                                 "symbol": getattr(getattr(f, "contract", None), "symbol", ""),
+                                 "con_id": getattr(getattr(f, "contract", None), "conId", 0),
+                                 "time": getattr(ex, "time", None), "exec_ids": [],
+                                 "status": status})
+        a["qty"] += q
+        a["notional"] += q * px
+        a["exec_ids"].append(str(getattr(ex, "execId", "")))
+    out = []
+    for a in agg.values():
+        a["avg_px"] = a["notional"] / a["qty"] if a["qty"] else 0.0
+        out.append(a)
+    return out
+
+
+def _cancel_quiet(ib, order) -> None:
+    try:
+        ib_client.call(lambda: ib.cancelOrder(order), timeout=10)
+    except Exception:                                  # noqa: BLE001 -- 10147 etc. arrive async
+        log.debug("cancel failed", exc_info=True)
+
+
+def sweep_orphan_orders(ib, acct, open_trades, positions: dict) -> list[str]:
+    """G3: classify every resting order (every API client's) and deal with the dangerous ones.
+    ORPHAN_SELL / ORPHAN_BUY -> cancel (ORPHAN_SWEEP=act) and RED after CANCEL_ESCALATE_CYCLES
+    if still resting (another client's order can't be cancelled from here -- the RED names the
+    ops tool). ORPHAN_SELL_COVERED / FOREIGN -> YELLOW once, never touched."""
+    from dashboard.core import store, notable_events
+    with paper._LOCK, _conn() as c:
+        mirror_status = dict(c.execute("SELECT paper_id, status FROM ib_mirror").fetchall())
+    rows = classify_open_orders(open_trades, mirror_status,
+                                {k: float(getattr(v, "position", v) or 0.0)
+                                 for k, v in (positions or {}).items()})
+    prev, _ts = store.cache_get(ORPHAN_STATE_KEY)
+    prev = prev if isinstance(prev, dict) else {}
+    state, logs = {}, []
+    act = orphan_sweep_mode() == "act"
+    for r in rows:
+        k = r["key"]
+        s = dict(prev.get(k) or {"cycles": 0, "alerted": False})
+        s["class"] = r["class"]
+        desc = (f"{r['ref'] or '(no ref)'} {r['side']} {r['qty']:g} {r['symbol']} "
+                f"{r['type']}{' @' + format(r['px'], 'g') if r['px'] else ''}")
+        if r["class"] in ("ORPHAN_SELL", "ORPHAN_BUY"):
+            s["cycles"] += 1
+            if act:
+                _cancel_quiet(ib, r["order"])
+            msg = f"orphan order {'cancel sent' if act else 'found (report mode)'}: {desc}"
+            logs.append(msg)
+            log.warning("ib_exec: %s", msg)
+            if s["cycles"] >= CANCEL_ESCALATE_CYCLES and not s["alerted"]:
+                s["alerted"] = True
+                red = (f"ORPHAN ORDER cannot be cancelled by this client: {desc} -- "
+                       f"{'it would OPEN A SHORT if it fills; ' if r['class'] == 'ORPHAN_SELL' else ''}"
+                       f"cancel it in TWS, or run `python -m dashboard.ops.global_cancel_rearm` "
+                       f"(dry run first)")
+                notable_events.record(red, level="error", kind="orphan-order", symbol=r["symbol"])
+            elif s["cycles"] == 1 and r["class"] == "ORPHAN_SELL":
+                notable_events.record(f"Orphan SELL found (would open a short): {desc}",
+                                      level="error", kind="orphan-order", symbol=r["symbol"])
+        elif r["class"] in ("ORPHAN_SELL_COVERED", "FOREIGN") and not s["alerted"]:
+            s["alerted"] = True
+            notable_events.record(f"Resting order not owned by any strategy trade ({r['class']}): "
+                                  f"{desc} -- left alone", level="warning",
+                                  kind="foreign-order", symbol=r["symbol"])
+        state[k] = s
+    store.cache_set(ORPHAN_STATE_KEY, state)      # keys of orders no longer resting drop out
+    return logs
+
+
+def audit_void_fills(ib, positions: dict, force: bool = False) -> list[str]:
+    """G3.4: once an hour, look for broker fills of trades the mirror calls VOID / ghost.
+    Each finding is RED (once). If the broker still holds that contract long and no OPEN mirror
+    row tracks it, the row is re-opened with the real quantity, so the flagged-position machinery
+    (reprotect, heal, live_positions) owns the shares instead of them being invisible."""
+    import time as _time
+    from dashboard.core import store, notable_events
+    last, _ts = store.cache_get(FILL_AUDIT_KEY)
+    if not force and last and _time.time() - float(last) < FILL_AUDIT_EVERY_SEC:
+        return []
+    store.cache_set(FILL_AUDIT_KEY, int(_time.time()))
+    with paper._LOCK, _conn() as c:
+        mrows = {r[0]: (r[1], r[2], r[3]) for r in c.execute(
+            "SELECT paper_id, status, note, con_id FROM ib_mirror "
+            "WHERE status='VOID' OR (status='CLOSED' AND note LIKE 'entry never filled%')")}
+    if not mrows:
+        return []
+    findings = void_fill_findings(_broker_fills(ib, days=45), mrows)
+    seen, _s = store.cache_get(FILL_AUDIT_SEEN_KEY)
+    seen = set(seen or [])
+    logs = []
+    for f in findings:
+        if set(f["exec_ids"]) <= seen:
+            continue
+        seen |= set(f["exec_ids"])
+        when = f["time"].date().isoformat() if hasattr(f["time"], "date") else str(f["time"])
+        msg = (f"#{f['paper_id']} {f['symbol']}: journal says {f['status']} but the broker FILLED "
+               f"BUY {f['qty']:g} @ {f['avg_px']:.2f} on {when} (G3.4 fill audit)")
+        held = float(getattr(positions.get(f["con_id"]), "position",
+                             positions.get(f["con_id"], 0.0)) or 0.0) if positions else 0.0
+        with paper._LOCK, _conn() as c:
+            tracked = c.execute("SELECT 1 FROM ib_mirror WHERE con_id=? AND status='OPEN'",
+                                (f["con_id"],)).fetchone()
+            if held > 0 and not tracked:
+                c.execute("UPDATE ib_mirror SET status='OPEN', qty=?, note=? WHERE paper_id=?",
+                          (min(f["qty"], held), "re-opened by G3.4 fill audit: VOID entry had "
+                           "filled", f["paper_id"]))
+                msg += f" -- broker still holds {held:g}; mirror row RE-OPENED (flagged position)"
+        logs.append(msg)
+        log.error("ib_exec: %s", msg)
+        notable_events.record(msg, level="error", kind="fill-audit", symbol=f["symbol"])
+    store.cache_set(FILL_AUDIT_SEEN_KEY, sorted(seen)[-500:])
+    return logs
+
+
+def _advance_cancel_pending(ib, paper_id, pt, local_symbol, open_trades, cstate) -> list[str]:
+    """G2: one cycle of a CANCEL_PENDING row -- re-cancel while its orders rest, RED if they
+    won't go, VOID only after two clean reads >= CANCEL_CONFIRM_GAP_SEC apart."""
+    import time as _time
+    from dashboard.core import notable_events
+    refs = trade_refs(paper_id)
+    present = [o for o in open_trades
+               if (getattr(o.order, "orderRef", "") or "").strip() in refs]
+    st, action = cancel_pending_step(cstate.get(str(paper_id)), bool(present), _time.time())
+    cstate[str(paper_id)] = st
+    logs = []
+    if action in ("recancel", "escalate"):
+        for o in present:
+            try:
+                ib.cancelOrder(o.order)
+            except Exception:                          # noqa: BLE001
+                log.debug("re-cancel failed", exc_info=True)
+    if action == "escalate":
+        desc = ", ".join(f"{getattr(o.order, 'orderRef', '')} {getattr(o.order, 'action', '')} "
+                         f"{getattr(o.order, 'totalQuantity', '')}" for o in present)
+        msg = (f"ORPHAN ORDER cannot be cancelled by this client: {local_symbol} {desc} -- "
+               f"trade #{paper_id} is resolved but its order(s) still rest after "
+               f"{st['cycles']} cancel attempts (another API client placed them?). Cancel in TWS "
+               f"or run `python -m dashboard.ops.global_cancel_rearm` (dry run first)")
+        logs.append(msg)
+        log.error("ib_exec: %s", msg)
+        notable_events.record(msg, level="error", kind="orphan-order", symbol=local_symbol)
+    if action == "void":
+        with paper._LOCK, _conn() as c:
+            c.execute("UPDATE ib_mirror SET status='VOID', note=? WHERE paper_id=?",
+                      (f"order cancelled (confirmed by two clean reads): paper independently "
+                       f"resolved to {pt['status']} while still unfilled at the broker",
+                       paper_id))
+            # FIXED 2026-09-18 (kept): backfill the signal-only suffix resolve_open() would have
+            # written had it known the trade was never funded.
+            _er = (pt.get("exit_reason") or "")
+            if "(signal only" not in _er:
+                c.execute("UPDATE paper_trades SET exit_reason=? WHERE id=?",
+                          (_er + (" " if _er else "") +
+                           "(signal only -- never funded at the broker)", paper_id))
+        cstate.pop(str(paper_id), None)
+        msg = (f"{local_symbol}: cancelled stale unfilled order -- cancel CONFIRMED, trade "
+               f"#{paper_id} VOID (paper resolved {pt['status']} via real price/horizon)")
+        logs.append(msg)
+        log.info("ib_exec: %s", msg)
+    return logs
+
+
 def sync_closures() -> list[str]:
     """Resolve paper trades from IB fills (broker truth) and roll positions whose
     contract is entering its expiry window."""
@@ -1597,8 +1980,26 @@ def sync_closures() -> list[str]:
                       ("ApiPending", "PendingSubmit", "PreSubmitted", "Submitted")}
     positions = ib_client.call(lambda: {p.contract.conId: p
                                         for p in ib_client.filter_by_account(ib.positions() or [], acct)})
+    # GUARD PHASE 3 (2026-11-21): orphan-order sweep (G3) + VOID-fill audit (G3.4), every cycle /
+    # hourly. Failures here never block closure sync.
+    try:
+        logs += sweep_orphan_orders(ib, acct, open_trades, positions)
+    except Exception as e:                             # noqa: BLE001
+        log.warning("ib_exec: orphan sweep failed: %s", e)
+    try:
+        logs += audit_void_fills(ib, positions)
+    except Exception as e:                             # noqa: BLE001
+        log.warning("ib_exec: fill audit failed: %s", e)
+    from dashboard.core import store as _store
+    _cs, _cts = _store.cache_get(CANCEL_STATE_KEY)
+    cstate = _cs if isinstance(_cs, dict) else {}
     for paper_id, con_id, local_symbol, qty, expiry, mstatus, mts in rows:
         pt = journal.get(paper_id)
+        if mstatus == "CANCEL_PENDING":
+            if pt is not None:
+                logs += _advance_cancel_pending(ib, paper_id, pt, local_symbol, open_trades,
+                                                cstate)
+            continue
         # ADDED 2026-08-25: VOID is equally terminal as CLOSED here -- both mean "nothing
         # more to do," see the 2026-08-25 note further down on why VOID exists as a distinct
         # status at all (harmless without this -- the row would just fall through inert on
@@ -1637,27 +2038,25 @@ def sync_closures() -> list[str]:
             # and now also the invested/P&L columns and monthly attribution -- see their
             # 2026-08-25 fixes).
             if pt["status"] != "OPEN":
+                # GUARD PHASE 3 / G2 (2026-11-21): cancel ONLY this trade's own orders (its
+                # orderRefs -- a newer trade can share the conId), then CANCEL_PENDING, not VOID.
+                # VOID used to be written right here without checking the cancel worked; a cancel
+                # from the wrong clientId fails silently (10147), and those stops later opened the
+                # AMLP/CPER/SPY shorts. _advance_cancel_pending() VOIDs after two clean reads.
+                refs = trade_refs(paper_id)
                 for o in open_trades:
-                    if o.contract.conId == con_id:
+                    if (getattr(o.order, "orderRef", "") or "").strip() in refs:
                         ib.cancelOrder(o.order)
                 with paper._LOCK, _conn() as c:
-                    c.execute("UPDATE ib_mirror SET status='VOID', note=? WHERE paper_id=?",
-                              (f"order cancelled: paper independently resolved to "
+                    c.execute("UPDATE ib_mirror SET status='CANCEL_PENDING', note=? "
+                              "WHERE paper_id=?",
+                              (f"cancel requested: paper independently resolved to "
                                f"{pt['status']} while still unfilled at the broker", paper_id))
-                    # FIXED 2026-09-18: the row's exit_reason was written at resolve time,
-                    # when this mirror row was still non-VOID -- so it reads funded-style
-                    # ("stop-loss hit") with no signal-only note, contradicting the funded
-                    # column / cumulative R / P&L that all (correctly) treat it as never
-                    # funded from here on (confirmed on both instances: live #33/#34,
-                    # paper #137/#140/#152). Backfill the same suffix resolve_open()
-                    # would have written had it known then what we know now.
-                    _er = (pt.get("exit_reason") or "")
-                    if "(signal only" not in _er:
-                        c.execute("UPDATE paper_trades SET exit_reason=? WHERE id=?",
-                                  (_er + (" " if _er else "") +
-                                   "(signal only -- never funded at the broker)", paper_id))
-                msg = (f"{local_symbol}: cancelled stale unfilled order (paper already "
-                      f"resolved {pt['status']} via real price/horizon, not a broker fill)")
+                cstate[str(paper_id)] = {"absent": 0, "last": 0.0, "cycles": 0,
+                                         "alerted": False}
+                msg = (f"{local_symbol}: cancelling stale unfilled order (paper already "
+                       f"resolved {pt['status']} via real price/horizon, not a broker fill) -- "
+                       f"VOID once the broker confirms")
                 logs.append(msg); log.info("ib_exec: %s", msg)
                 from dashboard.core import notable_events
                 notable_events.record(msg, level="warning")
@@ -1770,6 +2169,7 @@ def sync_closures() -> list[str]:
             msg = _roll_position(ib, pt, spec, con_id, qty, acct)
             if msg:
                 logs.append(msg); log.info("ib_exec: %s", msg)
+    _store.cache_set(CANCEL_STATE_KEY, cstate)
     return logs
 
 

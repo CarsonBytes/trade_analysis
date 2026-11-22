@@ -23,10 +23,85 @@ import os
 from dashboard.core.log import log
 
 _CACHE_KEY = "backtest_reference"
-# Bump when the deployed config changes materially enough that an old reference stops
-# describing what live trades SHOULD look like (see README's parameter-freeze rules --
-# this list is intentionally short; bug fixes don't touch it).
-_REF_CONFIG = "risk=1% pos_cap=30% gate+sleeve"
+
+
+def live_config() -> dict:
+    """The deployed sizing config the backtest reference must match (F5 parity, 2026-11-21)."""
+    from dashboard.core import paper
+    return {"risk": float(paper.RISK_PER_TRADE),
+            "pos_cap": float(os.environ.get("ETF_POS_CAP", "0.25") or 0.25),
+            "portfolio_cap": float(os.environ.get("PORTFOLIO_CAP", "1.0") or 1.0)}
+
+
+def ref_config_label(cfg: dict | None = None) -> str:
+    """CHANGED 2026-11-21 (F5): derived from the LIVE config instead of a hard-coded
+    "risk=1% pos_cap=30% gate+sleeve". The reference was pinned at pos_cap 30% while LIVE runs
+    ETF_POS_CAP=0.25, and nothing noticed. A reference computed for another config is now
+    'stale' (cached_reference() returns None), so the card asks for a recompute."""
+    c = cfg or live_config()
+    return (f"risk={c['risk']:.0%} pos_cap={c['pos_cap']:.0%} "
+            f"pcap={c['portfolio_cap']:.0%} gate+sleeve")
+
+
+def config_parity(ref: dict | None) -> list[str]:
+    """PURE-ish (F5): human-readable mismatches between the deployed config and the config a
+    cached backtest reference was computed with. [] = in parity."""
+    if not ref:
+        return ["no backtest reference computed for the deployed config"]
+    live = live_config()
+    out = []
+    for k, label in (("pos_cap", "position cap"), ("portfolio_cap", "portfolio cap")):
+        rv = ref.get(k)
+        if rv is not None and abs(float(rv) - live[k]) > 1e-9:
+            out.append(f"{label}: live {live[k]:.0%} vs reference {float(rv):.0%}")
+    if ref.get("risk") is not None and abs(float(ref["risk"]) - live["risk"]) > 1e-9:
+        out.append(f"risk/trade: live {live['risk']:.2%} vs reference {float(ref['risk']):.2%}")
+    return out
+
+
+# ---- F7: pre-registered kill rule (IBKR_STRATEGY_FIDELITY_SPEC, 2026-11-21) -------------------
+KILL_RULE_MIN_N = int(os.environ.get("KILL_RULE_MIN_N", "30"))
+KILL_RULE_CONF = float(os.environ.get("KILL_RULE_CONF", "0.90"))
+
+
+def kill_rule(rs: list[float], min_n: int | None = None, conf: float | None = None) -> dict:
+    """PURE: after >= min_n FUNDED, closed core trades, halt new entries if the one-sided
+    `conf` upper bound of expectancy (t-interval) is below 0 -- i.e. we're `conf` sure the
+    live edge is negative. Written down BEFORE the next trades so a bad stretch can't move the
+    goalposts either way. -> {"verdict": "insufficient"|"ok"|"halt", "n", "mean", "upper"}."""
+    import math
+    min_n = KILL_RULE_MIN_N if min_n is None else min_n
+    conf = KILL_RULE_CONF if conf is None else conf
+    rs = [float(r) for r in rs if r is not None]
+    n = len(rs)
+    if n < max(min_n, 2):
+        return {"verdict": "insufficient", "n": n, "mean": (sum(rs) / n) if n else None,
+                "upper": None}
+    mean = sum(rs) / n
+    sd = math.sqrt(sum((r - mean) ** 2 for r in rs) / (n - 1))
+    try:
+        from scipy import stats as sps
+        tq = float(sps.t.ppf(conf, n - 1))
+    except Exception:                                  # noqa: BLE001
+        tq = 1.311 if conf >= 0.9 else 1.0             # ~t(0.90, 29)
+    upper = mean + tq * sd / math.sqrt(n)
+    return {"verdict": "halt" if upper < 0 else "ok", "n": n, "mean": mean, "upper": upper}
+
+
+def funded_core_rs() -> list[float]:
+    """Realized R of FUNDED, closed core trades (broker-executed; never-filled CANCELLED/VOID
+    rows excluded -- the KPI dilution guard spec G6.5 called out)."""
+    from dashboard.core import paper
+    from dashboard.core.sleeve import SLEEVE_METHOD
+    from dashboard.execution import broker
+    ex = broker.executed_ids()
+    out = []
+    for t in paper.all_trades():
+        if t["id"] not in ex or t.get("method") == SLEEVE_METHOD:
+            continue
+        if t["status"] in ("WIN", "LOSS", "EXPIRED", "BE") and t.get("realized_r") is not None                 and "(signal only" not in (t.get("exit_reason") or ""):
+            out.append(float(t["realized_r"]))
+    return out
 
 
 def strategy_split(trades: list[dict]) -> dict[str, list[float]]:
@@ -50,12 +125,12 @@ def cached_reference() -> tuple[dict | None, float | None]:
     """The stored backtest reference (None if never computed), plus its cache timestamp."""
     from dashboard.core import store
     ref, ts = store.cache_get(_CACHE_KEY)
-    if not ref or ref.get("config") != _REF_CONFIG:
+    if not ref or ref.get("config") != ref_config_label():
         return None, None          # stale reference for a superseded config -> ignore
     return ref, ts
 
 
-def compute_reference(pos_cap: float = 0.30, portfolio_cap: float = 1.0) -> dict:
+def compute_reference(pos_cap: float | None = None, portfolio_cap: float | None = None) -> dict:
     """Run the SAME backtest-reference computation live_vs_backtest.py uses, and cache it.
     Slow (minutes: full-history weekly downloads for the whole active universe) -- must
     only ever be called from an explicit user action, never a render path."""
@@ -64,10 +139,14 @@ def compute_reference(pos_cap: float = 0.30, portfolio_cap: float = 1.0) -> dict
     from dashboard.core import store
     from dashboard.research.live_vs_backtest import _backtest_reference
 
-    log.warning("drift: computing backtest reference (%s) -- this takes minutes", _REF_CONFIG)
+    cfg = live_config()                                  # F5: default to the LIVE config
+    pos_cap = cfg["pos_cap"] if pos_cap is None else pos_cap
+    portfolio_cap = cfg["portfolio_cap"] if portfolio_cap is None else portfolio_cap
+    label = ref_config_label({**cfg, "pos_cap": pos_cap, "portfolio_cap": portfolio_cap})
+    log.warning("drift: computing backtest reference (%s) -- this takes minutes", label)
     stats = _backtest_reference(pos_cap, portfolio_cap)
     ref = {
-        "config": _REF_CONFIG,
+        "config": label, "risk": cfg["risk"],
         "pos_cap": pos_cap, "portfolio_cap": portfolio_cap,
         "n": stats["n"], "win_rate": stats["win_rate"],
         "expectancy_R": stats["expectancy_R"], "profit_factor": stats["profit_factor"],

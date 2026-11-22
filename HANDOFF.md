@@ -23,7 +23,13 @@ Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md
   in the backtest's rolling windows).
 - Also found: 3 "VOID" trades really filled (AMLP 21, CPER 84, SPY 4) → guard phase 3 gets a
   G3.4 fill audit. SGOV shield netted HKD 99 (55 trades, HKD 429 commission, 30% withholding
-  HKD 241). The LLM veto is the best filter (96 vetoed signals would have lost −79.5R).
+  HKD 241). ~~The LLM veto is the best filter (96 vetoed signals would have lost −79.5R).~~
+  **CORRECTED same day ([RETRO_LLM_2026-11-21.md](RETRO_LLM_2026-11-21.md)):** replayed the same
+  way, APPROVED signals scored the same as vetoed ones (LIVE −0.661R vs −0.656R, gap −0.005R,
+  95% CI −0.32..+0.20). `llm_veto_replay.py` only ever replayed vetoes. The portfolio A/B with
+  vs without vetoes is within ordering noise. Only 0 of 145 LIVE setup-weeks were truly blocked:
+  the LLM re-approves a median 0.5h later. Keep it (it's cheap), stop crediting it, don't
+  extend it.
 - **F1 + F2 RUN (same day, research only; retro §7.1):** the backtest's OWN signals for
   Jul–Nov 2026 lost too (n=33, −0.43R). LIVE signal-level per instrument-week (−0.32R, n=50)
   is the 9th percentile of 786 backtest 140-day windows, so a **bad regime within history**.
@@ -59,6 +65,17 @@ Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md
     same CAGR (5.21% vs 5.11%), Sharpe 0.91 → 1.33, bootstrap Calmar 0.63 → 1.58 (median DD
     −10.3% → −6.2%). But the single historical worst DD is −9.0% vs −7.6%, so it fails the
     single-path Calmar bar. Next: find the −9% episode, walk-forward, PAPER shadow exit.
+  - **2026-11-21 BUILT (spec §12, not on LIVE):** guard phase 3 (CANCEL_PENDING, orphan sweeper,
+    G3.4 fill audit, `ops/global_cancel_rearm`), F4 (**the stale-signal check never ran for ETFs
+    -- fixed**; chase rule; LMT entry cap), F5 parity, F7 kill rule, A3 cover tickets, F3 shadow
+    ledger + card. Suite 358 passed. Research: C1 / chandelier / I4 rejected on the
+    order-robust test; the 18-instrument universe wins 20/20 orderings.
+  - **2026-11-21 DECIDED: keep the −7% drawdown budget.** No leverage/cap/risk change (frontier
+    in spec §11: ~12% OOS / ~6.7% full at −7%). Gains must come from Sharpe and costs.
+  - **2026-11-21: IDTL/PRFD/TIPS RETIRED** (user-approved; 21 → 18 instruments, kept resolvable).
+  - **Roadmap (spec §10):** next build is guard phase 3 (+G3.4 fill audit) + F4, then the F3
+    ledger (shadow exits). Guard phase 4 (auto-cover) is optional/deferred; phase 5 folds into
+    F3. New research: C1 US-large-cap cluster cap, C2 capital priority when PORTFOLIO_CAP binds.
   - **Universe scan:** no adds worth it (sectors hurt). Drop IDTL/PRFD/TIPS: negative
     expectancy, and removing them improves both windows (Full 0.674→0.721, OOS 1.344→1.533).
     Needs user approval. DIA/QQQ removals are non-additive (each helps, both hurt), so

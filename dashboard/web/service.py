@@ -1184,6 +1184,10 @@ def refresh_cheap() -> None:
         STATE["paper_resolved"] = n
         if n:
             log.info("resolved %d paper trade(s) this refresh", n)
+        # F3 shadow ledger (2026-11-21): resolve approved + blocked signals' shadow rows with the
+        # same resolver (at most hourly; never blocks the cycle).
+        from dashboard.core import shadow as _shadow
+        _shadow.resolve_open(lambda inst: get_ohlc(inst, period="1y", interval="1d"))
     except Exception as e:
         STATE["paper_resolved"] = f"resolve error: {e}"
         log.exception("paper resolution error: %s", e)

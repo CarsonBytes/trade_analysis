@@ -121,6 +121,16 @@ def _bracket_syms(m: str, label: str) -> list[str]:
     return re.findall(r"[A-Z][A-Z0-9]{1,9}", mo.group(1)) if mo else []
 
 
+def cover_tickets(shorts: list[str]) -> list[str]:
+    """PURE: "QQQ -8" -> "BUY 8 QQQ" for each short in a reconcile SHORT=[...] list."""
+    out = []
+    for s in shorts:
+        mo = re.match(r"\s*([A-Z][A-Z0-9]{0,9})\s+(-?[0-9.]+)", s)
+        if mo and float(mo.group(2)) < 0:
+            out.append(f"BUY {abs(float(mo.group(2))):g} {mo.group(1)}")
+    return out
+
+
 def _humanize_mismatch(m: str) -> tuple[str, str]:
     """Direction-aware reconcile text (IBKR_LONG_ONLY_GUARD_SPEC G7.1). FIXED 2026-11-21:
     the old text said "The journal has them, the broker doesn't" for EVERY mismatch and
@@ -141,6 +151,13 @@ def _humanize_mismatch(m: str) -> tuple[str, str]:
     if shorts:
         parts.append(f"The broker holds SHORT positions this long-only strategy never "
                      f"intends: {', '.join(shorts)} -- unprotected, close them.")
+        # A3 (guard phase 4 deferred, 2026-11-21): put the exact cover tickets in the page, so
+        # closing the shorts needs no lookup. Auto-cover stays unbuilt unless a short recurs.
+        tickets = cover_tickets(shorts)
+        if tickets:
+            parts.append("Cover during US regular hours: " + "; ".join(tickets)
+                         + " (marketable LMT a few cents above the ask, SMART, DAY). Cancel any "
+                           "resting SELL on these symbols first, then confirm each ends at 0.")
     if only_broker:
         parts.append(f"Broker holds positions the journal doesn't track: "
                      f"{', '.join(only_broker)} -- possible orphan order fill or manual trade.")

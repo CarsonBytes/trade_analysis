@@ -570,12 +570,13 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
-def _insert(t: Trade) -> None:
+def _insert(t: Trade) -> int | None:
     with _LOCK, _conn() as c:
         d = asdict(t)
         cols = ",".join(d.keys())
-        c.execute(f"INSERT INTO paper_trades({cols}) VALUES({','.join('?'*len(d))})",
-                  list(d.values()))
+        cur = c.execute(f"INSERT INTO paper_trades({cols}) VALUES({','.join('?'*len(d))})",
+                        list(d.values()))
+        return cur.lastrowid
 
 
 def open_trades() -> list[dict]:
@@ -846,6 +847,20 @@ def place_from_state(state: dict) -> list[str]:
                          "det_strength": score.strength,
                          "confidence": (llm_sig.confidence if llm_sig else 0.0),
                          "reasons": reasons})
+        # F3 shadow ledger (2026-11-21): what would this BLOCKED long have earned? Same
+        # ATR SL/TP a real trade would get, at the live price; one row per gate per signal bar.
+        if direction == "long":
+            try:
+                from dashboard.core import shadow
+                px = (state.get("live", {}).get(score.key) or {}).get("price")
+                res = compute_sltp(score.facts, "long", "ATR", RR_DEFAULT, entry=px) if px else None
+                if res:
+                    shadow.record(instrument=score.key, direction="long", entry=res[0],
+                                  sl=res[1], tp=res[2], source="blocked",
+                                  gate=shadow.gate_label(reasons),
+                                  signal_bar=score.facts.get("signal_bar"))
+            except Exception as e:                     # noqa: BLE001 -- never block placement
+                log.debug("shadow: blocked record failed: %s", e)
 
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
@@ -945,7 +960,7 @@ def place_from_state(state: dict) -> list[str]:
                 "obj_n": _obj[2] if _obj else None,
                 "signal_bar": f.get("signal_bar"),      # F1: completed bar that signalled
             }, default=float)
-            _insert(Trade(
+            new_id = _insert(Trade(
                 ts=now.isoformat(timespec="seconds"), instrument=key, direction=direction,
                 method=mlabel, entry=entry, sl=sl, tp=tp, rr=round(rr_actual, 2),
                 size_units=round(size, 2), horizon_end=horizon_end,
@@ -955,6 +970,14 @@ def place_from_state(state: dict) -> list[str]:
                 det_strength=score.strength, det_note=score.note[:300],
                 macro_note=macro[:500], entry_facts=entry_facts,
                 macro_linkage=(llm_sig.macro_linkage if llm_sig else "")))
+            if method == "ATR":                        # F3: the approved signal's shadow row
+                try:
+                    from dashboard.core import shadow
+                    shadow.record(instrument=key, direction=direction, entry=entry, sl=sl,
+                                  tp=tp, source="approved", signal_bar=f.get("signal_bar"),
+                                  paper_id=new_id)
+                except Exception as e:                 # noqa: BLE001
+                    log.debug("shadow: approved record failed: %s", e)
             msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "
                    f"SL {sl:.4f} TP {tp:.4f} (R:R {rr_actual:.2f}, size {size:.1f}, conf {conf:.2f})")
             logs.append(msg)

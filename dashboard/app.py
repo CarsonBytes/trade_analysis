@@ -3011,6 +3011,24 @@ def retrospective_panel() -> None:
             if ref is None:
                 ui.label("No cached backtest reference yet.")\
                     .classes("text-xs text-grey-6")
+            # F5 (2026-11-21): config parity -- the reference must describe the DEPLOYED sizing
+            for _pm in drift.config_parity(ref):
+                ui.label(f"⚠ config parity: {_pm}").classes("text-xs text-orange-8")
+            # F7 (2026-11-21): the pre-registered kill rule's current reading
+            try:
+                _kr = drift.kill_rule(drift.funded_core_rs())
+                _ktxt = {"insufficient": f"kill rule: {_kr['n']}/{drift.KILL_RULE_MIN_N} funded "
+                                         f"core trades -- not yet evaluable",
+                         "ok": f"kill rule: OK ({_kr['n']} trades, mean {_kr['mean']:+.2f}R, "
+                               f"{drift.KILL_RULE_CONF:.0%} upper {_kr['upper']:+.2f}R)",
+                         "halt": f"⛔ KILL RULE TRIPPED: {_kr['n']} trades, mean "
+                                 f"{_kr['mean']:+.2f}R, upper {_kr['upper']:+.2f}R < 0 -- "
+                                 f"new entries halted"}.get(_kr["verdict"], "kill rule: n/a")
+                ui.label(_ktxt).classes("text-xs " + ("text-red font-bold"
+                                                      if _kr["verdict"] == "halt"
+                                                      else "text-grey-6"))
+            except Exception:                              # noqa: BLE001
+                pass
 
             _drift_busy = {"flag": False}
 
@@ -3033,6 +3051,51 @@ def retrospective_panel() -> None:
                          "then cached until the config fingerprint changes.")
         except Exception as e:                             # noqa: BLE001
             ui.label(f"drift check unavailable: {e}").classes("text-xs text-grey-6")
+
+    # F3 (2026-11-21): the shadow ledger -- signal-level R, execution drag, and what every gate
+    # (the LLM veto included) saved or cost, from signals recorded since this shipped. Forward-
+    # only by design: an LLM can't be judged on dates it already knows the outcome of.
+    with ui.expansion("Signal & gate ledger",
+                      icon="fact_check",
+                      caption="what approved signals earned, and what each gate saved or cost")\
+            .classes("w-full mt-2"):
+        try:
+            from dashboard.core import shadow
+            sm = shadow.summary()
+            ap, dg = sm["approved"], sm["drag"]
+            if not ap["n"] and not sm["gates"]:
+                ui.label(f"No resolved shadow signals yet ({sm['open']} open). Rows start "
+                         "accruing from the first scan after this shipped.")\
+                    .classes("text-xs text-grey-6")
+            else:
+                ui.label(f"Approved signals (signal-level, funded or not): n={ap['n']} · "
+                         f"avg {ap['avg_r'] or 0:+.2f}R · win {(ap['win'] or 0):.0%} · "
+                         f"total {ap['sum_r']:+.1f}R").classes("text-sm")
+                if dg["n"]:
+                    ui.label(f"Execution drag (funded R − signal R): avg {dg['avg_r']:+.2f}R "
+                             f"over {dg['n']} funded trades").classes("text-xs text-grey-7")
+                rows = [{"gate": g, "n": st["n"], "win": f"{(st['win'] or 0):.0%}",
+                         "avg": f"{(st['avg_r'] or 0):+.2f}R",
+                         "saved": f"{st['r_saved']:+.1f}R"}
+                        for g, st in sorted(sm["gates"].items(),
+                                            key=lambda kv: -kv[1]["r_saved"])]
+                if rows:
+                    ui.table(columns=[
+                        {"name": "gate", "label": "Gate (blocked signals)", "field": "gate",
+                         "align": "left"},
+                        {"name": "n", "label": "n", "field": "n"},
+                        {"name": "win", "label": "Would-be win", "field": "win"},
+                        {"name": "avg", "label": "Would-be avg", "field": "avg"},
+                        {"name": "saved", "label": "R saved", "field": "saved"}],
+                        rows=rows, row_key="gate").props("dense flat").classes("w-full")
+                    ui.label("R saved > 0: the gate kept the book out of signals that lost. "
+                             "< 0: it blocked winners. Small n is noise; judge at n ≥ 30.")\
+                        .classes("text-xs text-grey-6")
+                if sm["open"]:
+                    ui.label(f"{sm['open']} shadow signal(s) still inside their horizon.")\
+                        .classes("text-xs text-grey-6")
+        except Exception as e:                             # noqa: BLE001
+            ui.label(f"ledger unavailable: {e}").classes("text-xs text-grey-6")
 
 
     # 2026-07-23: the four sections below (confidence calibration, monthly attribution,

@@ -181,7 +181,8 @@ def executed_ids() -> set:
     try:
         c = sqlite3.connect(paper._DB)
         ids = {r[0] for r in c.execute(
-            f"SELECT paper_id FROM {mirror_table()} WHERE status != 'VOID'").fetchall()}
+            f"SELECT paper_id FROM {mirror_table()} "
+            f"WHERE status NOT IN ('VOID', 'CANCEL_PENDING')").fetchall()}
         c.close()
         return ids
     except Exception:

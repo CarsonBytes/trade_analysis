@@ -135,8 +135,11 @@ without withholding. Worth checking the W-8BEN/QII treatment with IBKR. The chur
 rebalance-every-cycle design (`CASH_SWEEP_MIN_USD` 1,500, 5-min cooldown).
 
 ## 6. What went right
-- **The LLM veto works.** The 96 signals it blocked would have lost **−79.5R** (9% win rate)
-  had they been taken (`llm_veto_replay`). It is the best-performing filter in the system.
+- ~~**The LLM veto works.** The 96 signals it blocked would have lost −79.5R.~~ **CORRECTED
+  2026-11-21 ([RETRO_LLM_2026-11-21.md](RETRO_LLM_2026-11-21.md)):** that replay never scored
+  the *approved* signals. Replayed identically, they lost just as much (LIVE −0.661R approved vs
+  −0.656R vetoed). The veto has had **no measurable effect**, good or bad, and it rarely blocks
+  anything for long: it re-approves the same ETF ~0.5h later.
 - **Long-only sat out November** (SPY −8.7%). The October–November signal drought is mostly
   `trend strength 4 < 5` and the short side being disabled, which is the system declining to
   buy a falling market as designed.

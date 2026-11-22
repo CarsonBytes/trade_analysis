@@ -17,6 +17,7 @@ from __future__ import annotations
 from dashboard.tests import hermetic  # noqa: F401  (before any app module: no real pushes)
 
 import ast
+import os
 import datetime as dt
 import importlib.util
 import pathlib
@@ -391,6 +392,138 @@ def test_t8_qty_heal_resizes_resting_legs():
     check("nothing modified", sent, [])
     check("our leg cancelled", cancelled, [101])
     check("RED event raised", rec.call_args.kwargs.get("level"), "error")
+
+
+# ============================== phase 3: G2 / G3 / G3.4 ==============================
+
+def test_t4_void_requires_confirmed_cancel():
+    print("\nT4: cancel_pending_step() -- VOID only after two clean reads >= 30s apart; still "
+          "resting after 3 cycles -> RED once:")
+    from dashboard.execution.ib_exec import cancel_pending_step as step
+    st, a = step(None, present=True, now_ts=0)
+    check("order still listed -> re-cancel, not VOID", a, "recancel")
+    st, a = step(st, present=True, now_ts=10)
+    st, a = step(st, present=True, now_ts=20)
+    check("3rd cycle still resting -> escalate (RED)", a, "escalate")
+    st, a = step(st, present=True, now_ts=30)
+    check("...but only once", a, "recancel")
+    st, a = step(st, present=False, now_ts=40)
+    check("first clean read -> wait (a post-reconnect empty list is not proof)", a, "wait")
+    st, a = step(st, present=False, now_ts=50)
+    check("second clean read only 10s later -> still wait", a, "wait")
+    st, a = step(st, present=False, now_ts=75)
+    check("second clean read >= 30s after the first -> VOID", a, "void")
+    st, a = step({"absent": 1, "last": 0.0, "cycles": 0, "alerted": False}, True, 100)
+    check("the order reappearing resets the clean-read count", st["absent"], 0)
+
+
+def test_t5_orphan_stop_after_void_is_classified_and_cancelled():
+    print("\nT5: the AMLP #16 replay -- a VOID-era SELL STP 21 with no long under it is an "
+          "ORPHAN_SELL and gets cancelled; covered/foreign orders are left alone:")
+    from dashboard.execution import ib_exec
+    AMLP, QQQ, SGOV = 9, 7, 5
+    amlp_stop = _tr(AMLP, "SELL", 21, ref="quant#16", oid=31, otype="STP")
+    rows = ib_exec.classify_open_orders([amlp_stop], {16: "VOID"}, {AMLP: 0.0})
+    check("VOID trade's stop, broker flat -> ORPHAN_SELL", rows[0]["class"], "ORPHAN_SELL")
+    rows = ib_exec.classify_open_orders([amlp_stop], {16: "VOID"}, {AMLP: 21.0})
+    check("same stop but a real untracked long covers it -> ORPHAN_SELL_COVERED (left alone)",
+          rows[0]["class"], "ORPHAN_SELL_COVERED")
+    mixed = [_tr(QQQ, "SELL", 7, ref="quant#79", oid=41, otype="STP"),
+             _tr(QQQ, "SELL", 7, ref="quant#80", oid=42, otype="STP"),
+             _tr(QQQ, "SELL", 1, ref="", oid=43, otype="STP"),
+             _tr(SGOV, "BUY", 50, ref="cash-sweep-sgov", oid=44, otype="MKT"),
+             _tr(QQQ, "BUY", 5, ref="quant#81", oid=45, otype="MKT")]
+    rows = ib_exec.classify_open_orders(mixed, {79: "OPEN", 80: "CANCEL_PENDING", 81: "VOID"},
+                                        {QQQ: 7.0})
+    check("classes", [r["class"] for r in rows],
+          ["OWNED", "CANCELLING", "FOREIGN", "SHIELD", "ORPHAN_BUY"])
+    # a second app-owned stop for a RESOLVED trade on top of an owned one = the QQQ 7 -> -8 shape
+    rows = ib_exec.classify_open_orders(
+        [_tr(QQQ, "SELL", 7, ref="quant#79", oid=41), _tr(QQQ, "SELL", 8, ref="quant#70", oid=46)],
+        {79: "OPEN", 70: "LOSS"}, {QQQ: 7.0})
+    check("resolved trade's extra stop over an owned one -> ORPHAN_SELL", rows[1]["class"],
+          "ORPHAN_SELL")
+
+    print("  sweep_orphan_orders(): act mode cancels, report mode doesn't, RED after 3 cycles:")
+    from dashboard.core import store as _store
+    mem = {}
+    cancelled, reds = [], []
+    ib = SimpleNamespace(cancelOrder=lambda o: cancelled.append(o.orderId))
+    conn = mock.MagicMock()
+    conn.__enter__.return_value.execute.return_value.fetchall.return_value = [(16, "VOID")]
+    with mock.patch.object(ib_exec, "_conn", return_value=conn), \
+         mock.patch.object(ib_exec.paper, "_LOCK", mock.MagicMock()), \
+         mock.patch.object(ib_exec.ib_client, "call", side_effect=lambda fn, timeout=None: fn()), \
+         mock.patch.object(_store, "cache_get", side_effect=lambda k: (mem.get(k), None)), \
+         mock.patch.object(_store, "cache_set", side_effect=lambda k, v: mem.__setitem__(k, v)), \
+         mock.patch("dashboard.core.notable_events.record",
+                    side_effect=lambda m, **k: reds.append(m) if k.get("level") == "error" else None):
+        with mock.patch.dict(os.environ, {"ORPHAN_SWEEP": "report"}):
+            ib_exec.sweep_orphan_orders(ib, "U1", [amlp_stop], {AMLP: 0.0})
+        check("report mode: nothing cancelled", cancelled, [])
+        mem.clear(); reds.clear()
+        with mock.patch.dict(os.environ, {"ORPHAN_SWEEP": "act"}):
+            for _ in range(3):
+                ib_exec.sweep_orphan_orders(ib, "U1", [amlp_stop], {AMLP: 0.0})
+        check("act mode: cancel sent every cycle it still rests", cancelled, [31, 31, 31])
+        check("RED on first sighting + RED 'cannot be cancelled' after 3 cycles", len(reds), 2)
+        check("the escalation names the ops tool", "global_cancel_rearm" in reds[-1], True)
+
+
+def _fill(ref, side, shares, price, con=9, sym="AMLP", exec_id="e1", when=None):
+    ex = SimpleNamespace(orderRef=ref, side=side, shares=shares, price=price, execId=exec_id,
+                         time=when or dt.datetime(2026, 7, 13, 14, 0, tzinfo=dt.timezone.utc))
+    return SimpleNamespace(execution=ex, contract=SimpleNamespace(conId=con, symbol=sym))
+
+
+def test_t16_void_entry_that_filled_is_caught():
+    print("\nT16: G3.4 fill audit -- the journal called AMLP #16 VOID, but the broker filled "
+          "BUY 2+7+12 @ 53.15 on 2026-07-13:")
+    from dashboard.execution import ib_exec
+    fills = [_fill("quant#16", "BOT", 2, 53.15, exec_id="a"),
+             _fill("quant#16", "BOT", 7, 53.15, exec_id="b"),
+             _fill("quant#16", "BOT", 12, 53.15, exec_id="c"),
+             _fill("quant#16", "SLD", 21, 51.10, exec_id="d"),          # later exit: ignored
+             _fill("quant#12", "BOT", 84, 38.37, con=11, sym="CPER", exec_id="e"),
+             _fill("quant#79", "BOT", 7, 717.67, con=7, sym="QQQ", exec_id="f")]
+    rows = {16: ("VOID", "order cancelled ...", 9),
+            12: ("CLOSED", "entry never filled -- ghost, auto-cancelled", 11),
+            79: ("CLOSED", "", 7)}                                       # a real, normal close
+    found = {f["paper_id"]: (f["qty"], round(f["avg_px"], 2)) for f in
+             ib_exec.void_fill_findings(fills, rows)}
+    check("VOID #16 -> one finding, 21 shares @ 53.15", found.get(16), (21.0, 53.15))
+    check("ghost-CLOSED #12 -> found too", found.get(12), (84.0, 38.37))
+    check("a normally closed trade is not a finding", 79 in found, False)
+
+    print("  audit_void_fills(): RED once, and re-open the row if the broker still holds it:")
+    from dashboard.core import store as _store
+    mem, reds, sql = {}, [], []
+    conn = mock.MagicMock()
+    inner = conn.__enter__.return_value
+
+    def _exec(q, args=()):
+        sql.append((q, args))
+        r = mock.MagicMock()
+        if q.startswith("SELECT paper_id, status, note, con_id"):
+            r.__iter__ = lambda self: iter([(16, "VOID", "order cancelled", 9)])
+        elif q.startswith("SELECT 1 FROM ib_mirror"):
+            r.fetchone.return_value = None
+        return r
+    inner.execute.side_effect = _exec
+    with mock.patch.object(ib_exec, "_conn", return_value=conn), \
+         mock.patch.object(ib_exec.paper, "_LOCK", mock.MagicMock()), \
+         mock.patch.object(ib_exec, "_broker_fills", return_value=fills[:3]), \
+         mock.patch.object(_store, "cache_get", side_effect=lambda k: (mem.get(k), None)), \
+         mock.patch.object(_store, "cache_set", side_effect=lambda k, v: mem.__setitem__(k, v)), \
+         mock.patch("dashboard.core.notable_events.record",
+                    side_effect=lambda m, **k: reds.append(m)):
+        logs = ib_exec.audit_void_fills(object(), {9: 21.0}, force=True)
+        again = ib_exec.audit_void_fills(object(), {9: 21.0}, force=True)
+    check("one RED finding", len(reds), 1)
+    check("names the real fill", "FILLED BUY 21" in (logs[0] if logs else ""), True)
+    check("row re-opened (broker still holds 21, nothing tracks it)",
+          any(q.startswith("UPDATE ib_mirror SET status='OPEN'") for q, _a in sql), True)
+    check("already-reported fills are not re-raised", again, [])
 
 
 if __name__ == "__main__":

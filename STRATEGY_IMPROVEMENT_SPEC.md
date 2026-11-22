@@ -290,6 +290,9 @@ AND OOS Calmar must both improve.
   (−0.17 / −0.16 / −0.12R), each improves Calmar when removed alone, and together they improve
   both windows. **Recommend dropping them** (user approval required; the parameter freeze
   applies).
+- **DONE 2026-11-21 (user-approved):** IDTL, PRFD and TIPS retired from the traded universe
+  (21 → 18 instruments). They stay resolvable for journal rows (`_RETIRED_ETF_*` in
+  `instruments.py`).
 - DIA/QQQ: candidates only. Test with bootstrap + walk-forward before deciding, and note they
   are also two of the US-domiciled (withholding) names.
 
@@ -309,3 +312,134 @@ realistic upside from this spec is roughly **+1–3pp CAGR at similar drawdown**
 drag recovery is the surest part; the exit redesign is the biggest but least certain). None of
 it removes bad stretches like Jul–Nov 2026, which the backtest has lived through before. The
 pre-registered kill/scale rule (fidelity F7) is what governs those.
+
+
+---
+
+## 10. Roadmap: what's still worth building (2026-11-21)
+
+The question was whether the remaining phases are still needed. **Short answer: yes for
+safety (guard phase 3) and measurement (fidelity F3/F4); guard phase 4 becomes optional;
+guard phase 5 folds into F3.** Two new performance ideas came out of the universe scan (C1, C2).
+
+### A. Safety (needed regardless of performance)
+| # | Item | Verdict | Why | Size |
+|---|---|---|---|---|
+| A1 | Guard phase 2 → LIVE | **YES**, after the PAPER week (running since Nov 21) | Order choke point + broker-aware reprotect | deploy |
+| A2 | **Guard phase 3** (confirmed VOID + orphan sweeper + **G3.4 fill audit**) | **YES, next build** | Orphan stops opened 3 of the 4 LIVE shorts. More may still rest (#34 QQQ). Three "VOID" trades really filled. Phase 2 blocks *new* bad SELLs but can't clean up old ones | M |
+| A3 | Guard phase 4 (auto-cover) | **OPTIONAL / defer** | With phases 2+3 every known short-creation path is closed, and phase 1 already pages RED. Do the cheap part now: the RED page carries the exact cover tickets. Build auto-cover only if a short ever appears again | S now / M later |
+| A4 | Guard phase 5 (accounting) | **Merge into B2 (F3)** | One ledger serves both | — |
+
+### B. Fidelity / measurement (needed to trust any performance decision)
+| # | Item | Verdict | Why | Size |
+|---|---|---|---|---|
+| B1 | F1 completed weekly bars | **BUILT** (PAPER) → LIVE with A1 | −11R of partial-week signals | deploy |
+| B2 | **F3 shadow ledger + "Live vs backtest" card** | **YES** | Signal-level vs funded vs execution-drag R, funded-only KPIs, gate attribution (incl. the LLM veto), and **shadow exits** so I1 gets its 30 forward trades without risking money | M |
+| B3 | **F4 entry fidelity** (two-sided ±0.25R stale check at order time, marketable LMT, first window after the weekly close) | **YES** | Live fills squeezed stops to 0.5–0.9% (QQQ #141, DIA #143 stopped the same day) | S |
+| B4 | F5 config-parity check | YES | Live pos_cap 25% vs the backtest reference at 30% went unnoticed | S |
+| B5 | F7 kill/scale rule in config | YES (user sets the numbers) | Pre-registered verdict for the next bad stretch | S |
+| B6 | F8 walk-forward of the signal definition | LATER | Valuable, but slower and lower priority than B2/B3 | M |
+
+### C. Performance
+| # | Item | Verdict | Evidence / rationale | Size |
+|---|---|---|---|---|
+| C0 | I3 shield → LIVE | **YES**, after the PAPER SGOV→IB01 migration | ~+1.1–1.2%/yr on the shield (~1.2% of NAV/yr today) | config |
+| C1 | **NEW: US-large-cap cluster cap** (at most N concurrent positions across CSPX/QQQ/DIA/IWM; test N=1, 2) | **RESEARCH next** | Every sector ETF and DIA/QQQ hurt by *crowding* the equity capacity, not by bad signals (−DIA and −QQQ each helped, both together hurt). A cluster cap targets crowding directly instead of throwing instruments away. Untested (`--concentrated` was a no-op on ETFs) | S |
+| C2 | **NEW: capital priority when PORTFOLIO_CAP binds** (today first-come; test ranking same-week signals by strength/obviousness, or favouring a new asset class) | **RESEARCH** | The universe scan showed outcomes swing on *which* signals get capital. A deterministic priority would make that choice deliberate and stabilize results. Untested | S |
+| C3 | I1 exit (chandelier + TP5/26wk at 0.5% risk) | **RESEARCH → shadow via B2** | Sharpe 0.91 → 1.33, bootstrap Calmar 0.63 → 1.58, but single-path DD −7.6% → −9.0%. Find the −9% episode, run walk-forward, run as a shadow exit. User decides whether the bootstrap counts in the bar | M |
+| C4 | I4 core allocation for idle cash | RESEARCH | Untested. Adopt only if Calmar improves | S/M |
+| C5 | UCITS swaps in the core book (QQQ→CNDX, ASHR→CNYA, DBC→accumulating commodity) | LATER | ≤0.3–0.4%/yr total; each needs the ≥90% equivalence test | S each |
+| C6 | KWEB add | DEFER | +0.01/+0.03 only; re-check after C1 (China overlap with ASHR) | S |
+
+### Suggested order
+1. **Now (user):** close the 4 LIVE shorts and cancel orphan SELLs in TWS during Monday's US
+   session.
+2. **PAPER week (running):** phase 2 + F1 + IB01 shield + 18-instrument universe. Watch for
+   `GUARD: refused`, the SGOV→IB01 migration and weekly-only sweeps.
+3. **Build:** A2 guard phase 3 (with G3.4) + B3 F4 (both in `ib_exec.py`, one PR).
+4. **Build:** B2 F3 ledger + card (shadow exits for C3), then B4/B5.
+5. **Research in parallel** (no live risk): C1, C2, C3 episode + walk-forward, C4.
+6. **LIVE deploy bundle**, once PAPER is clean: phase 2 + F1 + IB01 + universe change, then
+   phase 3 + F4 after their own PAPER run.
+
+---
+
+## 11. Return vs drawdown frontier (2026-11-21, 18 instruments)
+Idle cash earns 3%/yr, and margin (deployed > equity) costs 5.5%/yr, so leverage is charged
+for. Single historical path. Full = 2001+, OOS = 2016+.
+
+| Config | Full CAGR / DD | Full Calmar | OOS CAGR / DD | OOS Calmar | OOS Sharpe |
+|---|---|---|---|---|---|
+| **live today**: pos cap 25%, 1% risk, PORTFOLIO_CAP 1.0 | 6.65% / −7.0% | 0.95 | **11.83%** / −7.0% | 1.69 | 1.55 |
+| same, risk 1.5% | 6.68% / −6.9% | 0.97 | 11.91% / −6.9% | 1.72 | 1.53 |
+| **PORTFOLIO_CAP 1.5** (25% cap, 0.75% risk) | 6.88% / −9.9% | 0.69 | **13.58%** / −7.6% | 1.79 | 1.53 |
+| chandelier+TP5 exit, PC 1.5, 0.75% risk | 7.42% / −9.3% | 0.80 | **14.29%** / −9.0% | 1.58 | 1.45 |
+| pos cap 35%, PC 1.5, 1.25% risk | 7.90% / −10.8% | 0.73 | **15.68%** / −10.7% | 1.46 | 1.44 |
+| chandelier, pos cap 35%, PC 1.5, 1.25% | 8.41% / −14.8% | 0.57 | 17.24% / −14.8% | 1.16 | 1.32 |
+| no pos cap, 1% risk | 8.14% / **−30.2%** | 0.27 | 20.16% / −24.9% | 0.81 | 1.19 |
+
+**Findings.**
+1. **The binding constraint is the 25% position cap, not risk per trade.** Raising risk from
+   0.75% to 1.5% at the 25% cap changes almost nothing (11.73% → 11.91% OOS).
+2. Leverage buys CAGR at a falling Calmar: ~12% OOS at −7% DD, ~14% at −9 to −10%, ~16% at
+   −11%, ~17% at −15%. Uncapped is a −25 to −45% DD.
+3. The **single-path DD understates tail risk**. At live settings, the bootstrap 5th-percentile
+   DD was about 2× the historical path (§3.1). Plan for ~1.5× the table's DD.
+4. **OOS 2016+ is a favourable window** (bull market, full universe). 2001–2015 delivered only
+   ~2%/yr. The full-history 6.7–7.9% is the honest long-run expectation.
+
+**Decision for the user (new parameter freeze item):** choose a drawdown budget.
+- −7% path (≈ −10–12% tail) = today, ~12% OOS / ~6.7% full.
+- **−10% path (≈ −15% tail) = PORTFOLIO_CAP 1.5 (+ the chandelier exit if adopted), ~13.6–14.3% OOS / ~6.9–7.4% full.**
+- −11% path (≈ −16% tail) = pos cap 35% + PC 1.5, ~15.7% OOS / ~7.9% full.
+
+Every option needs the IBKR margin account. Margin cost is already charged at 5.5% in these
+numbers.
+
+**DECIDED 2026-11-21 (user): keep the −7% budget.**
+- No change to pos cap (25%), risk (1%) or PORTFOLIO_CAP (1.0); no margin.
+- Improvements must therefore come from return per unit of risk and from costs, not leverage:
+  - I3 tax/cash (built);
+  - the universe cleanup (done);
+  - C1 cluster cap, C2 capital priority;
+  - the I1 exit only if it fits inside the same budget (at 0.5% risk: same CAGR, Sharpe
+    0.91 → 1.33);
+  - I4 idle-capital allocation only if it keeps the path DD within ~−7%.
+
+
+---
+
+## 12. Built + researched 2026-11-21 ("do the rest of the spec")
+
+### 12.1 Built (all tests: `pytest dashboard/tests` 358 passed; nothing on LIVE)
+| Item | What | Where | Tests |
+|---|---|---|---|
+| **A2 guard phase 3** | G2: a resolved trade's own orders (by orderRef) are cancelled and the row goes **CANCEL_PENDING**, not VOID. VOID only after two clean order reads ≥30s apart; still resting after 3 cycles → RED. G3: every resting order (all clients) is classified OWNED / CANCELLING / SHIELD / ORPHAN_SELL / ORPHAN_SELL_COVERED / ORPHAN_BUY / FOREIGN; orphans get cancelled (`ORPHAN_SWEEP=act`, or `report`), RED if they won't go. G3.4: hourly broker-fill audit; a VOID/ghost row whose entry really filled → RED, and the row is re-opened if the broker still holds the shares | `ib_exec.py` (`cancel_pending_step`, `classify_open_orders`, `sweep_orphan_orders`, `void_fill_findings`, `audit_void_fills`), `ops/global_cancel_rearm.py` (manual escalation, dry run by default) | T4, T5, T16 in `test_long_only_guard`; VOID tests updated |
+| **B3 F4 entries** | **Bug fixed: the −0.5R stale-signal check looked ETFs up in the MT5 universe and never ran for any ETF** (QQQ #141 / DIA #143 were funded at −0.63R / −0.68R). New chase rule: cancel if the live reward:risk to the trade's own SL/TP < MIN_RR (1.5). ETF entries are a marketable LMT capped at that price (entry + 0.6R; `ENTRY_LMT_CAP=0` restores MKT) | `ib_exec._stale_signal_check`, `entry_live_rr`, `entry_limit_price`, `_place_etf_bracket` | `test_f4_stale_check_now_runs_for_etfs_and_refuses_chasing` |
+| **B4 F5 parity** | The backtest reference label/config follows the LIVE sizing (it was pinned at pos_cap 30% vs live 25%). Mismatches show on the drift card | `web/drift.py` | `test_ledger` |
+| **B5 F7 kill rule** | ≥30 funded closed core trades and the 90% upper bound of expectancy < 0 → `mirror_new` halts NEW entries (RED). `KILL_RULE=0` disables, by decision. The card shows its reading | `drift.kill_rule`, `ib_exec.mirror_new` | `test_ledger` |
+| **A3** | The UNINTENDED SHORT page lists the exact cover tickets | `notable_events.cover_tickets` | `test_ledger` |
+| **B2 F3 shadow ledger** | Every approved and every blocked (per gate, LLM included) long signal gets a shadow row with its SL/TP, deduped per signal bar, resolved hourly by the journal's resolver. A "Signal & gate ledger" card shows signal-level R, execution drag, and R saved per gate | `core/shadow.py`, hooks in `paper.place_from_state` + `service`, card in `app.py` | `test_ledger` |
+
+### 12.2 Research verdicts (order-robust: median over 20 random same-date orderings)
+**New evaluation standard (C2 finding):** the order in which same-week signals get capital
+alone moves single-path Calmar 0.82–1.13 (full) / 1.46–2.57 (OOS). From now on, compare configs
+on the **paired distribution over random orderings**, not one path.
+
+| Change | Wins vs 18-instrument baseline (full / OOS) | Median Calmar full / OOS | Verdict |
+|---|---|---|---|
+| 21 → 18 instruments (IDTL/PRFD/TIPS dropped) | **100% / 100%** | 0.96 → **1.06** / 1.70 → **2.01** | **robust, done** |
+| C1 US-large-cap cluster cap | 30% / 30% | 1.01 / 1.88 | reject |
+| I1 chandelier+TP5 @0.5% | 50% / 40% | 1.05 / 1.83 | **no gain** (it is only less order-sensitive). Shadow-exit work dropped |
+| I1 chandelier @0.75% | 0% / 0% | 0.77 / 1.38 | reject |
+| I4 idle-cash core blend (corrected monthly series) | — | Calmar 1.18 → 1.25 at 10%, OOS CAGR falls | reject at −7% |
+| C2 "non-equity first" priority | single path 1.12 / 2.38 (above the 75th pct of random orders) | — | weak candidate; needs its own order-robust check |
+| LLM veto (RETRO_LLM) | approved −0.661R vs vetoed −0.656R | portfolio A/B within ordering noise | keep, don't credit, don't extend |
+
+### 12.3 What's left
+- LIVE deploy bundle once PAPER is clean: guard phases 2+3, F1, F4, IB01 shield, 18-instrument
+  universe, ledger, kill rule.
+- The ledger needs ~143 setups per group before it can show a 0.3R gate effect.
+- Make the LLM one frozen decision per completed weekly bar (RETRO_LLM) so the ledger can
+  score it cleanly.
+- C2 order-robust test; F8 walk-forward of the signal definition; core-book UCITS swaps.
