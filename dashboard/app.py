@@ -3091,6 +3091,18 @@ def retrospective_panel() -> None:
                     ui.label("R saved > 0: the gate kept the book out of signals that lost. "
                              "< 0: it blocked winners. Small n is noise; judge at n ≥ 30.")\
                         .classes("text-xs text-grey-6")
+                # LLM monitor-only (LLM_GATE=monitor, 2026-11-21): its would-be vetoes and its
+                # confidence, scored against what the rule-taken trades really did
+                lv = sm.get("llm_would_veto") or {}
+                if lv.get("n"):
+                    ui.label(f"LLM monitor: signals it WOULD have vetoed (taken anyway): "
+                             f"n={lv['n']} · avg {lv['avg_r']:+.2f}R vs all approved "
+                             f"{(ap['avg_r'] or 0):+.2f}R").classes("text-xs")
+                _cb = [f"{k}: n={v['n']} avg {v['avg_r']:+.2f}R"
+                       for k, v in (sm.get("llm_conf") or {}).items() if v.get("n")]
+                if _cb:
+                    ui.label("LLM confidence buckets (approved): " + " · ".join(_cb))\
+                        .classes("text-xs text-grey-7")
                 if sm["open"]:
                     ui.label(f"{sm['open']} shadow signal(s) still inside their horizon.")\
                         .classes("text-xs text-grey-6")

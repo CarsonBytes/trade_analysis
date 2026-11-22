@@ -433,7 +433,8 @@ on the **paired distribution over random orderings**, not one path.
 | I1 chandelier+TP5 @0.5% | 50% / 40% | 1.05 / 1.83 | **no gain** (it is only less order-sensitive). Shadow-exit work dropped |
 | I1 chandelier @0.75% | 0% / 0% | 0.77 / 1.38 | reject |
 | I4 idle-cash core blend (corrected monthly series) | — | Calmar 1.18 → 1.25 at 10%, OOS CAGR falls | reject at −7% |
-| C2 "non-equity first" priority | single path 1.12 / 2.38 (above the 75th pct of random orders) | — | weak candidate; needs its own order-robust check |
+| C2 "non-equity first" priority | 73% / 83% (30 paired orderings) | 1.06 → 1.10 / 2.01 → 2.25 | modest gain |
+| **C2 "non-equity first, then tightest stop"** | **100% / 93%** | **1.06 → 1.16 / 2.01 → 2.36**; CAGR 6.59 → 7.00% full, 11.89 → 12.86% OOS | **best candidate**, see §12.4 |
 | LLM veto (RETRO_LLM) | approved −0.661R vs vetoed −0.656R | portfolio A/B within ordering noise | keep, don't credit, don't extend |
 
 ### 12.3 What's left
@@ -443,3 +444,66 @@ on the **paired distribution over random orderings**, not one path.
 - Make the LLM one frozen decision per completed weekly bar (RETRO_LLM) so the ledger can
   score it cleanly.
 - C2 order-robust test; F8 walk-forward of the signal definition; core-book UCITS swaps.
+
+
+### 12.4 C2 capital priority (order-robust, 30 paired orderings, 2026-11-21)
+| Same-week priority | Median Calmar full / OOS | Median CAGR full / OOS | Beats random full / OOS |
+|---|---|---|---|
+| random | 1.06 / 2.01 | 6.59% / 11.89% | — |
+| non-equity first | 1.10 / 2.25 | 6.63% / 12.03% | 73% / 83% |
+| **non-equity first, then tightest stop** | **1.16 / 2.36** | **7.00% / 12.86%** | **100% / 93%** |
+| tightest stop first | 1.03 / 1.87 | 6.65% / 12.14% | 40% / 40% |
+| rarest class first | 1.07 / 2.09 | 6.45% / 11.58% | 60% / 57% |
+
+**Reading.**
+- The equity-index ETFs (CSPX/QQQ/DIA/IWM) signal together and crowd the PORTFOLIO_CAP.
+  Funding diversifiers first, and within a class the tighter stop (more shares per unit of
+  risk), wins in almost every ordering.
+- **Caveats:**
+  - four rules were tried and the best is reported (mild selection bias);
+  - "tightest stop first" alone loses, so the gain relies on the combination;
+  - it's a deterministic rule, so it has no spread of its own.
+- **Live today does the opposite:** pending entries are funded in universe order, and the
+  equity ETFs are listed first. With F1, a week's signals arrive together after the Friday
+  close, so this ordering now decides who gets capital whenever PORTFOLIO_CAP binds.
+- **BUILT 2026-11-21 (user-approved):** `ib_exec.funding_order()`, used by `mirror_new`
+  (`FUNDING_PRIORITY=0` restores journal order); test in `test_fidelity`; suite 359 passed.
+- Original proposal: in `ib_exec.mirror_new`, sort pending
+  core entries by (equity-index class last, tightest stop first) before funding. Low risk:
+  it only changes WHICH signals get scarce capital, not sizing or exits.
+
+### 12.4b LLM monitor-only (user decision, 2026-11-21)
+`paper.llm_gate_mode()` reads `LLM_GATE` (default **monitor**): the LLM no longer blocks any
+trade. In monitor mode `place_from_state` records its would-be vetoes as `shadow_signals`
+rows (source `llm_monitor`), and every shadow row carries `llm_conf`. The ledger card shows the
+would-veto group's R against all approved signals, plus confidence buckets (<0.6, 0.6–0.8,
+≥0.8). `LLM_GATE=veto` restores the old gate. Tests: `test_ledger` (monitor never blocks;
+veto mode still blocks; buckets); the veto-path tests in `test_evaluate_signal` now run under
+`LLM_GATE=veto`. Suite 361 passed.
+
+**Decided 2026-11-21 (user):** no discretionary limits on trades. The LLM is monitor-only. The
+rules-based limits stay: the stale check (backtested), the chase check / LMT cap (fidelity),
+the F7 kill rule, and the caps (the −7% budget).
+
+### 12.5 SGOV "sell at the top, buy at the bottom" (user question, 2026-11-21)
+**What the ups and downs are** (SGOV daily, Jan 2023–Nov 2026):
+- Between payouts the price rises almost linearly: +1.8¢/day, up on 84% of days, down on 1%.
+- On each monthly ex-dividend date it drops by about the payout (avg payout $0.372, avg drop
+  $0.344). The sawtooth is the accrued T-bill interest being paid out (~0.37%/month).
+- Inside a cycle the price deviates from the straight line by ~1¢ (sd), with a worst dip of
+  ~1.9¢, while a round trip costs ~2¢/share. **There is no tradable dip.**
+
+**Strategies** ($1, Jan 2023 → Nov 2026, US$ return/yr):
+
+| | Return/yr |
+|---|---|
+| Hold SGOV, before tax (the quoted yield) | 4.62% |
+| **Hold SGOV, 30% withheld (what an HK holder gets; what LIVE earned)** | **3.25%** |
+| Sell the close before each ex-date, rebuy on the ex-date (46 round trips) | 4.02% |
+| **Hold IB01 (accumulating Irish UCITS, nothing withheld, no trades)** | **4.58%** |
+
+**Verdict:** "sell high, buy low" on SGOV only works by dodging the dividend tax (+0.77%/yr vs
+holding). It still loses ~3¢ per cycle: the ex-date drop is smaller than the payout because a
+day of interest accrues meanwhile, plus trading costs. It also needs 12 precisely timed round
+trips a year. **IB01 earns +0.56%/yr more than the timing strategy with zero trades.** Don't
+build SGOV timing; finish the IB01 switch (built, on PAPER).

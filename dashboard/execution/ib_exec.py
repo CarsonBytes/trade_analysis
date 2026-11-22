@@ -809,6 +809,39 @@ def within_entry_execution_window(now: dt.datetime | None = None,
     return open_t <= now <= close_t
 
 
+def funding_order(trades: list[dict]) -> list[dict]:
+    """PURE (C2, STRATEGY_IMPROVEMENT_SPEC §12.4, user-approved 2026-11-21): the order pending
+    entries compete for scarce capital (PORTFOLIO_CAP / deployed room).
+
+    Signal week first (an older setup keeps its place); within a week, NON-equity-index
+    instruments before the equity-index ETFs (CSPX/QQQ/DIA/IWM signal together and crowd the cap);
+    then the TIGHTEST stop first (more shares per unit of risk). Order-robust test, 30 paired
+    random orderings at the live config: beats random same-week order in 100% (full) / 93% (OOS)
+    of orderings, median Calmar 1.06 -> 1.16 / 2.01 -> 2.36, CAGR 6.59 -> 7.00% / 11.89 -> 12.86%.
+    Before this, entries were funded in universe order, which lists the equity ETFs FIRST.
+    FUNDING_PRIORITY=0 restores the journal order."""
+    if os.environ.get("FUNDING_PRIORITY", "1").lower() in ("0", "false", "no"):
+        return list(trades)
+    import json
+    from dashboard.instruments import active_by_key
+
+    def key(t):
+        try:
+            bar = (json.loads(t.get("entry_facts") or "{}") or {}).get("signal_bar")
+        except (TypeError, ValueError):
+            bar = None
+        week = bar or str(t.get("ts") or "")[:10]
+        inst = active_by_key(t.get("instrument", ""))
+        equity_index = 1 if (inst is not None and inst.asset_class == "index") else 0
+        try:
+            e, sl = float(t["entry"]), float(t["sl"])
+            stop_frac = abs(e - sl) / e if e else 1.0
+        except (KeyError, TypeError, ValueError):
+            stop_frac = 1.0
+        return (week, equity_index, stop_frac, t.get("id", 0))
+    return sorted(trades, key=key)
+
+
 def mirror_new() -> list[str]:
     """Place paper bracket orders for OPEN paper trades of the live variant not
     yet mirrored. Returns human-readable log lines."""
@@ -883,7 +916,7 @@ def mirror_new() -> list[str]:
     # default -- see sleeve.py). Both gates independent so the sleeve never silently activates.
     from dashboard.instruments import ETF_TRADED_BY_KEY
     from dashboard.core import sleeve
-    for t in paper.open_trades():
+    for t in funding_order(paper.open_trades()):
         if t["id"] in done:
             continue
         # Manual tech pause -- checked FIRST, ahead of core dispatch, for CORE trades only.

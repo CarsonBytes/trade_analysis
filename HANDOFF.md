@@ -70,6 +70,21 @@ Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md
     -- fixed**; chase rule; LMT entry cap), F5 parity, F7 kill rule, A3 cover tickets, F3 shadow
     ledger + card. Suite 358 passed. Research: C1 / chandelier / I4 rejected on the
     order-robust test; the 18-instrument universe wins 20/20 orderings.
+  - **C2 order-robust (spec §12.4):** "non-equity first, then tightest stop" priority beats random
+    order in 100%/93% of 30 orderings (Calmar 1.06 → 1.16 full, 2.01 → 2.36 OOS; CAGR +0.4/+1.0pp).
+    Live used to fund equity ETFs first (universe order). **BUILT 2026-11-21 (approved):**
+    `ib_exec.funding_order()` in `mirror_new` (`FUNDING_PRIORITY=0` disables).
+  - **2026-11-21 LLM MONITOR-ONLY (user decision):** `LLM_GATE=monitor` is the default. The LLM's
+    verdict never blocks, delays or sizes a trade; the deterministic rules alone decide (as in the
+    backtest). Its would-be vetoes are recorded as shadow rows (gate "LLM would veto"), and its
+    confidence is stored on every shadow row and bucketed on the ledger card. `LLM_GATE=veto`
+    restores the old gate. The raw with/without-LLM backtest log is in RETRO_LLM Appendix A.
+  - **2026-11-21 DECIDED (user): keep the rules-based limits:** the −0.5R stale check, the chase check +
+    LMT entry cap, the F7 kill rule, and the pos/portfolio caps (−7% budget). Only the LLM was
+    removed as a trade limiter.
+  - **SGOV timing (spec §12.5):** the sawtooth is just the monthly payout (no tradable dip; the
+    intra-cycle wobble ~1¢ < 2¢ round trip). Selling before ex / rebuying = 4.02%/yr vs hold-after-
+    tax 3.25%, but IB01 = 4.58% with no trades. Don't build SGOV timing; finish IB01.
   - **2026-11-21 DECIDED: keep the −7% drawdown budget.** No leverage/cap/risk change (frontier
     in spec §11: ~12% OOS / ~6.7% full at −7%). Gains must come from Sharpe and costs.
   - **2026-11-21: IDTL/PRFD/TIPS RETIRED** (user-approved; 21 → 18 instruments, kept resolvable).

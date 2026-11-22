@@ -755,9 +755,32 @@ def withdraw_trade(trade_id: int) -> None:
 
 # ---- forward funnel: turn a live signal into trades ------------------------
 
+def llm_gate_mode() -> str:
+    """LLM_GATE: "monitor" (DEFAULT since 2026-11-21) -- the LLM's verdict never blocks, delays
+    or sizes a trade; it is only recorded (shadow ledger) so it can be scored forward. "veto" --
+    the old behaviour (an LLM WAIT on a deterministic BUY blocks the entry).
+
+    WHY (user decision 2026-11-21, RETRO_LLM_2026-11-21.md): replayed identically, signals the
+    LLM vetoed did as badly as the ones it approved (LIVE -0.656R vs -0.661R); the portfolio
+    with vs without its vetoes was inside ordering noise; its confidence was NEGATIVELY related
+    to real trade outcomes (Spearman -0.64, n=30). And the backtest has no LLM, so a live-only
+    LLM gate is a fidelity gap by construction."""
+    return (_os.environ.get("LLM_GATE") or "monitor").strip().lower()
+
+
+def llm_would_veto(score, llm_sig) -> bool:
+    """PURE: the LLM said WAIT on a real deterministic BUY/SELL."""
+    return bool(llm_sig and score.signal in ("BUY", "SELL")
+                and getattr(llm_sig, "action", None) == "WAIT")
+
+
 def evaluate_signal(key: str, score, llm_sig) -> tuple[bool, list[str], str]:
-    """Apply the entry gates. Returns (passed, reasons, direction)."""
+    """Apply the entry gates. Returns (passed, reasons, direction).
+    Under LLM_GATE=monitor (default) the LLM verdict is ignored here -- the deterministic
+    signal alone decides (see llm_gate_mode())."""
     reasons: list[str] = []
+    if llm_gate_mode() != "veto":
+        llm_sig = None                   # monitor-only: recorded by place_from_state, not used
     # Manual tech pause -- checked FIRST, ahead of every other gate (deterministic edge, LLM,
     # overextension, objective confidence), since it's a deliberate user override that should
     # win regardless of what any strategy signal says. See TECH_PAUSED's docstring above.
@@ -858,13 +881,29 @@ def place_from_state(state: dict) -> list[str]:
                     shadow.record(instrument=score.key, direction="long", entry=res[0],
                                   sl=res[1], tp=res[2], source="blocked",
                                   gate=shadow.gate_label(reasons),
-                                  signal_bar=score.facts.get("signal_bar"))
+                                  signal_bar=score.facts.get("signal_bar"),
+                                  llm_conf=(llm_sig.confidence if llm_sig else None))
             except Exception as e:                     # noqa: BLE001 -- never block placement
                 log.debug("shadow: blocked record failed: %s", e)
 
     for key, score in state["scores"].items():
         llm_sig = state.get("llm", {}).get(key)
         ok, reasons, direction = evaluate_signal(key, score, llm_sig)
+        # LLM monitor (2026-11-21): when it would have vetoed a deterministic long that the RULES
+        # decided on, record that as its own shadow row (gate "LLM would veto") so the ledger
+        # scores the LLM's call against what the trade really did. No effect on the trade.
+        if llm_gate_mode() != "veto" and llm_would_veto(score, llm_sig)                 and score.signal == "BUY":
+            try:
+                from dashboard.core import shadow
+                _px = (state.get("live", {}).get(key) or {}).get("price")
+                _res = compute_sltp(score.facts, "long", "ATR", RR_DEFAULT, entry=_px)                     if _px else None
+                if _res:
+                    shadow.record(instrument=key, direction="long", entry=_res[0], sl=_res[1],
+                                  tp=_res[2], source="llm_monitor", gate="LLM would veto",
+                                  signal_bar=score.facts.get("signal_bar"),
+                                  llm_conf=getattr(llm_sig, "confidence", None))
+            except Exception as e:                     # noqa: BLE001
+                log.debug("shadow: llm monitor record failed: %s", e)
         if not ok:
             logs.append(f"{key}: skip ({'; '.join(reasons)})")
             # only record genuine directional candidates, not WAIT/WATCH noise
@@ -975,7 +1014,8 @@ def place_from_state(state: dict) -> list[str]:
                     from dashboard.core import shadow
                     shadow.record(instrument=key, direction=direction, entry=entry, sl=sl,
                                   tp=tp, source="approved", signal_bar=f.get("signal_bar"),
-                                  paper_id=new_id)
+                                  paper_id=new_id,
+                                  llm_conf=(llm_sig.confidence if llm_sig else None))
                 except Exception as e:                 # noqa: BLE001
                     log.debug("shadow: approved record failed: %s", e)
             msg = (f"{key} {mlabel}: PLACED {direction} entry {entry:.4f} "

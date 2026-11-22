@@ -11,8 +11,19 @@ Run:  uv run python -m dashboard.tests.test_evaluate_signal
 """
 from __future__ import annotations
 
+import os
+from unittest import mock
+
 from dashboard.core import paper
-from dashboard.core.paper import evaluate_signal
+from dashboard.core.paper import evaluate_signal as _evaluate_signal
+
+
+def evaluate_signal(*a, **kw):
+    """These tests exercise the LLM VETO path, which since 2026-11-21 only runs under
+    LLM_GATE=veto (the default is monitor-only -- see paper.llm_gate_mode()). The
+    monitor-mode behaviour is covered in test_ledger.test_llm_monitor_only_never_blocks."""
+    with mock.patch.dict(os.environ, {"LLM_GATE": "veto"}):
+        return _evaluate_signal(*a, **kw)
 from dashboard.core.scoring import Score
 from dashboard.web.board_scan import InstrumentSignal
 from dashboard.core.journal import _canon

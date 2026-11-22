@@ -62,15 +62,18 @@ def _conn() -> sqlite3.Connection:
         ts TEXT, instrument TEXT, direction TEXT,
         entry REAL, sl REAL, tp REAL, horizon_end TEXT,
         source TEXT, gate TEXT, signal_bar TEXT, paper_id INTEGER,
-        status TEXT DEFAULT 'OPEN', exit_ts TEXT, exit_price REAL, r REAL,
+        status TEXT DEFAULT 'OPEN', exit_ts TEXT, exit_price REAL, r REAL, llm_conf REAL,
         UNIQUE(instrument, source, gate, signal_bar))""")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(shadow_signals)")}
+    if "llm_conf" not in cols:                       # tables created before 2026-11-21 evening
+        c.execute("ALTER TABLE shadow_signals ADD COLUMN llm_conf REAL")
     return c
 
 
 def record(*, instrument: str, direction: str, entry: float, sl: float, tp: float,
            source: str, gate: str = "", signal_bar: str | None = None,
            paper_id: int | None = None, ts: dt.datetime | None = None,
-           horizon_days: int | None = None) -> bool:
+           horizon_days: int | None = None, llm_conf: float | None = None) -> bool:
     """Insert one shadow row (ignored if this setup is already recorded). Never raises."""
     try:
         from dashboard.core import paper
@@ -81,10 +84,11 @@ def record(*, instrument: str, direction: str, entry: float, sl: float, tp: floa
         with _p._LOCK, _conn() as c:
             cur = c.execute(
                 "INSERT OR IGNORE INTO shadow_signals (ts, instrument, direction, entry, sl, tp, "
-                "horizon_end, source, gate, signal_bar, paper_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "horizon_end, source, gate, signal_bar, paper_id, llm_conf) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (now.isoformat(timespec="seconds"), instrument, direction, float(entry),
                  float(sl), float(tp), hz.isoformat(timespec="seconds"), source, gate, bar,
-                 paper_id))
+                 paper_id, (float(llm_conf) if llm_conf is not None else None)))
             return cur.rowcount > 0
     except Exception as e:                             # noqa: BLE001
         log.debug("shadow: record failed: %s", e)
@@ -134,13 +138,19 @@ def _stats(rs: list[float]) -> dict:
             "sum_r": sum(rs)}
 
 
+CONF_BUCKETS = ((0.0, 0.6, "<0.6"), (0.6, 0.8, "0.6-0.8"), (0.8, 1.01, ">=0.8"))
+
+
 def summarize(rows: list[tuple], funded: dict[int, float]) -> dict:
     """PURE: rows = (source, gate, status, r, paper_id) of shadow_signals; funded =
     {paper_id: realized R} of funded, closed journal trades.
     -> {"approved": stats, "gates": {gate: stats + "r_saved"}, "drag": stats of
         (funded R - signal R) over approved rows that were funded, "open": n unresolved}."""
     approved, gates, drag, open_n = [], {}, [], 0
-    for source, gate, status, r, pid in rows:
+    llm_veto, conf = [], {lbl: [] for _lo, _hi, lbl in CONF_BUCKETS}
+    for row in rows:
+        source, gate, status, r, pid = row[:5]
+        lc = row[5] if len(row) > 5 else None
         if status == "OPEN" or r is None:
             open_n += 1
             continue
@@ -148,6 +158,12 @@ def summarize(rows: list[tuple], funded: dict[int, float]) -> dict:
             approved.append(float(r))
             if pid is not None and pid in funded:
                 drag.append(float(funded[pid]) - float(r))
+            if lc is not None:
+                for lo, hi, lbl in CONF_BUCKETS:
+                    if lo <= float(lc) < hi:
+                        conf[lbl].append(float(r))
+        elif source == "llm_monitor":
+            llm_veto.append(float(r))           # trades the rules TOOK that the LLM would veto
         else:
             gates.setdefault(gate or "other", []).append(float(r))
     g = {}
@@ -155,7 +171,9 @@ def summarize(rows: list[tuple], funded: dict[int, float]) -> dict:
         st = _stats(rs)
         st["r_saved"] = -st["sum_r"]          # blocked losers = R the gate kept out of the book
         g[k] = st
-    return {"approved": _stats(approved), "gates": g, "drag": _stats(drag), "open": open_n}
+    return {"approved": _stats(approved), "gates": g, "drag": _stats(drag), "open": open_n,
+            "llm_would_veto": _stats(llm_veto),
+            "llm_conf": {k: _stats(v) for k, v in conf.items()}}
 
 
 def summary() -> dict:
@@ -164,8 +182,8 @@ def summary() -> dict:
     from dashboard.execution import broker
     try:
         with paper._LOCK, _conn() as c:
-            rows = c.execute("SELECT source, gate, status, r, paper_id FROM shadow_signals"
-                             ).fetchall()
+            rows = c.execute("SELECT source, gate, status, r, paper_id, llm_conf "
+                             "FROM shadow_signals").fetchall()
         ex = broker.executed_ids()
         funded = {t["id"]: float(t["realized_r"]) for t in paper.all_trades()
                   if t["id"] in ex and t["status"] in ("WIN", "LOSS", "EXPIRED", "BE")
@@ -174,4 +192,5 @@ def summary() -> dict:
         return summarize(rows, funded)
     except Exception as e:                             # noqa: BLE001
         log.debug("shadow: summary failed: %s", e)
-        return {"approved": _stats([]), "gates": {}, "drag": _stats([]), "open": 0}
+        return {"approved": _stats([]), "gates": {}, "drag": _stats([]), "open": 0,
+                "llm_would_veto": _stats([]), "llm_conf": {}}

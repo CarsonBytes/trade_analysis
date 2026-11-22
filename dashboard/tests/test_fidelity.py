@@ -168,6 +168,26 @@ def test_one_funded_entry_per_signal_bar():
     check("no signal bar known -> never blocks", taken([("WIN", ef(None))], None), False)
 
 
+def test_funding_order_non_equity_first_then_tightest_stop():
+    print("\nC2 ib_exec.funding_order(): same week -> non-equity-index first, tightest stop first; "
+          "an older week keeps its place:")
+    from dashboard.execution.ib_exec import funding_order
+    wk = lambda b: json.dumps({"signal_bar": b})                 # noqa: E731
+    t = [  # id, instrument, entry, sl (stop %)
+        {"id": 1, "instrument": "QQQ", "entry": 100.0, "sl": 97.0, "entry_facts": wk("2026-11-16")},
+        {"id": 2, "instrument": "AMLP", "entry": 100.0, "sl": 97.3, "entry_facts": wk("2026-11-16")},
+        {"id": 3, "instrument": "CPER", "entry": 100.0, "sl": 97.8, "entry_facts": wk("2026-11-16")},
+        {"id": 4, "instrument": "DIA", "entry": 100.0, "sl": 98.4, "entry_facts": wk("2026-11-16")},
+        {"id": 5, "instrument": "IWM", "entry": 100.0, "sl": 96.0, "entry_facts": wk("2026-11-09")},
+    ]
+    with mock.patch.dict(os.environ, {"FUNDING_PRIORITY": "1"}):
+        check("order", [x["instrument"] for x in funding_order(t)],
+              ["IWM", "CPER", "AMLP", "DIA", "QQQ"])
+    with mock.patch.dict(os.environ, {"FUNDING_PRIORITY": "0"}):
+        check("FUNDING_PRIORITY=0 keeps the journal order", [x["id"] for x in funding_order(t)],
+              [1, 2, 3, 4, 5])
+
+
 if __name__ == "__main__":
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):

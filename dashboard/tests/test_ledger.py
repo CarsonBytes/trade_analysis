@@ -91,6 +91,42 @@ def test_summarize():
     check("open rows counted separately", s["open"], 1)
 
 
+def test_llm_monitor_only_never_blocks():
+    print("\nLLM_GATE=monitor (default, user decision 2026-11-21): an LLM WAIT on a deterministic "
+          "BUY no longer blocks the trade; LLM_GATE=veto restores the old behaviour:")
+    from types import SimpleNamespace
+    from dashboard.core import paper
+    from dashboard.core.scoring import Score
+    sc = Score(key="CPER", direction="long", strength=5, obviousness=4.0, signal="BUY", note="",
+               facts={"rsi14": 55.0, "atr14": 1.0, "atr14_med60": 1.0}, facts_text="")
+    wait = SimpleNamespace(action="WAIT", confidence=0.9, rationale="macro risk; wait")
+    with mock.patch("dashboard.models.confidence_model.objective", return_value=None), \
+         mock.patch.object(paper, "WEEKLY_TREND_CLASSES", set()):
+        with mock.patch.dict(os.environ, {"LLM_GATE": ""}):
+            ok, reasons, d = paper.evaluate_signal("CPER", sc, wait)
+            check("default = monitor: the rules decide, trade passes", (ok, d), (True, "long"))
+            check("llm_would_veto() still sees the LLM's call for the ledger",
+                  paper.llm_would_veto(sc, wait), True)
+        with mock.patch.dict(os.environ, {"LLM_GATE": "veto"}):
+            ok, reasons, d = paper.evaluate_signal("CPER", sc, wait)
+            check("LLM_GATE=veto: blocked as before", (ok, reasons[0].startswith("LLM vetoed")),
+                  (False, True))
+
+
+def test_summarize_llm_monitor_and_confidence():
+    print("\nshadow.summarize(): the LLM's would-be vetoes and confidence buckets are scored:")
+    from dashboard.core.shadow import summarize
+    rows = [("approved", "", "WIN", 3.0, 1, 0.9), ("approved", "", "LOSS", -1.0, 2, 0.9),
+            ("approved", "", "LOSS", -1.0, 3, 0.5), ("llm_monitor", "LLM would veto", "LOSS",
+                                                    -1.0, None, 0.7)]
+    s = summarize(rows, funded={})
+    check("would-veto bucket", (s["llm_would_veto"]["n"], s["llm_would_veto"]["avg_r"]), (1, -1.0))
+    check("confidence >=0.8 bucket", (s["llm_conf"][">=0.8"]["n"], s["llm_conf"][">=0.8"]["avg_r"]),
+          (2, 1.0))
+    check("confidence <0.6 bucket", s["llm_conf"]["<0.6"]["n"], 1)
+    check("monitor rows are not a blocking gate", "LLM would veto" in s["gates"], False)
+
+
 def test_config_parity_and_reference_label():
     print("\nF5 drift.config_parity(): the backtest reference must match the DEPLOYED sizing:")
     from dashboard.web import drift
