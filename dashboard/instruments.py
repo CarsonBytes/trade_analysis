@@ -132,7 +132,7 @@ ETF_UNIVERSE: list[Instrument] = [
     Instrument("DIA",  "Dow 30 ETF",         "DIA",  "", "index"),
     Instrument("IWM",  "Russell 2000 ETF",   "IWM",  "", "index"),
     Instrument("IDTM", "iShares $ Treasury Bond 7-10y (UCITS)", "IDTM.L", "", "rate", "LSEETF"),
-    Instrument("IDTL", "iShares $ Treasury Bond 20+y (UCITS)",  "IDTL.L", "", "rate", "LSEETF"),
+    # IDTL RETIRED 2026-11-21 (see _RETIRED_ETF_UNIVERSE below).
     Instrument("SHY",  "1-3y Treasury ETF",  "SHY",  "", "rate"),
 ]
 ETF_BY_KEY = {i.key: i for i in ETF_UNIVERSE}
@@ -151,14 +151,14 @@ ETF_BY_KEY = {i.key: i for i in ETF_UNIVERSE}
 # a domicile-only twin.
 ETF_CANDIDATES: list[Instrument] = [
     Instrument("IHYA", "iShares $ High Yield Corp Bond (UCITS)", "IHYA.L", "", "credit", "LSEETF"),
-    Instrument("TIPS", "iShares $ TIPS (UCITS)",                 "TIPS.L", "", "inflation", "LSEETF"),
+    # TIPS RETIRED 2026-11-21 (see _RETIRED_ETF_CANDIDATES below).
     Instrument("EFA",  "Developed Intl Eq", "EFA",  "", "intl_eq"),
     Instrument("EIMI", "iShares Core MSCI EM IMI (UCITS)",       "EIMI.L", "", "intl_eq", "LSEETF"),
     Instrument("DBC",  "Broad Commodities", "DBC",  "", "commodity"),
     Instrument("VNQ",  "US REITs",          "VNQ",  "", "reit"),
     # batch-2 keepers (screened 2026-06-22): distinct, positive, not equity-cluster.
     Instrument("EMB",  "EM Bonds",          "EMB",  "", "em_bond"),
-    Instrument("PRFD", "Invesco Preferred Shares (UCITS)", "PRFD.L", "", "preferred", "LSEETF"),
+    # PRFD RETIRED 2026-11-21 (see _RETIRED_ETF_CANDIDATES below).
     # batch-3/4 keepers (screened 2026-07-08, isolation-tested vs the 17/18-base):
     # CWB +1.0pp OOS CAGR (flat DD), VNQI +0.5pp OOS CAGR (flat DD) -- see HANDOFF.
     Instrument("CWB",  "Convertible Bonds", "CWB",  "", "convertible"),
@@ -199,6 +199,12 @@ _RETIRED_ETF_CANDIDATES: list[Instrument] = [
     Instrument("TIP",  "TIPS",              "TIP",  "", "inflation"),
     Instrument("EEM",  "Emerging Mkt Eq",   "EEM",  "", "intl_eq"),
     Instrument("PFF",  "Preferred Stock",   "PFF",  "", "preferred"),
+    # RETIRED 2026-11-21 (STRATEGY_IMPROVEMENT_SPEC §9, user-approved): negative standalone
+    # expectancy over full history (TIPS -0.117R n=12, PRFD -0.162R n=9), and removing them
+    # (with IDTL) improved BOTH Full and OOS Calmar at the live config (0.674->0.721,
+    # 1.344->1.533; each also improved both when removed alone). Kept resolvable for journal rows.
+    Instrument("TIPS", "iShares $ TIPS (UCITS)",                 "TIPS.L", "", "inflation", "LSEETF"),
+    Instrument("PRFD", "Invesco Preferred Shares (UCITS)", "PRFD.L", "", "preferred", "LSEETF"),
 ]
 for _inst in _RETIRED_ETF_CANDIDATES:
     ETF_CANDIDATE_BY_KEY[_inst.key] = _inst
@@ -212,6 +218,10 @@ _RETIRED_ETF_UNIVERSE: list[Instrument] = [
     Instrument("SPY",  "S&P 500 ETF",        "SPY",  "", "index"),
     Instrument("IEF",  "7-10y Treasury ETF", "IEF",  "", "rate"),
     Instrument("TLT",  "20+y Treasury ETF",  "TLT",  "", "rate"),
+    # RETIRED 2026-11-21 (STRATEGY_IMPROVEMENT_SPEC §9, user-approved): -0.173R over n=12;
+    # removing it improved Full +0.020 / OOS +0.117 Calmar on its own, and both windows
+    # together with TIPS/PRFD. Kept resolvable for journal rows.
+    Instrument("IDTL", "iShares $ Treasury Bond 20+y (UCITS)",  "IDTL.L", "", "rate", "LSEETF"),
 ]
 for _inst in _RETIRED_ETF_UNIVERSE:
     ETF_BY_KEY[_inst.key] = _inst
