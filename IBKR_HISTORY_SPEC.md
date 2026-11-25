@@ -145,6 +145,11 @@ weeks because nothing ever backfilled it. Spec a **one-shot + periodic Flex back
 - scheduled monthly against live **and** paper — each with its own Flex query ID, since a query
   is scoped to one account (corrected 2026-10-05; the old "demo accounts return nothing" note
   was an artefact of probing paper with the live query).
+- **Status 2026-10-17:** the dry-run-first + MEASURED-refusal parts ship in
+  `scripts/flex_nav_reconcile.py` (weekly flag-only cron `0 9 * * 1`; `--commit` does surgical
+  placeholder-only replacement with per-day dropped/kept counts and refuses days without
+  placeholder rows). Still unstarted: the standalone `dashboard/ops/flex_backfill.py` with the
+  B2 inception assertion, and the monthly live+paper cadence.
 
 ## 4. Verification
 

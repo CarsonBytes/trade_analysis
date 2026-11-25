@@ -89,11 +89,49 @@ port_hex_for() {
     esac
 }
 
+# LIVE runs on the WINDOWS IB Gateway since 2026-10-13 (spec GATEWAY_PASSKEY): IBKR requires the
+# YubiKey PIN on every login and only Windows' WebAuthn dialog can collect it. In this mode live
+# is probed over TCP on Windows' API port, and is NEVER relogged automatically -- every login needs
+# a human at the PC (PIN + touch), so the only useful action is one clear page per outage.
+LIVE_GATEWAY_MODE=${LIVE_GATEWAY_MODE:-windows}
+# WSL2 NAT mode: Windows is this VM's default gateway (little-endian hex in /proc/net/route).
+win_ip() {
+    local g; g=$(awk '$2 == "00000000" { print $3; exit }' /proc/net/route)
+    [ -n "$g" ] || return 1
+    printf '%d.%d.%d.%d' "0x${g:6:2}" "0x${g:4:2}" "0x${g:2:2}" "0x${g:0:2}"   # bash printf parses hex; mawk's does not
+}
+win_live_open() {
+    local ip; ip=$(win_ip)
+    [ -n "$ip" ] && timeout 3 bash -c "cat < /dev/null > /dev/tcp/$ip/4001" 2>/dev/null
+}
+
 port_open() {
     local cname container_hex
+    if [ "$1" = "live" ] && [ "$LIVE_GATEWAY_MODE" = "windows" ]; then win_live_open; return; fi
     cname=$(container_for "$1"); container_hex=$(port_hex_for "$1")
     docker exec "$cname" sh -c \
         "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -i \":${container_hex}\" | grep -qi ' 0A '"
+}
+
+# --- passkey HOLD (ADDED 2026-10-06, spec GATEWAY_PASSKEY P0) ---------------------
+# The live username became passkey-only on 2026-10-03. Every cycle this script ran after
+# that was a guaranteed failure that IBKR counted against the account (105 handshakes on
+# 10-04/10-05, 89 "Too many failed login attempts"). A held gateway is stopped and left
+# alone; see scripts/gateway-hold.sh for the switch and the human release path.
+HOLD_DIR=/home/cap/.container-hold
+HOLD=/home/cap/quant/scripts/gateway-hold.sh
+PROBE=/home/cap/quant/scripts/gateway-auth-probe.sh
+held() { [ -f "$HOLD_DIR/$(container_for "$1")" ]; }
+# PASSKEY_ONLY / THROTTLED / empty -- see gateway-auth-probe.sh for the evidence format
+auth_blocker() { docker exec -i "$(container_for "$1")" sh -s < "$PROBE" 2>/dev/null | head -1; }
+
+# What the human must do to finish a login, per gateway. Paper still gets an IBKR-app push;
+# live's only factor is a passkey, which nothing on the phone alone can approve.
+twofa_hint() {
+    case "$1" in
+        live) echo "LIVE needs a PASSKEY login at the gateway PC: wsl -d Ubuntu -- bash /home/cap/quant/scripts/gateway-hold.sh release live" ;;
+        *)    echo "APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)." ;;
+    esac
 }
 
 # --- on-demand restart request (ADDED 2026-09-14) -----------------------------
@@ -121,14 +159,27 @@ clear_restart_request() {
 }
 for t in paper live; do
     if restart_requested "$t"; then
-        log "$t: on-demand gateway restart requested from the dashboard UI -- cycling relogin now"
         clear_restart_request "$t"
+        if [ "$t" = "live" ] && [ "$LIVE_GATEWAY_MODE" = "windows" ]; then
+            # Nothing in WSL can complete a Windows passkey login; tell the human what to do.
+            log "live: dashboard restart click -- live gateway is on Windows, sent login instructions instead"
+            /home/cap/quant/scripts/gateway-push.sh info "manual-ui:live" \
+                "IBKR LIVE gateway runs on Windows now. To log in: at the PC, double-click 'IBKR Live Login' on the desktop, then enter the YubiKey PIN and touch the key."
+            continue
+        fi
+        log "$t: on-demand gateway restart requested from the dashboard UI -- cycling relogin now"
+        # An explicit human click overrides a passkey hold (2026-10-06): the human may be at
+        # the gateway PC ready to complete it. If it fails again, the probe below re-holds.
+        if held "$t"; then
+            rm -f "$HOLD_DIR/$(container_for "$t")"
+            log "$t: dashboard restart click releases the passkey hold"
+        fi
           # NOTIFICATION_SPEC: level=info -- the operator just clicked this
           # button, so the relogin is their own doing; buzzing them back is
           # pure echo. (The 2FA instruction still matters, which is why the
           # watchdog's own first-cycle page below carries it.)
           /home/cap/quant/scripts/gateway-push.sh info "manual-ui:$t" \
-              "IBKR ${t} gateway restart requested from the dashboard -- relogin cycle started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+              "IBKR ${t} gateway restart requested from the dashboard -- relogin cycle started. $(twofa_hint "$t")"
         bash "$RELOGIN" "$t" "manual-ui-restart" >/dev/null 2>&1
         rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet" \
               "$ST/$t.escalated" "$ST/$t.escalated.notified"
@@ -195,9 +246,49 @@ for t in paper live; do
         # the file was still there, so no exhausted-retries notification could ever fire
         # again on this machine. Recovery must reset the whole ladder, not part of it.
         rm -f "$ST/$t.since" "$ST/$t.attempts" "$ST/$t.quiet" \
-              "$ST/$t.escalated" "$ST/$t.escalated.notified"
+              "$ST/$t.escalated" "$ST/$t.escalated.notified" "$ST/$t.held.logged"
+        if [ "$t" = "live" ] && [ "$LIVE_GATEWAY_MODE" = "windows" ]; then
+            [ -f "$ST/live.win_down_since" ] && log "live: Windows gateway logged in (API port 4001 open)"
+            rm -f "$ST/live.win_down_since" "$ST/live.win_alerted"
+            continue   # the Docker gateway's hold is about the parked container -- leave it
+        fi
+        # someone completed the login by hand -- a stale hold would block the next recovery
+        if held "$t"; then rm -f "$HOLD_DIR/$(container_for "$t")"; log "$t: logged in -- passkey hold cleared"; fi
         continue
     fi
+
+    # LIVE on Windows: never cycles (needs PIN + touch at the PC). One page per outage, only
+    # outside quiet hours -- IBKR's weekly reset logs it out every weekend by design, and the
+    # page for that lands once the pre-open window opens.
+    if [ "$t" = "live" ] && [ "$LIVE_GATEWAY_MODE" = "windows" ]; then
+        if [ "$QUIET" -eq 1 ]; then continue; fi
+        if [ ! -f "$ST/live.win_down_since" ]; then
+            echo "$now" > "$ST/live.win_down_since"
+            log "live: Windows gateway API port 4001 CLOSED -- paging in ${STALL_MIN}min if still down"
+            continue
+        fi
+        dsince=$(cat "$ST/live.win_down_since" 2>/dev/null || echo "$now")
+        if [ $(( (now - dsince) / 60 )) -ge "$STALL_MIN" ] && [ ! -f "$ST/live.win_alerted" ]; then
+            touch "$ST/live.win_alerted"
+            log "live: Windows gateway still logged out after ${STALL_MIN}min -- paging (no auto-relogin: needs PIN + touch)"
+            # NOTIFICATION_SPEC: critical -- live trading is blind until a human logs in.
+            /home/cap/quant/scripts/gateway-push.sh critical "winlive:${dsince}" \
+                "IBKR LIVE gateway (Windows) is NOT logged in -- live trading is paused. At the PC: double-click 'IBKR Live Login' on the desktop, enter the YubiKey PIN, touch the key (key must be in a port directly on the PC)."
+        fi
+        continue
+    fi
+
+    # Held (passkey / throttled): no cycles, no stall clock, no repeat pages. The single
+    # critical page went out when the hold was set.
+    if held "$t"; then
+        rm -f "$ST/$t.since" "$ST/$t.attempts"
+        if [ ! -f "$ST/$t.held.logged" ]; then
+            touch "$ST/$t.held.logged"
+            log "$t: gateway is HELD ($(cat "$HOLD_DIR/$(container_for "$t")" 2>/dev/null)) -- no automatic relogin until a human releases it"
+        fi
+        continue
+    fi
+    rm -f "$ST/$t.held.logged"
 
     # No session worth waking anyone for: clear the stall state exactly as the healthy
     # branch does, so the 5-minute clock starts FRESH when the window reopens and fires one
@@ -275,6 +366,18 @@ for t in paper live; do
 
     # fire a cycle on the FIRST threshold crossing, then no more often than RETRY_GAP_MIN
     if [ "$age_min" -ge "$STALL_MIN" ] && [ "$gap_min" -ge "$RETRY_GAP_MIN" ]; then
+        # Can a relogin possibly succeed unattended? (ADDED 2026-10-06) If the account only
+        # offers a passkey, or IBKR is already throttling it, a cycle is a guaranteed failure
+        # that deepens the lockout -- hold the gateway and page ONCE instead.
+        blocker=$(auth_blocker "$t")
+        if [ -n "$blocker" ]; then
+            log "$t: auth probe says $blocker -- holding the gateway instead of cycling"
+            bash "$HOLD" hold "$t" "auto: $blocker" >/dev/null 2>&1
+            # NOTIFICATION_SPEC: critical -- nothing automatic can recover this; a human must.
+            /home/cap/quant/scripts/gateway-push.sh critical "hold:${t}" \
+                "IBKR ${t} gateway is logged out and auto-relogin is now PAUSED ($blocker: retrying only adds failed-login strikes). $(twofa_hint "$t")"
+            continue
+        fi
         n=$((attempts + 1))
         log "$t: port closed ${age_min}min (attempt ${n}/${MAX_ATTEMPTS}) -- cycling relogin"
         echo "$hourkey $n" > "$ST/$t.attempts"
@@ -299,7 +402,7 @@ for t in paper live; do
         incident_key=$(printf '%s' "$since")
         if [ "$n" -eq 1 ]; then
             /home/cap/quant/scripts/gateway-push.sh critical "cycle:${t}:${incident_key}" \
-                "IBKR ${t} gateway not logged in -- relogin cycle ${n}/${MAX_ATTEMPTS} started. APPROVE THE SECOND-FACTOR PROMPT IN THE IBKR APP (~2 min window)."
+                "IBKR ${t} gateway not logged in -- relogin cycle ${n}/${MAX_ATTEMPTS} started. $(twofa_hint "$t")"
         fi
         bash "$RELOGIN" "$t" "watchdog-cycle-${n}" >/dev/null 2>&1
     fi

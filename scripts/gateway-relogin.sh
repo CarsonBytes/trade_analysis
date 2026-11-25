@@ -3,7 +3,9 @@
 # path for "this IBKR gateway is not logged in; bounce it, wait for login, tell the human".
 # Used by:
 #   - humans directly:  wsl -d Ubuntu -- bash /home/cap/quant/scripts/gateway-relogin.sh paper
-#   - the pre-market cron (20:00 HKT Mon-Fri):  ... gateway-relogin.sh both scheduled
+#   - the pre-market cron (20:00 HKT Mon-Fri):  ... gateway-relogin.sh paper scheduled
+#     (was `both` until 2026-10-06: live is passkey-only now and keeps its session via
+#     IBKR's own AutoRestartTime instead -- a scheduled hard restart would FORCE a passkey)
 #   - gateway-login-watchdog.sh (stall detection), which calls this per-gateway
 #
 # What it does NOT do: click through IBKR's Second Factor Authentication. That push must
@@ -92,6 +94,32 @@ TARGET="${1:-both}"
 REASON="${2:-manual}"
 [ "$TARGET" = "both" ] && TARGETS="paper live" || TARGETS="$TARGET"
 
+# Passkey HOLD (ADDED 2026-10-06, spec GATEWAY_PASSKEY P0): a held gateway is skipped by
+# every automatic caller. A human invocation ("manual*", incl. the dashboard button) still
+# acts -- that person may be at the gateway PC ready to complete the passkey.
+HOLD_DIR=/home/cap/.container-hold
+case "$REASON" in
+    manual*) ;;
+    *)
+        kept=""
+        for t in $TARGETS; do
+            if [ -f "$HOLD_DIR/$(container_for "$t")" ]; then
+                log "$t: HELD (passkey/throttle) -- skipping automatic relogin (reason: $REASON)"
+            else
+                kept="$kept $t"
+            fi
+        done
+        TARGETS="${kept# }"
+        [ -n "$TARGETS" ] || exit 0
+        ;;
+esac
+twofa_hint() {
+    case "$1" in
+        live) echo "LIVE needs a PASSKEY login at the gateway PC (gateway-hold.sh release live)." ;;
+        *)    echo "Approve the second-factor prompt in the IBKR app now." ;;
+    esac
+}
+
 log "=== relogin started ($TARGET, reason: $REASON)"
 for t in $TARGETS; do
     cname=$(container_for "$t")
@@ -109,7 +137,7 @@ for t in $TARGETS; do
     if port_open "$t"; then
         log "$t: LOGIN OK (API port ${hex} open after ~${waited}s)"
     else
-        log "$t: STUCK after ${POLL_SEC}s -- API port ${hex} still closed (approve the IBKR phone push, or see gateway-login-watchdog.sh for auto-retry)"
+        log "$t: STUCK after ${POLL_SEC}s -- API port ${hex} still closed ($(twofa_hint "$t") See gateway-login-watchdog.sh for auto-retry)"
         # NOTIFICATION_SPEC: route through gateway-push.sh (2026-10-05).
         #
         # This used to call the local notify() above, which is a bare curl with NO cooldown
@@ -128,7 +156,7 @@ for t in $TARGETS; do
         # incidents are tracked separately, and the reason is included because the human
         # reading this needs to know WHY it is being asked to approve something.
         /home/cap/quant/scripts/gateway-push.sh critical "relogin-stuck:${t}" \
-            "IBKR ${t} gateway did NOT come back within ${POLL_SEC}s (reason: ${REASON}). Approve the second-factor prompt in the IBKR app now."
+            "IBKR ${t} gateway did NOT come back within ${POLL_SEC}s (reason: ${REASON}). $(twofa_hint "$t")"
     fi
 done
 log "=== relogin finished ($TARGET)"

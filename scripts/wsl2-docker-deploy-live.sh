@@ -9,17 +9,37 @@
 # recreate/relogin on its own.
 #
 # Usage:
-#   wsl -d Ubuntu -- bash /mnt/d/quant/scripts/wsl2-docker-deploy-live.sh
+#   wsl -d Ubuntu -- bash /mnt/d/quant/scripts/wsl2-docker-deploy-live.sh [label] [--with-gateway]
+#
+# GATEWAY IS LEFT ALONE BY DEFAULT (2026-10-06, spec GATEWAY_PASSKEY P1). The live username is
+# passkey-only now, and any recreate/restart of the gateway container throws away its session
+# and demands a fresh passkey login at the PC. A dashboard deploy therefore only recreates the
+# dashboard (`up -d --no-deps dashboard`). Pass --with-gateway to also apply gateway changes
+# (Dockerfile.gateway / its compose block) -- do that only when you are at the PC to complete
+# the passkey. A HELD gateway (scripts/gateway-hold.sh) is recreated but never started.
 set -uo pipefail
 
 LOG="/home/cap/quant-deploy.log"
 DASH_URL="http://localhost:18081"
 COMPOSE="docker compose -f docker-compose.live.yml -p quant-live"
+GW_CONTAINER="quant-ibgateway-live-docker"
+HOLD_FILE="/home/cap/.container-hold/$GW_CONTAINER"
+
+WITH_GW=0
+LABEL=""
+for a in "$@"; do
+    case "$a" in
+        --with-gateway) WITH_GW=1 ;;
+        *) [ -z "$LABEL" ] && LABEL="$a" ;;
+    esac
+done
+LABEL="${LABEL:-manual}"
+set -- "$LABEL"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 {
-    echo "=== LIVE deploy started $(ts) (triggered by: ${1:-manual}) ==="
+    echo "=== LIVE deploy started $(ts) (triggered by: ${1:-manual}, with-gateway=$WITH_GW) ==="
 
     rsync -a --delete \
         --exclude='.venv' --exclude='.git' --exclude='__pycache__' \
@@ -40,7 +60,9 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
     # session-per-username conflict, but expect an extra login cycle. Informational only,
     # matching paper's own script -- not a hard abort.
     win_ip=$(ip route | awk '/^default/ {print $3; exit}')
-    if [ -n "$win_ip" ] && timeout 2 bash -c "cat < /dev/null > /dev/tcp/$win_ip/4001" 2>/dev/null; then
+    # Since 2026-10-13 the Windows gateway IS the live gateway, so 4001 being up is the normal
+    # state -- the warning below only matters for a --with-gateway (Docker gateway) deploy.
+    if [ "$WITH_GW" = "1" ] && [ -n "$win_ip" ] && timeout 2 bash -c "cat < /dev/null > /dev/tcp/$win_ip/4001" 2>/dev/null; then
         echo "!!! WARNING: native Windows LIVE gateway (port 4001) appears to still be up"
         echo "    ($win_ip:4001 reachable) -- EXISTING_SESSION_DETECTED_ACTION should still"
         echo "    resolve this, but this WILL kick the native session the moment login"
@@ -51,7 +73,14 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
     # wsl2-docker-deploy.sh -- same external-volume precondition.
     docker volume create quant_shared >/dev/null
 
-    $COMPOSE build
+    # 2026-10-13: the live gateway runs on WINDOWS now; the Docker one is parked behind the
+    # docker-gateway profile, so --with-gateway must opt into that profile explicitly.
+    if [ "$WITH_GW" = "1" ]; then
+        COMPOSE="$COMPOSE --profile docker-gateway"
+        $COMPOSE build
+    else
+        $COMPOSE build dashboard win-gateway-relay
+    fi
     build_rc=$?
     if [ $build_rc -ne 0 ]; then
         echo "!!! docker compose build failed (exit $build_rc) -- aborting, previous image/"
@@ -60,7 +89,19 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
         exit 1
     fi
 
-    $COMPOSE up -d
+    if [ "$WITH_GW" = "1" ]; then
+        if [ -f "$HOLD_FILE" ]; then
+            # recreate with the new config but leave it stopped -- starting it would attempt a
+            # login nobody is there to finish (see gateway-hold.sh)
+            echo "LIVE deploy: gateway is HELD ($(cat "$HOLD_FILE")) -- recreating it STOPPED"
+            $COMPOSE create --force-recreate ib-gateway-live
+        else
+            $COMPOSE up -d ib-gateway-live
+        fi
+    else
+        echo "LIVE deploy: gateway untouched (no --with-gateway) -- its session survives this deploy"
+    fi
+    $COMPOSE up -d --no-deps win-gateway-relay dashboard
     up_rc=$?
     if [ $up_rc -ne 0 ]; then
         echo "!!! docker compose up failed (exit $up_rc)"
@@ -91,11 +132,20 @@ rm -f /tmp/_quant_live_deploy_health_ok
 
 # Only actually attempts a real login if .env.live has real credentials -- during Stage 2
 # (blank credentials) this will correctly abort fast via gateway-login-live.sh's own guard.
-bash /home/cap/quant/scripts/gateway-login-live.sh "${1:-manual}" >> "$LOG" 2>&1
-login_rc=$?
+# Only when THIS deploy (re)started an unheld gateway (2026-10-06): an untouched gateway keeps
+# its session, and typing credentials into it would at best be a wasted login attempt.
+if [ "$WITH_GW" = "1" ] && [ ! -f "$HOLD_FILE" ]; then
+    bash /home/cap/quant/scripts/gateway-login-live.sh "${1:-manual}" >> "$LOG" 2>&1
+    login_rc=$?
+else
+    echo "[gateway-login-live $(ts)] skipped (gateway not redeployed, or held)" >> "$LOG"
+    login_rc=2
+fi
 {
     if [ "$health_ok" = "1" ] && [ $login_rc -eq 0 ]; then
         echo "=== LIVE deploy OK $(ts) -- dashboard healthy, gateway login confirmed ==="
+    elif [ "$health_ok" = "1" ] && [ $login_rc -eq 2 ]; then
+        echo "=== LIVE deploy OK $(ts) -- dashboard healthy, gateway not part of this deploy ==="
     elif [ "$health_ok" = "1" ]; then
         echo "=== LIVE deploy OK $(ts) -- dashboard healthy, gateway login NOT confirmed (see"
         echo "    gateway-login-live entries above) -- expected during Stage 2 (blank creds) =="
