@@ -5,6 +5,54 @@ Last updated 2026-10-17.
 
 ---
 
+### 🔧 2026-11-25: IB Gateway upgrade (1047 desupported 2026-12-15, minimum 1050.1)
+- **LIVE (native Windows):**
+  - Gateway 1047 → **1051** (it was already installed at `C:\Jts\ibgateway\1051` since Oct 17,
+    with a bundled Zulu Java 25 JRE);
+  - IBC 3.24.0 → **3.24.2** (`IBCWin-3.24.2.zip`). 3.24.2 is required for Gateway 10.48+; its
+    `getExtraJavaOptions.ps1` replaces our Oct-13 hand patch to `StartIBC.bat` (jxBrowserKey);
+  - `StartGateway.bat` was rebuilt from the 3.24.2 template with our 5 settings
+    (TWS_MAJOR_VRSN=1051, CONFIG, TRADING_MODE=live, IBC_PATH, TWS_SETTINGS_PATH);
+  - `config.ini` untouched. Backup at `C:\IBC-Live.bak-20261125`;
+  - `C:\Jts\ibgateway\1051\ibgateway.vmoptions` got `-Duser.timezone=Asia/Hong_Kong` (backup
+    `.bak-20261125`). 1051's `inst_jre.cfg` points at a deleted temp dir; IBC 3.24.2 falls
+    back to `..\jre`.
+  - Logged in 23:47:13 HKT (one YubiKey touch). The LIVE dashboard reconnected 23:48:26. The
+    read-only snapshot was OK.
+  - **Rollback:** copy the backup over `C:\IBC-Live` and restart; 1047 is still installed.
+- **IBC log name now carries the weekday** (`IBC-3.24.2_GATEWAY-1051_WEDNESDAY.txt`; 3.24.0
+  wrote `..._.txt`). `ibkr-common.ps1` `Get-IbcLogPath` resolves the newest file for the
+  installed IBC + Gateway version on every call; the hardcoded `...1047_.txt` paths are gone
+  (login, check-autorestart, restart-observe, test-weekly2fa). test-weekly2fa: 54/0.
+- **PAPER (Docker):** `Dockerfile.gateway` base 10.45.1j → gnzsnz **10.50.1h** stable
+  (`sha256:4f2704a1…`, bundles IBC 3.24.2).
+  - Rebuilt and recreated only `ib-gateway` (in `/home/cap/quant`, deploy-copy backup
+    `Dockerfile.gateway.bak-20261125`). `gateway-login.sh` worked unchanged: login completed
+    10:56:06 ET, and the dashboard confirms the IB connection (`ib-gateway:4004`).
+  - Rollback image: `quant-ib-gateway:10.45.1j-rollback`.
+  - `quant-win-gateway-relay` (same Dockerfile, socat only) picks up the new base at the next
+    LIVE deploy.
+- Unchanged and pre-existing, not from the upgrade:
+  - PAPER "No market data during competing live session" / "different IP" errors: the LIVE
+    login owns market data, and PAPER falls back to yfinance;
+  - **PAPER ghost EEM** (journal open, broker flat) since 2026-11-22, paging daily.
+
+### 🧾 2026-11-23: LIVE position check -- shorts partly closed; dashboard misreported them (fixed in code)
+- Broker (read-only snapshot 15:01 UTC):
+  - **AMLP closed** (BOT 21 @ 48.85 at 09:30 ET, from TWS);
+  - CPER −84, QQQ −8 and SPY −4 still short;
+  - SGOV 384;
+  - no orphan SELL stops resting anymore.
+- **The user's manual cover orders are BUY LMT 3–5% BELOW market** (CPER 33.30 vs 34.51, QQQ
+  617.80 vs 649.46, SPY 697.50 vs 721.03). They fill only on a drop, not a close-now order.
+- Dashboard bugs (guard spec G6.2/G6.3), fixed in `app.py`/`service.py`, pending the LIVE deploy:
+  - "Today's P&L" put the shorts' whole move into "FX (HKD/USD)" (−3,736 on a flat USD/HKD
+    day). It now has an "Untracked (NOT strategy)" line, priced against day-open marks
+    (`service.untracked_day_change`), and the residual is labelled "FX & other".
+  - "Unrealized (open)" ignored the shorts. There's a new "Untracked (open)" tile.
+  - "Invested" counted |shorts| (GPV is absolute). Untracked positions are now excluded.
+  - Test `test_untracked_day_pnl_is_not_fx`; suite 362 passed.
+
 ### 📉 OPEN 2026-11-21: LIVE strategy is underperforming its backtest -- and it's the signals, not the fills
 Full write-up: [RETRO_PERFORMANCE_2026-11-21.md](RETRO_PERFORMANCE_2026-11-21.md). Spec:
 [IBKR_STRATEGY_FIDELITY_SPEC.md](IBKR_STRATEGY_FIDELITY_SPEC.md) (F1 built; F2 run; rest PROPOSED).
@@ -125,6 +173,20 @@ Check then: `weekend-docker.sh status` all running, watchdog.log "hold removed -
 Note: watchdog.ps1 had silently died ~19:35 HKT Sat (cause unknown); relaunched 21:33.
 
 ### 🔑 OPEN 2026-11-21: LIVE gateway needs a YubiKey touch ~daily (26 touches / 31 days, target 1/week)
+
+**Update Tue 2026-11-24 06:00 HKT ([RETRO_2FA_2026-11-24.md](RETRO_2FA_2026-11-24.md)):** still near-daily.
+- The Sun 20:35 weekly touch failed because the YubiKey was not plugged in. The gateway was dark
+  until Mon 21:20, with ~20 overnight pages and then the cap.
+- **IBKR Mobile on the same username** caused 4 `Existing session detected` events Mon 22:58 →
+  Tue 05:34. IBC (`primary`) kicked the phone each time, then IBKR rejected the 05:45 token.
+  The gateway is **down now** and needs a touch before 22:30 HKT.
+- Fixes F1–F5 are proposed and not applied. The biggest is a second IBKR username for the phone.
+- **~13:00 HKT:** F2–F4 are built:
+  - The watchdog waits for the key and launches the login when it is inserted.
+  - One page per outage, plus re-pages at 08:00, 12:00, 18:00 and 21:30.
+  - No prompts or pages 05:00–08:00 HKT.
+  - Suite 54/54. The watchdog needs a restart to load them (pid 19220 is on the old code).
+  - Not committed. Spec §10.
 
 The gateway is **down now** (user reboot 07:25Z today). Its prompt was killed by the Docker
 gateway's competing challenge, and the gateway-down page was `suppressed-cap`. The shared

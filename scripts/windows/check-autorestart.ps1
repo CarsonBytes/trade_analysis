@@ -15,7 +15,8 @@ if (Test-Path $ar) {
 }
 
 # Grep the CURRENT IBC log for the autorestart decision (most recent lines win)
-$ibcLog = 'C:\IBC-Live\Logs\IBC-3.24.0_GATEWAY-1047_.txt'
+. 'D:\quant\scripts\windows\ibkr-common.ps1'
+$ibcLog = Get-IbcLogPath   # version-derived (gateway 1047 -> 1051, 2026-11-25)
 $lines = Select-String -Path $ibcLog -Pattern 'autorestart file|authentication will not be required|full authentication|IBC will autorestart|Cold restart' |
     Select-Object -Last 8
 foreach ($l in $lines) { CLog "IBC: $($l.Line.Trim())" }

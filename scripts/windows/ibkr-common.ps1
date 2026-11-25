@@ -10,7 +10,29 @@
 # Tests inject a clock with $global:IbkrNowOverride (a [datetime] in HKT).
 
 $script:IbkrLogDir   = 'C:\IBC-Live\Logs'
-$script:IbcLogFile   = 'C:\IBC-Live\Logs\IBC-3.24.0_GATEWAY-1047_.txt'
+# The IBC log name embeds the IBC and Gateway versions (IBC-<ibc>_GATEWAY-<major>_.txt), so it
+# is derived from StartGateway.bat's TWS_MAJOR_VRSN and C:\IBC-Live\version instead of being
+# hardcoded: the 2026-11-25 upgrade 1047 -> 1051 (1047 desupported 2026-12-15) would otherwise
+# leave every login/state check reading a stale 1047 log.
+function Get-GatewayMajorVersion {
+    $m = Select-String -Path 'C:\IBC-Live\StartGateway.bat' -Pattern '^\s*set\s+TWS_MAJOR_VRSN=(\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return '1051'
+}
+function Get-IbcLogPath {
+    # IBC 3.24.2 appends the launch weekday (IBC-3.24.2_GATEWAY-1051_WEDNESDAY.txt; 3.24.0 left it
+    # empty), so the current log is the NEWEST file for this IBC + Gateway version. Resolved on
+    # every call, never cached: the long-running watchdog must follow the next day's launch.
+    $ibc = '3.24.2'
+    $x = Get-Content 'C:\IBC-Live\version' -TotalCount 1 -ErrorAction SilentlyContinue
+    if ($x -and $x.Trim()) { $ibc = $x.Trim() }
+    $v = Get-GatewayMajorVersion
+    $f = Get-ChildItem 'C:\IBC-Live\Logs' -Filter "IBC-${ibc}_GATEWAY-${v}_*.txt" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($f) { return $f.FullName }
+    return "C:\IBC-Live\Logs\IBC-${ibc}_GATEWAY-${v}_.txt"
+}
+$script:IbcLogFile   = Get-IbcLogPath
 $script:LauncherLog  = 'C:\Jts-Live\launcher.log'
 $script:LedgerFile   = 'C:\IBC-Live\Logs\touch-ledger.jsonl'
 $script:LaunchFile   = 'C:\IBC-Live\Logs\ibc-launches.txt'
@@ -71,7 +93,7 @@ function Archive-IbcLogs([string]$Tag) {
         if ($newest -and ([DateTime]::UtcNow - $newest.CreationTimeUtc).TotalSeconds -lt 120) { return $newest.FullName }
         $dest = Join-Path $root ('{0}_{1}' -f (Get-HktNow).ToString('yyyyMMdd_HHmmss'), $Tag)
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
-        Copy-Item $script:IbcLogFile -Destination $dest -Force -ErrorAction SilentlyContinue
+        Copy-Item (Get-IbcLogPath) -Destination $dest -Force -ErrorAction SilentlyContinue
         Copy-Item $script:LauncherLog -Destination $dest -Force -ErrorAction SilentlyContinue
         return $dest
     } catch { return $null }
@@ -105,7 +127,7 @@ function Get-IbcState {
         try { if ([IbkrWin]::Find('Second Factor Authentication') -ne [IntPtr]::Zero) { $PromptOpen = 1 } } catch { }
     }
     if ($PromptOpen -eq 1) { return 'prompt-pending' }
-    if ($null -eq $IbcLines) { $IbcLines = @(Get-Content $script:IbcLogFile -Tail 400 -ErrorAction SilentlyContinue) }
+    if ($null -eq $IbcLines) { $IbcLines = @(Get-Content (Get-IbcLogPath) -Tail 400 -ErrorAction SilentlyContinue) }
     if ($null -eq $LauncherLines) { $LauncherLines = @(Get-Content $script:LauncherLog -Tail 1500 -ErrorAction SilentlyContinue) }
     # launcher.log is rewritten per JVM start, so its whole tail belongs to the current JVM.
     $lastStart = -1
@@ -149,12 +171,12 @@ function Get-IbcDownCause {
     $st = Get-IbcState
     switch ($st) {
         'none' {
-            $tail = @(Get-Content $script:IbcLogFile -Tail 60 -ErrorAction SilentlyContinue) -join "`n"
+            $tail = @(Get-Content (Get-IbcLogPath) -Tail 60 -ErrorAction SilentlyContinue) -join "`n"
             if ($tail -match 'IBKR Gateway; event=Closing') { return 'gateway-closed' }
             return 'no-process'
         }
         'logged-out' {
-            $tail = @(Get-Content $script:IbcLogFile -Tail 400 -ErrorAction SilentlyContinue) -join "`n"
+            $tail = @(Get-Content (Get-IbcLogPath) -Tail 400 -ErrorAction SilentlyContinue) -join "`n"
             if ($tail -match 'Re-login is required') { return 'ibkr-relogin' }
             return 'logged-out'
         }
@@ -186,7 +208,10 @@ function Register-IbcLaunch([string]$Who) {
 function Get-WeeklyConfig {
     $c = [ordered]@{ touchDay = 'Sunday'; touchTime = '20:35'; reminderMin = 10
         holdStartDay = 'Saturday'; holdStartTime = '06:00'; boundaryTime = '14:00'
-        reportDay = 'Monday'; reportTime = '09:00' }
+        reportDay = 'Monday'; reportTime = '09:00'
+        # RETRO_2FA_2026-11-24 F3/F4: gateway-down pages -- one per incident, re-page only at
+        # these HKT checkpoints; no prompt and no page inside the quiet window (US market shut).
+        quietStart = '05:00'; quietEnd = '08:00'; repageAt = '08:00,12:00,18:00,21:30' }
     if (Test-Path $script:WeeklyCfg) {
         try {
             $j = Get-Content $script:WeeklyCfg -Raw | ConvertFrom-Json
@@ -231,6 +256,82 @@ function Get-DueWeeklyPhase([datetime]$Now = (Get-HktNow), $State = (Read-Weekly
     if ($Now -ge $w.Touch -and $Now -lt $w.Touch.AddHours(3) -and $State.touchWeek -ne $w.WeekKey) { return 'touch' }
     if ($Now -ge $w.Reminder -and $Now -lt $w.Touch -and $State.reminderWeek -ne $w.WeekKey) { return 'reminder' }
     return ''
+}
+# When weekly-touch.ps1 last paged/launched (HKT), so the watchdog does not page the same incident twice.
+function Get-WeeklyPagedAt {
+    $st = Read-WeeklyState
+    if ($st.touchLaunchedAt) { try { return [datetime]::ParseExact("$($st.touchLaunchedAt)", 'yyyy-MM-dd HH:mm:ss', $null) } catch { } }
+    return $null
+}
+
+# ---------------------------------------------------------------- gateway-down policy (F2-F4)
+# RETRO_2FA_2026-11-24: Sun 20:35 the YubiKey was not plugged in. The watchdog relaunched a login
+# that could not work every hour for 24 h, each with 2 critical pages (~20 overnight, cap hit),
+# and nothing noticed when the key was finally inserted. Then the 05:45 token was rejected and
+# the 05:47 prompt went to a sleeping user. Policy now:
+#   F2  key absent  -> no login launch; page once; poll the key every cycle; launch the moment
+#                      it appears (a human is at the PC: even in the quiet window, no page).
+#   F3  pages       -> one per down incident, then only when a repageAt checkpoint is crossed.
+#                      Re-prompts (login launches) keep their cadence but no longer page.
+#   F4  quiet window-> quietStart..quietEnd HKT: no prompt, no page. The first checkpoint
+#                      (08:00) then brings one prompt + one page if still down.
+# Tests inject the key with $global:IbkrKeyOverride or env IBKR_TEST_KEY ('0'/'1').
+function Test-YubiKeyPresent {
+    if ($null -ne $global:IbkrKeyOverride) { return [bool]$global:IbkrKeyOverride }
+    if ($env:IBKR_TEST_KEY -in '0', '1') { return ($env:IBKR_TEST_KEY -eq '1') }
+    return [bool](Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match '^USB\\VID_1050' } | Select-Object -First 1)
+}
+function ConvertTo-DayMinutes([string]$Hm) { $p = "$Hm".Trim().Split(':'); return [int]$p[0] * 60 + [int]$p[1] }
+function Test-QuietWindow([datetime]$Now = (Get-HktNow), $Cfg = (Get-WeeklyConfig)) {
+    $m = $Now.Hour * 60 + $Now.Minute
+    $s = ConvertTo-DayMinutes $Cfg.quietStart; $e = ConvertTo-DayMinutes $Cfg.quietEnd
+    if ($s -eq $e) { return $false }
+    if ($s -lt $e) { return ($m -ge $s -and $m -lt $e) }
+    return ($m -ge $s -or $m -lt $e)   # window wraps midnight
+}
+# True when a repageAt checkpoint (HKT HH:mm list) lies in ($Since, $Now].
+function Test-RepageDue([datetime]$Since, [datetime]$Now = (Get-HktNow), $Cfg = (Get-WeeklyConfig)) {
+    foreach ($hm in @("$($Cfg.repageAt)" -split '[,; ]+' | Where-Object { $_ })) {
+        $mins = ConvertTo-DayMinutes $hm
+        for ($d = $Since.Date; $d -le $Now.Date; $d = $d.AddDays(1)) {
+            $c = $d.AddMinutes($mins)
+            if ($c -gt $Since -and $c -le $Now) { return $true }
+        }
+    }
+    return $false
+}
+# One call per watchdog cycle while the LIVE gateway is down past grace and NOT in the weekend
+# hold. Pure (no I/O); the watchdog performs the side effects.
+#   KeyPresent  YubiKey present now           KeyWait   key was seen absent in this incident
+#   PagedAt     HKT of this incident's last page ($null = none yet)
+#   PromptDue   the re-prompt cadence allows a login launch now   LoginBusy  a login run is active
+# Returns Launch / Page / Kind (down|checkpoint|nokey|key-inserted) / KeyWait / Ack (treat as
+# paged: a human is present) / Quiet / Note (log line; the caller logs it when it changes).
+function Get-GatewayDownAction([datetime]$Now, [bool]$KeyPresent, [bool]$KeyWait, $PagedAt, [bool]$PromptDue, [bool]$LoginBusy, $Cfg = (Get-WeeklyConfig)) {
+    $quiet = Test-QuietWindow $Now $Cfg
+    $pageDue = (-not $quiet) -and ($null -eq $PagedAt -or (Test-RepageDue ([datetime]$PagedAt) $Now $Cfg))
+    $r = [pscustomobject]@{ Launch = $false; Page = $false; Kind = ''; KeyWait = $KeyWait; Ack = $false; Quiet = $quiet; Note = '' }
+    if (-not $KeyPresent) {
+        $r.KeyWait = $true
+        $r.Note = 'YubiKey NOT plugged in -- no login launched; polling for the key, the login starts when it is inserted'
+        if ($quiet) { $r.Note += " (quiet window: no page until $($Cfg.quietEnd))" }
+        if ($pageDue) { $r.Page = $true; $r.Kind = 'nokey' }
+        return $r
+    }
+    if ($KeyWait) {
+        $r.KeyWait = $false; $r.Kind = 'key-inserted'; $r.Ack = $true
+        if ($LoginBusy) { $r.Note = 'YubiKey inserted; a login run is already in progress' }
+        else { $r.Launch = $true; $r.Note = 'YubiKey inserted -- launching the login now' }
+        return $r
+    }
+    if ($quiet) {
+        $r.Note = "quiet window $($Cfg.quietStart)-$($Cfg.quietEnd) HKT (US market shut) -- no prompt, no page until $($Cfg.quietEnd)"
+        return $r
+    }
+    if ($pageDue) { $r.Page = $true; $r.Kind = $(if ($null -eq $PagedAt) { 'down' } else { 'checkpoint' }) }
+    if ($LoginBusy) { $r.Note = 'login run still in progress (human may be fetching the key) -- waiting' }
+    elseif ($PromptDue -or $r.Page) { $r.Launch = $true }
+    return $r
 }
 
 # ---------------------------------------------------------------- touch ledger
@@ -300,7 +401,7 @@ function Get-FullAuthCause([datetime]$Ts) {
 # Scan the current IBC/launcher logs and append any new full-auth / token-login / warm-restart
 # verdict to the ledger. Idempotent (id = kind + timestamp). Returns the new entries.
 function Update-TouchLedger([string[]]$IbcLines, [string[]]$LauncherLines) {
-    if ($null -eq $IbcLines) { $IbcLines = @(Get-Content $script:IbcLogFile -ErrorAction SilentlyContinue) }
+    if ($null -eq $IbcLines) { $IbcLines = @(Get-Content (Get-IbcLogPath) -ErrorAction SilentlyContinue) }
     if ($null -eq $LauncherLines) { $LauncherLines = @(Get-Content $script:LauncherLog -ErrorAction SilentlyContinue) }
     $have = @{}; $ledger = Read-TouchLedger
     foreach ($e in $ledger) { $have[$e.id] = $true }

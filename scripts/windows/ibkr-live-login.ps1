@@ -65,7 +65,7 @@ function LoginLooksDone {
     if (-not (PortOpen)) { return $false }
     if ([IbkrWin]::Find('Second Factor Authentication') -ne [IntPtr]::Zero) { return $false }
     if ([IbkrWin]::Find('Passkey Authentication') -ne [IntPtr]::Zero) { return $false }
-    $recent = Get-Content 'C:\IBC-Live\Logs\IBC-3.24.0_GATEWAY-1047_.txt' -Tail 80 -ErrorAction SilentlyContinue
+    $recent = Get-Content (Get-IbcLogPath) -Tail 80 -ErrorAction SilentlyContinue
     return [bool]($recent -match 'IBC: Login has completed$')
 }
 function Start-Helper {
@@ -131,13 +131,18 @@ if ($stale.Count -gt 0 -and -not $helperReady) {
     if (-not (Ask "There are $($stale.Count) leftover 'Windows Security' passkey window(s). Click 取消 (Cancel) on each first, then OK here." $true)) { Done 1 'cancelled at stale-dialog warning' }
 }
 $key = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match '^USB\\VID_1050' } | Select-Object -First 1
-if (-not $key) { Done 1 'YubiKey not plugged in -- plug it into a port directly on the PC; no login attempted' -Page }
+if ($env:IBKR_TEST_KEY -eq '0') { $key = $null }
+# No page here (RETRO_2FA_2026-11-24 F2): the watchdog / weekly-touch own the key-absent page
+# (once per incident) and launch the login the moment the key appears. Nov 22-23 this line
+# paged every hour for 24 h.
+if (-not $key) { Done 1 'YubiKey not plugged in -- plug it into a port directly on the PC; no login attempted (the watchdog starts the login when the key appears)' }
 $parent = (Get-PnpDeviceProperty -InstanceId $key.InstanceId -KeyName DEVPKEY_Device_Parent -ErrorAction SilentlyContinue).Data
 if ($parent -and $parent -notmatch 'ROOT_HUB') {
     Log "YubiKey is behind a USB hub ($parent) -- it has never answered through the hub"
     if (-not (Ask 'The YubiKey is on a USB HUB (it never answered through it). Move it to a port on the PC, then click OK.' $true)) { Done 1 'cancelled at hub warning' }
 }
-if (-not (Test-LaunchBudget)) { Done 4 'launch budget exhausted (3 IBC launches in 30 min) -- not launching, IBKR throttles repeated logins; will retry later' -Page }
+# Watchdog re-prompts do not page (F3: the watchdog pages once per incident + checkpoints).
+if (-not (Test-LaunchBudget)) { Done 4 'launch budget exhausted (3 IBC launches in 30 min) -- not launching, IBKR throttles repeated logins; will retry later' -Page:($Reason -ne 'watchdog') }
 
 Archive-IbcLogs 'login' | Out-Null
 Register-IbcLaunch "login:$Reason"

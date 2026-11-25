@@ -4,10 +4,17 @@
 # treats as grounds to recreate dependent services too, confirmed live 2026-08-13) wipes a
 # container's writable layer and any tools installed by hand via `docker exec apt-get install`
 # -- discovered the hard way, twice, mid-session.
-FROM ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+# 2026-11-25: 10.45.1j -> 10.50.1h (stable). IBKR desupports < 1050.1 on 2026-12-15.
+# Previous base (rollback): sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+FROM ghcr.io/gnzsnz/ib-gateway@sha256:4f2704a1ab2ebcd468ac6ca58e2b99d2c6c056b303a3f499b67fc80012ad5a10
 
 USER root
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends xdotool imagemagick \
     && rm -rf /var/lib/apt/lists/*
+# Mount point for the persisted IBC/Gateway settings volume (TWS_SETTINGS_PATH, live compose,
+# 2026-10-06). A named volume mounted on a path the image lacks is created root-owned and the
+# ibgateway user could not write jts.ini or the autorestart token into it; pre-creating it
+# here makes Docker copy this ownership into the empty volume on first mount.
+RUN mkdir -p /home/ibgateway/tws_settings && chown ibgateway:ibgateway /home/ibgateway/tws_settings
 USER ibgateway

@@ -19,7 +19,8 @@ param(
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $ObserveLog = 'C:\IBC-Live\Logs\restart-observe.log'
-$IbcLog     = 'C:\IBC-Live\Logs\IBC-3.24.0_GATEWAY-1047_.txt'
+. 'D:\quant\scripts\windows\ibkr-common.ps1'
+$IbcLog     = Get-IbcLogPath   # version-derived (gateway 1047 -> 1051, 2026-11-25)
 $Launcher   = 'C:\Jts-Live\launcher.log'
 $AutoRst    = 'C:\Jts-Live\ajaninkbfndcbgmelgahgpfcmhmgggpefgeamgbo\autorestart'
 $ArchiveRoot = 'C:\IBC-Live\Logs\archived'

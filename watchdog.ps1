@@ -98,7 +98,10 @@ $relayGraceCycles   = 6
 #    pages nobody (digest only) -- markets are shut and IBKR's Sunday reset voids any session
 #    made before it. weekly-touch.ps1 prompts at the planned time.
 #  - weekly phases (reminder / touch / Monday report) are dispatched from this loop.
-#  - after 2h down, re-prompt + page only hourly (anti-storm; IBKR throttles repeated logins).
+#  - after 2h down, re-prompt only hourly (anti-storm; IBKR throttles repeated logins).
+#  - RETRO_2FA_2026-11-24 F2-F4 (ibkr-common.ps1 Get-GatewayDownAction): key absent -> no
+#    launch, poll the key, launch on insert; ONE page per incident + checkpoint re-pages
+#    (08:00/12:00/18:00/21:30 HKT); quiet window 05:00-08:00 HKT: no prompt, no page.
 #  - the touch ledger is refreshed every ~5 min; failing \IBKR\* tasks page (hourly check).
 $freezeAfterCycles = 360   # 2h
 $freezeEveryCycles = 180   # then every 1h
@@ -129,10 +132,14 @@ function Test-LoginInProgress {
     return [bool]$p
 }
 
-function Start-WeeklyPhase($phase) {
-    $running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+function Test-WeeklyPhaseRunning {
+    $p = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'weekly-touch\.ps1' }
-    if ($running) { return }
+    return [bool]$p
+}
+
+function Start-WeeklyPhase($phase) {
+    if (Test-WeeklyPhaseRunning) { return }
     try {
         Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -270,6 +277,12 @@ $gwCooldown = 0                 # cycles before we may re-launch/re-alert
 $relayFail = 0
 $relayCooldown = 0
 $cycle = 0
+# per down incident (F2-F4)
+$gwSince = $null                # HKT the incident started
+$gwCause = 'unknown'
+$gwPagedAt = $null              # HKT of the incident's last page
+$gwKeyWait = $false             # key seen absent -> launch on insert
+$gwNote = ''                    # last policy note logged (log on change only)
 
 Write-Log ("watchdog started (every ${checkIntervalSec}s; paper:18080, live:18081; " +
            "container grace ${containerGraceCycles} cycles, WSL grace ${wslGraceCycles}, " +
@@ -309,6 +322,7 @@ while ($true) {
                 Send-Alert "error" "gateway:recovered" "LIVE gateway recovered (4001+IBC)"
             } elseif ($gwFail -gt 0) { Write-Log "LIVE gateway responding again" }
             $gwFail = 0
+            $gwSince = $null; $gwPagedAt = $null; $gwKeyWait = $false; $gwNote = ''
         } else {
             $gwFail++
             if ($gwFail -eq 1) {
@@ -320,38 +334,51 @@ while ($true) {
                     @{ sinceHkt = (Get-HktNow).AddSeconds(-$gatewayGraceCycles * $checkIntervalSec).ToString('yyyy-MM-dd HH:mm:ss'); cause = $cause } |
                         ConvertTo-Json | Set-Content 'C:\IBC-Live\Logs\gateway-down.state.json' -Encoding UTF8
                 } catch { }
-                $gwCooldown = $actionCooldownCycles
+                $gwSince = (Get-HktNow).AddSeconds(-$gatewayGraceCycles * $checkIntervalSec)
+                $gwCause = $cause; $gwPagedAt = $null; $gwKeyWait = $false; $gwNote = ''
+                $gwCooldown = 0
                 if ($hold) {
                     $wk = Get-WeeklyWindow
                     Write-Log "LIVE gateway down (cause=$cause) during the WEEKEND HOLD -- no login, no page; weekly touch at $(Format-Hkt $wk.Touch)"
                     Send-Alert "error" "gateway:hold" "LIVE gateway down (cause=$cause) during weekend hold -- weekly touch at $(Format-Hkt $wk.Touch)"
                 } else {
-                    Write-Log "LIVE gateway still down after grace (cause=$cause) -- toast + critical alert + launch passkey prompt"
-                    Show-Toast "LIVE IB Gateway down" "No API on 4001 / IBC not running ($cause) -- launching the passkey prompt; touch the YubiKey when it appears."
-                    Send-Alert "critical" "gateway:ibc4001" "LIVE gateway down >2min (cause=$cause) -- launching the passkey login; touch the YubiKey"
-                    if (Test-LoginInProgress) {
-                        Write-Log "a login attempt is already in progress (autostart/manual) -- not double-launching"
-                    } elseif (Start-LiveLogin) {
-                        Write-Log "auto-launched ibkr-live-login.ps1 (gateway-down incident)"
-                    }
+                    Write-Log "LIVE gateway still down after grace (cause=$cause)"
                 }
-            } elseif ($gwFail -gt $gatewayGraceCycles -and $gwCooldown -le 0) {
-                # Still down ~5min after the last action: re-prompt ONLY if no login attempt is
-                # running (login guards adopt a pending prompt instead of duplicating IBC).
-                # Weekend hold: silent (weekly-touch prompts at T). After 2h: hourly only.
-                $gwCooldown = $actionCooldownCycles
-                $mins = [int]($gwFail * $checkIntervalSec / 60)
+            }
+            # Policy every cycle past grace (F2-F4). Weekend hold: silent (weekly-touch prompts at
+            # T). While weekly-touch.ps1 runs it owns the prompt and the page -- stand aside.
+            if ($gwFail -ge $gatewayGraceCycles -and -not $hold -and -not (Test-WeeklyPhaseRunning)) {
+                if ($null -eq $gwSince) { $gwSince = (Get-HktNow).AddSeconds(-$gwFail * $checkIntervalSec) }
+                if ($null -eq $gwPagedAt) {
+                    # weekly-touch already paged/launched for this incident -> that was the page
+                    $wp = $null; try { $wp = Get-WeeklyPagedAt } catch { }
+                    if ($wp -and $wp -ge $gwSince) { $gwPagedAt = $wp }
+                }
                 $frozen = ($gwFail -ge $freezeAfterCycles) -and ((($gwFail - $freezeAfterCycles) % $freezeEveryCycles) -ge $actionCooldownCycles)
-                if ($hold -or $frozen) {
-                    # deliberately quiet
-                } elseif (Test-LoginInProgress) {
-                    Write-Log "gateway still down; login still in progress (human may be fetching the key) -- waiting"
-                } else {
-                    $tag = if ($gwFail -ge $freezeAfterCycles) { ' (down 2h+, hourly re-prompts now -- needs a human)' } else { '' }
-                    Write-Log "gateway still down after ${mins}min and no login in progress -- re-launching passkey prompt$tag"
-                    Send-Alert "critical" "gateway:ibc4001" "LIVE gateway still down after ${mins}min -- re-launching the passkey login$tag"
-                    Show-Toast "LIVE IB Gateway still down" "Re-launching the passkey prompt -- touch the YubiKey when it appears."
-                    if (Start-LiveLogin) { Write-Log "auto-launched ibkr-live-login.ps1 (re-prompt)" }
+                $now = Get-HktNow
+                $act = Get-GatewayDownAction $now (Test-YubiKeyPresent) $gwKeyWait $gwPagedAt (($gwCooldown -le 0) -and -not $frozen) (Test-LoginInProgress)
+                $gwKeyWait = $act.KeyWait
+                if ($act.Note -and $act.Note -ne $gwNote) { Write-Log $act.Note }
+                $gwNote = $act.Note
+                if ($act.Ack) { $gwPagedAt = $now }
+                $mins = [int]($gwFail * $checkIntervalSec / 60)
+                $hrs = '{0:N1}h' -f ($mins / 60)
+                if ($act.Page) {
+                    $gwPagedAt = $now
+                    $pm = switch ($act.Kind) {
+                        'nokey'      { "LIVE gateway down (cause=$gwCause, since $(Format-Hkt $gwSince)) and the YubiKey is NOT plugged in -- plug it into a port on the PC; the login starts by itself" }
+                        'checkpoint' { "LIVE gateway STILL down ($hrs, since $(Format-Hkt $gwSince), cause=$gwCause) -- passkey prompt re-launched; touch the YubiKey" }
+                        default      { "LIVE gateway down >2min (cause=$gwCause) -- launching the passkey login; touch the YubiKey" }
+                    }
+                    Write-Log "PAGE ($($act.Kind)): $pm"
+                    Send-Alert "critical" "gateway:ibc4001" $pm
+                    if ($act.Kind -eq 'nokey') { Show-Toast "LIVE IB Gateway down -- YubiKey not plugged in" "Plug the YubiKey into a port on the PC; the passkey login starts by itself." }
+                }
+                if ($act.Launch) {
+                    $gwCooldown = $actionCooldownCycles
+                    $tag = if ($act.Kind -eq 'key-inserted') { 'key inserted' } elseif ($act.Page) { "page: $($act.Kind)" } elseif ($gwFail -ge $freezeAfterCycles) { 'hourly re-prompt, down 2h+' } else { 're-prompt' }
+                    Show-Toast "LIVE IB Gateway down" "Launching the passkey prompt -- touch the YubiKey when it appears."
+                    if (Start-LiveLogin) { Write-Log "auto-launched ibkr-live-login.ps1 (down ${mins}min; $tag)" }
                 }
             }
         }

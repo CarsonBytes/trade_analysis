@@ -67,7 +67,7 @@ TC 'router launcher guard is HKT (dry run: 04:30 skip, 05:30 reboot)' {
     Need ($b -match 'HKT WOULD REBOOT') "05:30: $b"
 }
 TC 'gateway JVM pinned to HKT (vmoptions)' {
-    Need ([bool](Select-String -Path 'C:\Jts\ibgateway\1047\ibgateway.vmoptions' -Pattern '^-Duser\.timezone=Asia/Hong_Kong$')) 'missing -Duser.timezone=Asia/Hong_Kong'
+    Need ([bool](Select-String -Path "C:\Jts\ibgateway\$(Get-GatewayMajorVersion)\ibgateway.vmoptions" -Pattern '^-Duser\.timezone=Asia/Hong_Kong$')) 'missing -Duser.timezone=Asia/Hong_Kong'
 }
 TC 'login: every MessageBox is inside Ask(), and Ask() returns early under -Unattended' {
     $a = Ast (Join-Path $win 'ibkr-live-login.ps1')
@@ -244,8 +244,100 @@ TC 'weekly-touch -DryRun decides and changes nothing' {
     $after = if (Test-Path $script:WeeklyState) { Get-Content $script:WeeklyState -Raw } else { '' }
     Need ($before -eq $after) 'state file changed'
     $last = Get-Content 'C:\IBC-Live\Logs\weekly-touch.log' -Tail 1
-    Need ($last -match 'decision=(login|cold|skip)') "log: $last"
+    Need ($last -match 'decision=(login|cold|skip|nokey-wait|nokey-keep) .*keyPresent=') "log: $last"
     $last
+}
+TC 'weekly-touch -DryRun with the key absent: no login launched (F2)' {
+    $env:IBKR_TEST_KEY = '0'
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $win 'weekly-touch.ps1') -Phase touch -DryRun | Out-Null
+        $last = Get-Content 'C:\IBC-Live\Logs\weekly-touch.log' -Tail 1
+        Need ($last -match 'decision=(nokey-wait|nokey-keep|skip) .*keyPresent=False') "log: $last"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $win 'weekly-touch.ps1') -Phase reminder -DryRun | Out-Null
+        $rem = Get-Content 'C:\IBC-Live\Logs\weekly-touch.log' -Tail 1
+        Need ($rem -match 'keyPresent=False\): .*NOT PLUGGED IN') "reminder: $rem"
+    } finally { Remove-Item Env:\IBKR_TEST_KEY -ErrorAction SilentlyContinue }
+    ($last -replace '^.*decision=', 'decision=')
+}
+
+# ---- 8b. gateway-down policy: key wait, one page per incident, quiet window (RETRO_2FA_2026-11-24 F2-F4)
+$cfg = Get-WeeklyConfig
+function Act($now, $key, $wait, $paged, $due, $busy) {
+    Get-GatewayDownAction ([datetime]$now) $key $wait $(if ($paged) { [datetime]$paged } else { $null }) $due $busy $cfg
+}
+TC 'F4 quiet window is 05:00-08:00 HKT, outside US RTH 22:30-05:00' {
+    Need ($cfg.quietStart -eq '05:00' -and $cfg.quietEnd -eq '08:00') "config $($cfg.quietStart)-$($cfg.quietEnd)"
+    foreach ($c in @(@('2026-11-24 04:59', $false), @('2026-11-24 05:00', $true), @('2026-11-24 05:47', $true),
+                     @('2026-11-24 07:59', $true), @('2026-11-24 08:00', $false), @('2026-11-24 22:30', $false))) {
+        Need ((Test-QuietWindow ([datetime]$c[0]) $cfg) -eq $c[1]) "$($c[0]) -> expected $($c[1])"
+    }
+}
+TC 'F3 re-page checkpoints: crossed only between pages' {
+    $cases = @(
+        @('2026-11-24 05:47', '2026-11-24 07:59', $false), @('2026-11-24 05:47', '2026-11-24 08:00', $true),
+        @('2026-11-24 08:00', '2026-11-24 11:59', $false), @('2026-11-24 08:00', '2026-11-24 12:00', $true),
+        @('2026-11-24 18:00', '2026-11-24 21:29', $false), @('2026-11-24 18:00', '2026-11-24 21:30', $true),
+        @('2026-11-23 21:31', '2026-11-24 07:00', $false), @('2026-11-23 21:31', '2026-11-24 08:05', $true))
+    foreach ($c in $cases) { Need ((Test-RepageDue ([datetime]$c[0]) ([datetime]$c[1]) $cfg) -eq $c[2]) "$($c[0]) -> $($c[1]) expected $($c[2])" }
+}
+TC 'F4 replay Tue Nov 24: rejected 05:45 token -> no prompt/page until 08:00, then one of each' {
+    $a = Act '2026-11-24 05:47' $true $false $null $true $false
+    Need (-not $a.Launch -and -not $a.Page -and $a.Quiet) "05:47 launch=$($a.Launch) page=$($a.Page)"
+    $a = Act '2026-11-24 07:59' $true $false $null $true $false
+    Need (-not $a.Launch -and -not $a.Page) '07:59 acted'
+    $a = Act '2026-11-24 08:00' $true $false $null $false $false
+    Need ($a.Launch -and $a.Page -and $a.Kind -eq 'down') "08:00 launch=$($a.Launch) page=$($a.Page) kind=$($a.Kind)"
+}
+TC 'F3 replay: re-prompts after the first page do not page; checkpoint re-pages once' {
+    $p = '2026-11-24 08:00'
+    foreach ($t in '2026-11-24 08:05', '2026-11-24 09:00', '2026-11-24 10:57', '2026-11-24 11:59') {
+        $a = Act $t $true $false $p $true $false
+        Need ($a.Launch -and -not $a.Page) "$t launch=$($a.Launch) page=$($a.Page)"
+    }
+    $a = Act '2026-11-24 12:00' $true $false $p $false $false
+    Need ($a.Page -and $a.Kind -eq 'checkpoint' -and $a.Launch) "12:00 page=$($a.Page) kind=$($a.Kind)"
+    $a = Act '2026-11-24 12:20' $true $false $p $true $true
+    Need (-not $a.Launch) 'launched while a login run is busy'
+}
+TC 'F2 replay Sun Nov 22 20:35: key absent -> one page, no launches, launch on insert' {
+    $a = Act '2026-11-22 21:35' $false $false $null $true $false
+    Need ($a.Page -and $a.Kind -eq 'nokey' -and -not $a.Launch -and $a.KeyWait) "first: page=$($a.Page) launch=$($a.Launch)"
+    $pages = 0; $launches = 0; $t = [datetime]'2026-11-22 21:35:20'
+    while ($t -lt [datetime]'2026-11-23 21:19') {
+        $a = Act $t $false $true '2026-11-22 21:35' $true $false
+        if ($a.Page) { $pages++ }; if ($a.Launch) { $launches++ }
+        $t = $t.AddMinutes(10)
+    }
+    Need ($launches -eq 0) "$launches launches while the key was absent (Nov 22-23: 24)"
+    # checkpoints crossed in 23.7 h: 08:00, 12:00, 18:00 (each re-pages once per crossing in the
+    # real loop because PagedAt advances; here PagedAt is pinned, so count crossings separately)
+    $cross = 0; $last = [datetime]'2026-11-22 21:35'; $t = $last.AddMinutes(10)
+    while ($t -lt [datetime]'2026-11-23 21:19') {
+        $a = Act $t $false $true $last $true $false
+        if ($a.Page) { $cross++; $last = $t }
+        $t = $t.AddMinutes(10)
+    }
+    Need ($cross -eq 3) "$cross re-pages over the night/day (expected 3: 08:00 12:00 18:00; Nov 22-23: ~40)"
+    $a = Act '2026-11-23 21:19' $true $true '2026-11-23 18:00' $false $false
+    Need ($a.Launch -and -not $a.Page -and -not $a.KeyWait -and $a.Ack -and $a.Kind -eq 'key-inserted') "insert: launch=$($a.Launch) page=$($a.Page)"
+    $a = Act '2026-11-24 06:10' $true $true $null $false $false
+    Need ($a.Launch -and -not $a.Page) 'key inserted inside the quiet window must still launch (human present)'
+    $a = Act '2026-11-24 06:10' $false $false $null $true $false
+    Need (-not $a.Page -and -not $a.Launch -and $a.KeyWait) 'key absent in the quiet window must not page'
+    "1 page + $cross checkpoint re-pages, 0 launches, launch on insert"
+}
+TC 'F2 login script: key absent pages nobody' {
+    $src = Get-Content (Join-Path $win 'ibkr-live-login.ps1') -Raw
+    $line = ($src -split "`n" | Where-Object { $_ -match "Done 1 'YubiKey not plugged in" }) -join ''
+    Need ($line -and $line -notmatch '-Page') "key-absent Done still pages: $line"
+    $b = ($src -split "`n" | Where-Object { $_ -match 'launch budget exhausted' }) -join ''
+    Need ($b -match "-Page:\(\`$Reason -ne 'watchdog'\)") "budget page not gated: $b"
+}
+TC 'F2-F4 wired into the watchdog loop' {
+    $src = Get-Content (Join-Path $repo 'watchdog.ps1') -Raw
+    Need ($src -match 'Get-GatewayDownAction') 'watchdog does not call Get-GatewayDownAction'
+    Need ($src -match 'Test-YubiKeyPresent') 'watchdog does not poll the key'
+    Need ($src -notmatch 're-launching the passkey login\$tag') 'old per-re-prompt page still present'
 }
 
 # ---- 9. live health --------------------------------------------------------------------------

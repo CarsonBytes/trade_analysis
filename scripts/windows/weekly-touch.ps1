@@ -10,6 +10,9 @@
 #                      gateway logged in (token survived the boundary)  -> conditional cold:
 #                        stop IBC now and log in, so IBKR cannot force it mid-week instead
 #                      otherwise                                         -> launch the login
+#                    YubiKey absent (F2, RETRO_2FA_2026-11-24): never launch or cold-stop;
+#                      nokey-wait = page once, the watchdog launches the login on insert;
+#                      nokey-keep = session still logged in, keep it
 #   -Phase report    Mon 09:00 HKT: last 7 days from the touch ledger (planned/unplanned,
 #                    warm-restart verdicts). Any unplanned touch -> critical; else digest.
 #
@@ -33,30 +36,57 @@ Log ("start: now={0} touch={1} boundary={2} week={3}" -f (Format-Hkt $now), (For
 
 switch ($Phase) {
     'reminder' {
-        if ($st.reminderWeek -eq $w.WeekKey) { Log 'already sent this week'; exit 0 }
-        $msg = "Weekly IBKR YubiKey touch at {0} (in {1} min). Key in a port directly on the PC, not the hub." -f (Format-Hkt $w.Touch), [int]($w.Touch - $now).TotalMinutes
-        Log "reminder: $msg"
+        if ($st.reminderWeek -eq $w.WeekKey -and -not $DryRun) { Log 'already sent this week'; exit 0 }
+        # F2 (RETRO_2FA_2026-11-24): Nov 22 the reminder said "key in a port" without checking.
+        $hasKey = Test-YubiKeyPresent
+        if ($hasKey) {
+            $msg = "Weekly IBKR YubiKey touch at {0} (in {1} min). Key in a port directly on the PC, not the hub." -f (Format-Hkt $w.Touch), [int]($w.Touch - $now).TotalMinutes
+            $title = 'IBKR weekly touch soon'
+        } else {
+            $msg = "Weekly IBKR YubiKey touch at {0} (in {1} min) -- the YubiKey is NOT PLUGGED IN. Plug it into a port directly on the PC now." -f (Format-Hkt $w.Touch), [int]($w.Touch - $now).TotalMinutes
+            $title = 'IBKR weekly touch soon -- KEY NOT PLUGGED IN'
+        }
+        Log "reminder (keyPresent=$hasKey): $msg"
         if (-not $DryRun) {
             $st.reminderWeek = $w.WeekKey; Save-WeeklyState $st
-            Show-IbkrToast 'IBKR weekly touch soon' $msg
+            Show-IbkrToast $title $msg
             Send-GatewayAlert 'critical' 'weekly-touch:reminder' $msg
         }
         exit 0
     }
     'touch' {
-        if ($st.touchWeek -eq $w.WeekKey) { Log 'already handled this week'; exit 0 }
-        try { $null = Update-TouchLedger } catch { }
+        if ($st.touchWeek -eq $w.WeekKey -and -not $DryRun) { Log 'already handled this week'; exit 0 }
+        if (-not $DryRun) { try { $null = Update-TouchLedger } catch { } }
         $logged = Test-IbApiHandshake -HostName '127.0.0.1' -Port 4001 -TimeoutSec 6
         $sat = Test-WeekSatisfied $now
+        $hasKey = Test-YubiKeyPresent
         if ($sat -and $logged) { $action = 'skip' }
-        elseif ($logged) { $action = 'cold' }
-        else { $action = 'login' }
-        Log ("decision={0} (loggedIn={1}, weekSatisfied={2})" -f $action, $logged, $sat)
+        elseif ($logged) { $action = $(if ($hasKey) { 'cold' } else { 'nokey-keep' }) }
+        else { $action = $(if ($hasKey) { 'login' } else { 'nokey-wait' }) }
+        Log ("decision={0} (loggedIn={1}, weekSatisfied={2}, keyPresent={3})" -f $action, $logged, $sat, $hasKey)
         if ($DryRun) { exit 0 }
         $st.touchWeek = $w.WeekKey
         if ($action -eq 'skip') {
             Save-WeeklyState $st
             Send-GatewayAlert 'error' 'weekly-touch:skipped' 'weekly touch not needed: already re-authenticated since the Sunday boundary'
+            exit 0
+        }
+        if ($action -eq 'nokey-keep') {
+            # Never stop a WORKING session when nobody can touch: keep it; IBKR may force the
+            # re-auth later in the week and the watchdog handles that (F2).
+            Save-WeeklyState $st
+            Send-GatewayAlert 'critical' 'weekly-touch:nokey' 'Weekly IBKR touch skipped: the YubiKey is NOT plugged in. The current session keeps running; IBKR may force a re-login later this week -- leave the key plugged in.'
+            exit 0
+        }
+        if ($action -eq 'nokey-wait') {
+            # F2: do not launch a login that cannot work. Page once; the watchdog polls the key
+            # and launches the login the moment it is inserted (touchLaunchedAt = this page, so
+            # the watchdog does not page the same incident again).
+            $st.touchLaunchedAt = (Get-HktNow).ToString('yyyy-MM-dd HH:mm:ss'); Save-WeeklyState $st
+            $m = 'Weekly IBKR touch due NOW but the YubiKey is NOT plugged in -- plug it into a port directly on the PC; the login starts by itself when the key is detected'
+            Show-IbkrToast 'IBKR weekly touch -- KEY NOT PLUGGED IN' $m
+            Send-GatewayAlert 'critical' 'weekly-touch:nokey' $m
+            Log 'no key: paged; the watchdog launches the login when the key appears'
             exit 0
         }
         $st.touchLaunchedAt = (Get-HktNow).ToString('yyyy-MM-dd HH:mm:ss'); Save-WeeklyState $st
