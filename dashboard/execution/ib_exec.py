@@ -40,6 +40,8 @@ from dashboard.data import contracts
 from dashboard.instruments import FUT_BY_KEY, active_by_key
 from dashboard.core.log import log
 
+_LIVE_WARNED = False   # log the REAL MONEY banner once per process, not per _guard() call
+
 MIRROR_METHOD = "ATR rr3.0"   # the one live variant we execute (same as MT5 exec)
 SLEEVE_MAX_SPREAD_PCT = 0.005  # 0.5% of mid -- skip a sleeve entry if the live bid-ask spread
                                # is wider than this (VIX-panic spreads can blow out 5-10x vs a
@@ -703,7 +705,13 @@ def _guard():
             log.warning("ib_exec: IB_ALLOW_LIVE set but IB_PORT %s is not a live port -- refusing",
                         port)
             return None
-        log.warning("ib_exec: LIVE trading ENABLED for %s (IB_ALLOW_LIVE) -- REAL MONEY", acct)
+        # 2026-10-14: log the REAL MONEY banner once per process, not on every _guard() call
+        # (it used to fire ~2x/refresh, flooding the log: 126 of 237 lines in 30 min were this
+        # one warning, burying real alerts).
+        global _LIVE_WARNED
+        if not _LIVE_WARNED:
+            log.warning("ib_exec: LIVE trading ENABLED for %s (IB_ALLOW_LIVE) -- REAL MONEY", acct)
+            _LIVE_WARNED = True
     with ib_client._LOCK:
         return ib_client._ensure_conn()
 
