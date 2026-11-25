@@ -137,6 +137,49 @@ def _score_one(inst):
     return inst.key, score, source, live_px, live_src, spread, age, spark
 
 
+UNTRACKED_DAY_OPEN_KEY = "untracked_day_open"
+
+
+def untracked_day_change(rows: list[dict], day_open: dict | None, today: str,
+                         usd_to_base: float, base_ccy: str) -> tuple[float, dict]:
+    """PURE (G6.2, 2026-11-23): today's P&L (base ccy) of positions the strategy doesn't own,
+    priced against the day-open marks. -> (pnl, day_open_to_store). The first call on a new
+    day records the open marks (pnl 0); symbols that appear later in the day are added at
+    their first mark. A symbol closed during the day drops out (its move stays in the
+    'FX & other' residual)."""
+    snap = dict(day_open or {})
+    if snap.get("date") != today:
+        snap = {"date": today, "marks": {}}
+    marks = dict(snap.get("marks") or {})
+    pnl = 0.0
+    for r in rows or []:
+        sym, qty, px = r.get("symbol"), float(r.get("qty") or 0.0), r.get("market_price")
+        if not sym or px is None or not qty:
+            continue
+        if sym not in marks:
+            marks[sym] = [qty, float(px)]
+            continue
+        open_qty, open_px = marks[sym]
+        q = qty if abs(qty - float(open_qty)) < 1e-9 else min(qty, float(open_qty), key=abs)
+        move = q * (float(px) - float(open_px))
+        pnl += move if (r.get("currency") or "USD") == base_ccy else move * usd_to_base
+    snap["marks"] = marks
+    return pnl, snap
+
+
+def untracked_day_pnl(rows: list[dict], today: str, usd_to_base: float, base_ccy: str) -> float:
+    """untracked_day_change() with the day-open snapshot persisted in the cache. Never raises."""
+    try:
+        snap, _ts = store.cache_get(UNTRACKED_DAY_OPEN_KEY)
+        pnl, new_snap = untracked_day_change(rows, snap, today, usd_to_base, base_ccy)
+        if new_snap != snap:
+            store.cache_set(UNTRACKED_DAY_OPEN_KEY, new_snap)
+        return pnl
+    except Exception as e:                             # noqa: BLE001
+        log.debug("untracked day pnl failed: %s", e)
+        return 0.0
+
+
 # ---- pure sanity-guard logic (no I/O -- unit-testable in isolation) --------------------
 def is_nl_implausible(new_nl: float, prev_nl: float | None, lo: float = 0.5, hi: float = 2.0) -> bool:
     """Does a new NetLiquidation reading look wrong relative to the last known-good value?
@@ -539,8 +582,17 @@ def compute_today_pnl() -> dict:
             except Exception:                              # noqa: BLE001
                 continue
         trading_change = total_equity_change - flows_today
-        # FX = residual after removing strategy + SGOV + interest from the trading change
-        fx_impact = trading_change - strategy_total - sgov_pnl - interest_daily
+        # --- untracked positions (guard spec G6.2, ADDED 2026-11-23) ---
+        # Positions the strategy doesn't own (the unintended shorts) had no line here, so their
+        # whole daily move landed in the "FX" residual: on 2026-11-23 the panel showed
+        # "FX (HKD/USD): HKD -3,736" on a day USD/HKD barely moved -- it was the shorts losing
+        # as the market rallied. Price them against a day-open snapshot of their marks.
+        untracked_pnl = untracked_day_pnl(STATE.get("untracked_positions") or [],
+                                          today_date.isoformat(), usd_to_base, ccy)
+        out["untracked"] = {"pnl": round(untracked_pnl, 2)}
+        # FX & other = residual after removing strategy + SGOV + interest + untracked. Still
+        # catches what nothing above can see (an untracked position CLOSED today, FX).
+        fx_impact = trading_change - strategy_total - sgov_pnl - interest_daily - untracked_pnl
         out["fx"] = {"impact": round(fx_impact, 2)}
 
         # --- total (excludes cash deposits/withdrawals) ---
@@ -554,7 +606,8 @@ def compute_today_pnl() -> dict:
         }
 
         # --- breakdown (for stacked bar) ---
-        total_abs = abs(strategy_total) + abs(sgov_pnl) + abs(interest_daily) + abs(fx_impact)
+        total_abs = (abs(strategy_total) + abs(sgov_pnl) + abs(interest_daily)
+                     + abs(untracked_pnl) + abs(fx_impact))
         if total_abs > 0:
             out["breakdown"] = [
                 {"label": "Strategy", "value": round(strategy_total, 2),
@@ -563,9 +616,13 @@ def compute_today_pnl() -> dict:
                  "pct": round(sgov_pnl / total_abs * 100, 1)},
                 {"label": "Interest", "value": round(interest_daily, 2),
                  "pct": round(interest_daily / total_abs * 100, 1)},
-                {"label": "FX", "value": round(fx_impact, 2),
+                {"label": "FX & other", "value": round(fx_impact, 2),
                  "pct": round(fx_impact / total_abs * 100, 1)},
             ]
+            if abs(untracked_pnl) > 0.005:
+                out["breakdown"].insert(1, {
+                    "label": "Untracked (not strategy)", "value": round(untracked_pnl, 2),
+                    "pct": round(untracked_pnl / total_abs * 100, 1)})
 
         # --- per-position today P&L ---
         _day_snap_data, _ = store.cache_get("position_day_open")

@@ -1457,7 +1457,12 @@ def portfolio_panel() -> None:
     sgov_rate = (_tb - 0.07) if _tb else None           # SGOV ≈ ^IRX minus 0.07% fee
     ib_rate = max(_tb - 0.55, 0.0) if _tb else None     # IB pays ~benchmark-0.5% (3.12% @ IRX 3.67)
     sgov_yld = f"~{sgov_rate:.1f}%" if sgov_rate else "~T-bill rate"
-    invested = (gpv - sgov_base) if gpv is not None else None   # strategy deployment ex-SGOV
+    # strategy deployment = GPV minus the SGOV shield minus |untracked| positions. FIXED
+    # 2026-11-23: GrossPositionValue is an ABSOLUTE sum, so the HKD ~86k of unintended shorts
+    # used to show up as "Invested" capital.
+    _untr_abs = sum(abs(_to_base(r, "market_value", usd_to_base, ccy))
+                    for r in (service.STATE.get("untracked_positions") or []))
+    invested = (gpv - sgov_base - _untr_abs) if gpv is not None else None
 
     with ui.row().classes("items-baseline gap-3"):
         ui.label("Portfolio").classes("text-lg font-bold")
@@ -1520,10 +1525,23 @@ def portfolio_panel() -> None:
         if gpv is not None and gpv > 0:
             _stat("Unrealized (open)", _money(upnl),
                   "text-green" if upnl >= 0 else "text-red",
-                  "P&L of currently open positions (USD converted at the HKD peg)")
+                  "P&L of the STRATEGY's open positions (USD converted at the HKD peg)")
+            # FIXED 2026-11-23 (guard spec G6.3): positions the strategy doesn't own (e.g. the
+            # unintended shorts) were in neither tile -- "Unrealized (open)" read HKD 0 while
+            # they carried +HKD 4.3k, and their ABSOLUTE value was counted as "Invested"
+            # (GrossPositionValue sums |shorts|). Show them on their own and keep them out of
+            # Invested.
+            _u_rows = service.STATE.get("untracked_positions") or []
+            if _u_rows:
+                _u_upnl = sum(_to_base(r, "unrealized_pnl", usd_to_base, ccy) for r in _u_rows)
+                _stat("Untracked (open)", _money(_u_upnl),
+                      "text-green" if _u_upnl >= 0 else "text-red",
+                      "Unrealized P&L of positions the strategy does NOT own -- see the "
+                      "'Untracked broker positions' card above. Not strategy profit.")
             if invested is not None:
                 _stat("Invested", _money(invested), "text-grey-9",
-                      "Market value of strategy ETF positions (excludes SGOV cash parking)")
+                      "Market value of strategy ETF positions (excludes SGOV cash parking "
+                      "and untracked positions)")
         else:
             ui.label("Fully in cash — no open positions").classes(
                 "text-sm text-grey-6 self-center")
@@ -2522,10 +2540,12 @@ def today_pnl_panel() -> None:
         with ui.column().classes("gap-0"):
             s_u = strategy.get("unrealized", 0)
             s_r = strategy.get("realized", 0)
+            u_today = (data.get("untracked") or {}).get("pnl", 0)   # G6.2, 2026-11-23
             for val, lbl in [
                 (s_u, "Strategy (unrealized)"),
                 (s_r, "Strategy (realized)"),
-                (sgov.get("pnl", 0), "SGOV yield"),
+                (u_today, "Untracked (NOT strategy)"),
+                (sgov.get("pnl", 0), "Cash shield yield"),
                 (interest.get("daily", 0), "Interest"),
             ]:
                 if val == 0:
@@ -2538,7 +2558,7 @@ def today_pnl_panel() -> None:
                     ui.label(f"{_money(val)}").classes(f"text-xs font-bold {ic}")
 
             # subtotal (everything except FX)
-            sub = s_u + s_r + sgov.get("pnl", 0) + interest.get("daily", 0)
+            sub = s_u + s_r + u_today + sgov.get("pnl", 0) + interest.get("daily", 0)
             with ui.row().classes("items-center gap-2 border-t border-grey-3 mt-1 pt-1"):
                 ui.label("Subtotal:").classes("text-xs font-bold text-grey-6 w-40")
                 sub_c = "text-green" if sub >= 0 else "text-red"
@@ -2550,7 +2570,7 @@ def today_pnl_panel() -> None:
                 fx_c = "text-green" if fx_val >= 0 else "text-red"
                 with ui.row().classes("items-center gap-2"):
                     ui.label("~").classes("text-xs text-grey-4 w-40 text-right")
-                    ui.label(f"FX (HKD/USD): {_money(fx_val)}").classes(
+                    ui.label(f"FX & other: {_money(fx_val)}").classes(
                         f"text-xs {fx_c} text-grey-4")
 
         # --- per-position today ---

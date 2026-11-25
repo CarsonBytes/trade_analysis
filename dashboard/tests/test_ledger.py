@@ -154,6 +154,23 @@ def test_kill_rule():
     check("slightly positive / noisy -> ok (no halt on noise)", kill_rule(noisy)["verdict"], "ok")
 
 
+def test_untracked_day_pnl_is_not_fx():
+    print("\nG6.2 service.untracked_day_change(): the shorts' daily move gets its own line "
+          "instead of landing in 'FX' (2026-11-23: -3,736 shown as FX on a flat USD/HKD day):")
+    from dashboard.web.service import untracked_day_change as f
+    rows_open = [{"symbol": "QQQ", "qty": -8.0, "market_price": 608.45, "currency": "USD"}]
+    pnl, snap = f(rows_open, None, "2026-11-23", 7.84, "HKD")
+    check("first call of the day records the open marks, pnl 0", (pnl, snap["marks"]["QQQ"]),
+          (0.0, [-8.0, 608.45]))
+    rows_now = [{"symbol": "QQQ", "qty": -8.0, "market_price": 649.46, "currency": "USD"}]
+    pnl, snap2 = f(rows_now, snap, "2026-11-23", 7.84, "HKD")
+    check("short QQQ -8 as it rallies 608.45 -> 649.46: about -HKD 2,572", round(pnl), -2572)
+    pnl, snap3 = f(rows_now, snap2, "2026-11-24", 7.84, "HKD")
+    check("a new day re-bases on the new open", (pnl, snap3["date"]), (0.0, "2026-11-24"))
+    pnl, _ = f([], snap2, "2026-11-23", 7.84, "HKD")
+    check("a position closed today drops out (its move stays in 'FX & other')", pnl, 0.0)
+
+
 def test_cover_tickets_in_short_alert():
     print("\nA3: the UNINTENDED SHORT page carries the exact cover tickets:")
     from dashboard.core import notable_events as ne
