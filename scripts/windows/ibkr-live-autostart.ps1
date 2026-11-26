@@ -33,6 +33,10 @@ function Log($m) { Write-IbkrLog $LogFile ("autostart: " + $m) }
 $TimeoutSec = 300
 $HandshakeOk = { Test-IbApiHandshake -HostName '127.0.0.1' -Port 4001 -TimeoutSec 6 }
 
+if (Test-UnderClaude) {
+    if (Start-IbkrTask 'Live Auto-Start') { Log "=== requested from inside a Claude Code session -- re-dispatched via Task Scheduler (\IBKR\Live Auto-Start) so the gateway does not depend on the Claude app"; exit 0 }
+    Log "=== requested from inside a Claude Code session; Task Scheduler dispatch FAILED -- continuing here"
+}
 Log "=== logon autostart requested"
 if (& $HandshakeOk) { Log "already logged in (API handshake OK) -- nothing to do"; exit 0 }
 $w = Get-WeeklyWindow

@@ -89,6 +89,15 @@ function Wait-Login([int]$Sec, [string]$What) {
     return $false
 }
 
+# IBC started from here would belong to a Claude Code session and die when the Claude app quits
+# (Wed 25 16:41 HKT: gateway killed -> extra touch). Re-dispatch through Task Scheduler.
+if (Test-UnderClaude) {
+    if (Start-IbkrTask 'Live Login') {
+        Log "=== live login requested (reason=$Reason) from inside a Claude Code session -- re-dispatched via Task Scheduler (\IBKR\Live Login, unattended) so the gateway does not depend on the Claude app; this run exits"
+        exit 0
+    }
+    Log "=== live login requested (reason=$Reason) from inside a Claude Code session; Task Scheduler dispatch FAILED -- continuing here (the gateway will die if the Claude app quits)"
+}
 $script:lock = Enter-LoginLock
 if (-not $script:lock) { Log "=== live login requested (reason=$Reason) -- REJECTED: another login run holds the lock"; exit 3 }
 Log "=== live login requested (reason=$Reason, unattended=$([bool]$Unattended))"

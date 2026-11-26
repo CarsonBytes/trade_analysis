@@ -187,6 +187,15 @@ Note: watchdog.ps1 had silently died ~19:35 HKT Sat (cause unknown); relaunched 
   - No prompts or pages 05:00–08:00 HKT.
   - Suite 54/54. The watchdog needs a restart to load them (pid 19220 is on the old code).
   - Not committed. Spec §10.
+- **Thu 26 ~21:30 HKT: independent of the Claude app.**
+  - Wed 16:41 a Claude app quit killed the watchdog and the gateway, because sessions had started
+    them (retro §4b).
+  - The watchdog, the login and the autostart now hand over to Task Scheduler when started from a
+    Claude shell. Two new on-demand tasks: `\IBKR\Quant Watchdog Start` and `\IBKR\Live Login`.
+  - The watchdog runs under Task Scheduler (pid 36576). Suite 58/58.
+  - The current IBC is still tied to the app until the next full login (Sunday at the latest):
+    **don't quit the Claude app before then.**
+  - Sessions: never `Start-Process` the watchdog or the login yourself.
 
 The gateway is **down now** (user reboot 07:25Z today). Its prompt was killed by the Docker
 gateway's competing challenge, and the gateway-down page was `suppressed-cap`. The shared

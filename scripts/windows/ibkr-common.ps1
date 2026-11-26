@@ -443,6 +443,60 @@ function Test-WeekSatisfied([datetime]$Now = (Get-HktNow)) {
     return [bool]$hit
 }
 
+# ---------------------------------------------------------------- independence from the Claude app
+# 2026-11-26 (RETRO_2FA_2026-11-24 §4b). A process started from a Claude Code shell is placed in
+# that session's Windows job, next to claude.exe, and so is everything it starts. When the Claude
+# desktop app quits, those processes die: Wed 25 16:41 HKT the app quit and took the watchdog and
+# the LIVE gateway with it (extra YubiKey touch at 16:53). The watchdog, the login and the
+# logon autostart therefore call Test-UnderClaude first. If claude.exe is in their own job or
+# among their live ancestors, they re-launch through a Task Scheduler task (outside any Claude
+# job) and exit. Tasks: setup-claude-independent-launchers.ps1.
+if (-not ('IbkrJob' -as [type])) {
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class IbkrJob {
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr h, int cls, IntPtr info, int len, IntPtr ret);
+ // Pids in the calling process's own (innermost) job; empty when not in a job.
+ public static int[] MyJobPids() { int n = 4096; IntPtr b = Marshal.AllocHGlobal(8 + n * 8);
+  try { if (!QueryInformationJobObject(IntPtr.Zero, 3, b, 8 + n * 8, IntPtr.Zero)) return new int[0];
+   int c = Marshal.ReadInt32(b, 4); int[] r = new int[c]; for (int i = 0; i < c; i++) r[i] = (int)Marshal.ReadInt64(b, 8 + i * 8); return r; }
+  finally { Marshal.FreeHGlobal(b); } } }
+"@
+}
+function Test-UnderClaude {
+    if ($env:IBKR_TEST_UNDER_CLAUDE -in '0', '1') { return ($env:IBKR_TEST_UNDER_CLAUDE -eq '1') }
+    try {
+        foreach ($id in [IbkrJob]::MyJobPids()) {
+            if ($id -ne $PID -and (Get-Process -Id $id -ErrorAction SilentlyContinue).ProcessName -eq 'claude') { return $true }
+        }
+    } catch { }
+    $id = $PID
+    for ($i = 0; $i -lt 15 -and $id; $i++) {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+        if (-not $p) { break }
+        if ($p.Name -eq 'claude.exe') { return $true }
+        $id = $p.ParentProcessId
+    }
+    return $false
+}
+# Start an on-demand \IBKR\ task. Returns $true when Task Scheduler accepted it. Loop brake: a
+# second hand-over of the same task within 120 s is refused (returns $false, the caller runs in
+# place), so a misdetection under Task Scheduler can never become a relaunch loop.
+function Start-IbkrTask([string]$TaskName) {
+    $stamp = Join-Path $script:IbkrLogDir ('dispatch-{0}.txt' -f ($TaskName -replace '[^A-Za-z0-9]', '-'))
+    try {
+        if (Test-Path $stamp) {
+            $last = [DateTime]::Parse("$(Get-Content $stamp -TotalCount 1)".Trim(), $null, 'RoundtripKind').ToUniversalTime()
+            if (([DateTime]::UtcNow - $last).TotalSeconds -lt 120) { return $false }
+        }
+    } catch { }
+    try {
+        Start-ScheduledTask -TaskPath '\IBKR\' -TaskName $TaskName -ErrorAction Stop
+        try { [DateTime]::UtcNow.ToString('o') | Set-Content -Path $stamp -Encoding ASCII } catch { }
+        return $true
+    } catch { return $false }
+}
+
 # ---------------------------------------------------------------- window finder
 if (-not ('IbkrWin' -as [type])) {
 Add-Type @"

@@ -340,6 +340,51 @@ TC 'F2-F4 wired into the watchdog loop' {
     Need ($src -notmatch 're-launching the passkey login\$tag') 'old per-re-prompt page still present'
 }
 
+# ---- 8c. independence from the Claude app (RETRO_2FA_2026-11-24 §4b) ------------------------
+TC 'claude-independence: on-demand launcher tasks registered' {
+    $want = @{ 'Quant Watchdog Start' = 'QuantDashboardWatchdog\.vbs'; 'Live Login' = 'ibkr-live-login-task\.vbs'; 'Live Auto-Start' = 'ibkr-live-autostart\.vbs' }
+    foreach ($k in $want.Keys) {
+        $t = Get-ScheduledTask -TaskPath '\IBKR\' -TaskName $k -ErrorAction SilentlyContinue
+        Need $t "\IBKR\$k missing (run setup-claude-independent-launchers.ps1)"
+        Need ($t.State -ne 'Disabled') "\IBKR\$k disabled"
+        Need ("$($t.Actions[0].Arguments)" -match $want[$k]) "\IBKR\$k action: $($t.Actions[0].Arguments)"
+    }
+    $vbs = Get-Content (Join-Path $win 'ibkr-live-login-task.vbs') -Raw
+    Need ($vbs -match '-Unattended') 'Live Login launcher is not unattended'
+}
+TC 'claude-independence: watchdog, login and autostart hand over before doing anything' {
+    foreach ($c in @(@('watchdog.ps1', 'Quant Watchdog Start', 'Guard against duplicate watchdog loops'),
+                     @('scripts\windows\ibkr-live-login.ps1', 'Live Login', '\$script:lock = Enter-LoginLock'),
+                     @('scripts\windows\ibkr-live-autostart.ps1', 'Live Auto-Start', 'Log "=== logon autostart requested"'))) {
+        $src = Get-Content (Join-Path $repo $c[0]) -Raw
+        $g = $src.IndexOf('if (Test-UnderClaude)'); $first = [regex]::Match($src, $c[2]).Index
+        Need ($g -ge 0) "$($c[0]): no Test-UnderClaude guard"
+        Need ($src -match "Start-IbkrTask '$($c[1])'") "$($c[0]): does not hand over to \IBKR\$($c[1])"
+        Need ($g -lt $first) "$($c[0]): guard comes after its lock/first action"
+    }
+}
+TC 'claude-independence: hand-over loop brake (2nd hand-over within 120 s refused)' {
+    $script:taskCalls = 0
+    function Start-ScheduledTask { $script:taskCalls++ }
+    $stamp = Join-Path $script:IbkrLogDir 'dispatch-zz-test-brake.txt'
+    Remove-Item $stamp -ErrorAction SilentlyContinue
+    try {
+        Need (Start-IbkrTask 'zz test brake') 'first hand-over refused'
+        Need (-not (Start-IbkrTask 'zz test brake')) 'second hand-over within 120 s allowed (loop risk)'
+        Need ($script:taskCalls -eq 1) "Start-ScheduledTask called $($script:taskCalls) times"
+    } finally { Remove-Item $stamp -ErrorAction SilentlyContinue; Remove-Item Function:\Start-ScheduledTask -ErrorAction SilentlyContinue }
+}
+TC 'claude-independence: running watchdog is not a descendant of claude.exe' {
+    $id = [int](Get-Content 'D:\quant\logs\watchdog.pid'); $chain = @()
+    for ($i = 0; $i -lt 15 -and $id; $i++) {
+        $p = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+        if (-not $p) { break }; $chain += $p.Name
+        Need ($p.Name -ne 'claude.exe') "watchdog runs under claude.exe: $($chain -join ' <- ')"
+        $id = $p.ParentProcessId
+    }
+    $chain -join ' <- '
+}
+
 # ---- 9. live health --------------------------------------------------------------------------
 TC 'watchdog alive and logging in HKT' {
     $wpid = Get-Content 'D:\quant\logs\watchdog.pid' -ErrorAction Stop

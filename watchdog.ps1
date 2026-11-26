@@ -188,6 +188,17 @@ function Start-LiveLogin {
 }
 
 
+# Never run inside a Claude Code session (2026-11-26, RETRO_2FA_2026-11-24 §4b): the app's quit
+# would kill this loop AND every LIVE login it launches. Hand over to Task Scheduler and exit;
+# the task's instance then takes the pid lock below (or exits if a healthy watchdog runs).
+if (Test-UnderClaude) {
+    if (Start-IbkrTask 'Quant Watchdog Start') {
+        Write-Log "started from inside a Claude Code session -- relaunched via Task Scheduler (\IBKR\Quant Watchdog Start) so a Claude app quit cannot kill it; this instance exits"
+        exit
+    }
+    Write-Log "started from inside a Claude Code session and the Task Scheduler relaunch FAILED -- running here; a Claude app quit will kill this watchdog"
+}
+
 # Guard against duplicate watchdog loops (e.g. a manual re-run alongside the Startup-folder
 # launch) -- same PID-lock-file pattern as event-radar's watchdog, checked from the INSIDE
 # rather than relying on an external "is it already running" scan (which is inherently racy).
