@@ -36,9 +36,8 @@ _TEMP_DBS: list[str] = []
 
 
 def apply() -> None:
-    """Idempotent: sets the two guards, leaving any pre-set value alone
-    (docker-compose sets DASH_DB_NAME for the real deployment, and
-    test_app_mode.py asserts explicit values survive)."""
+    """Idempotent: sets the guards. DASH_DB_NAME is ALWAYS redirected to a throwaway
+    temp DB, even when it is already set (see the 2026-11-25 note below)."""
     os.environ.setdefault("LLM_LEDGER_DISABLED", "1")
     # 3. Real phone pushes. FOUND 2026-11-21: a test that drives a RED notable event (the
     # long-only guard refusing a fake order) reached notify.send() with the host's real
@@ -47,7 +46,17 @@ def apply() -> None:
     # test_notify patches its own values in explicitly.
     for _k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NTFY_URL"):
         os.environ[_k] = ""
-    if not os.environ.get("DASH_DB_NAME"):
+    # FIXED 2026-11-25: this used to keep a pre-set DASH_DB_NAME ("docker-compose sets it for
+    # the real deployment"). That made the guard a no-op exactly where it mattered: inside
+    # quant-dashboard-docker, DASH_DB_NAME=/data/dashboard_docker.db IS the paper journal, so
+    # `docker exec ... python -m dashboard.tests.test_ib_exec` (run 2026-10-01 to check the S2
+    # tif fix) let test_bracket_parent_tif_is_day_children_gtc's fake EEM bracket (paper_id 27,
+    # 149sh, perm_id 0, con_id 0, risk $500 = 1% of the test's $50k) INSERT a real ib_mirror
+    # row with status OPEN. Reconcile then flagged EEM as a ghost for 8 weeks and, once the
+    # G7.3 digest landed, paged Telegram daily. No test may ever need the real journal, so a
+    # value that is not one of our own temp DBs is always replaced. (test_app_mode's explicit
+    # values are set inside its own tests, after this runs, and restored after.)
+    if os.environ.get("DASH_DB_NAME") not in _TEMP_DBS:
         fd, path = tempfile.mkstemp(prefix="quant_test_dash_", suffix=".db")
         os.close(fd)
         os.remove(path)  # store creates it on first connect; never pre-seed it
