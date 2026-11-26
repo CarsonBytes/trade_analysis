@@ -5,6 +5,43 @@ Last updated 2026-10-17.
 
 ---
 
+### 🚀 2026-11-26: LIVE now runs the Nov-21 strategy bundle; "no trades" is the plan, not a fault
+- **Why LIVE was idle (last entry DIA Nov 5):** it scans 2–7×/day. The only 5/5 setup is DBC, which
+  the re-entry gate blocks (Oct 26 loss at 33.68, so price needs >34.64; it's at ~29.3, and the gate
+  has no time cap). SHY is strength 4, the rest ≤3, and IDTL SELL is long-only-blocked. The sleeve
+  trades on PAPER but is off on LIVE by design (PHASE2_NAV_USD 64k; LIVE is ~USD 37k).
+- **PAPER verified first:** 0 tracebacks since Nov 19, no ERROR since Oct 31. EEM ghost cleared at
+  08:58 UTC. SGOV→IB01 migration clean (Mon Nov 23: SELL 901 SGOV, BUY 942 IB01). Anti-churn band
+  holding. The REDs are only the EEM ghost and routine bracket-leg "202 Order Canceled" after
+  sleeve exits.
+- **LIVE deploy (user-approved "if paper is fine"), 08:23 ET:** `wsl2-docker-deploy-live.sh`,
+  dashboard + relay only; the Windows gateway was untouched (no passkey). It brings guard phases 1–3,
+  F1/F3/F4/F5/F7, C2 funding order, LLM monitor-only, and the 18-instrument universe. Reconciled
+  (0 open), scan ok, 0 tracebacks. F7 is "insufficient" (<30 funded core trades).
+- **LIVE shield → IB01 (user-approved, 08:33 ET redeploy):** `CASH_SHIELD_SYMBOL=IB01` added to
+  `docker-compose.live.yml`. The sweep logged "migrating SGOV -> IB01: US market closed, sell
+  deferred" (Thanksgiving). Expect SELL ~291 SGOV at Friday's US open (half day) and BUY IB01 while
+  LSE is open (overlap ~14:30–16:30 UTC), else Monday. **Check Friday:** first-ever LIVE LSE order;
+  if the account lacks LSE permission it will show RED and the cash sits idle (fallback: delete the
+  env line and redeploy).
+- **Current-plan backtest (scratch `plan_bt.py`, 18 inst, completed weeks, 1% risk, pos 25%,
+  PC 1.0, no cash yield):**
+  | variant | Full CAGR / DD / Shp | OOS 2016+ | 2026 YTD |
+  |---|---|---|---|
+  | no re-entry gate, random order (≈ Nov-21 headline) | 5.6% / −7.6% / 1.04 | 11.3% / −6.2% / 1.49 | 12.7% |
+  | no re-entry gate + C2 | 5.8% / −7.5% / 1.07 | 12.0% / −6.2% / 1.49 | 20.3% |
+  | **LIVE plan: reclaim+1R gate + C2** | **3.9% / −5.0% / 1.15** | **8.5% / −5.0% / 1.75** | **6.1%** |
+  | reclaim gate, 8wk cap + C2 | 5.0% / −7.7% / 1.13 | 9.7% / −5.7% / 1.48 | 5.1% |
+  | 8wk cooldown only + C2 | 3.9% / −11.5% / 1.00 | 8.5% / −8.2% / 1.42 | 3.6% |
+  - **Research gap found:** the Nov-21 numbers (spec §11/§12) were run WITHOUT the live re-entry
+    gate (`rcommon.gen` → `bt._signals` default `reentry_gate=None`). The gate halves trades
+    (987→520), cuts CAGR by ~1.9pp full / 3.5pp OOS, and lowers DD (−7.5→−5.0) with higher Sharpe.
+    Future research must pass `reentry_gate="reclaim_buffer", reentry_buffer_r=1.0`.
+  - **Droughts are normal:** OOS median gap between entry weeks is 1wk (p90 4wk, max 77wk in
+    2022–23), and 27% of OOS weeks sit ≥4wk since the last entry. The backtest's own last entry
+    under the live plan is **DBC 2026-10-26 (−1R)**, the same as LIVE's. Since Oct 1 the gate
+    skipped CPER/AMLP/DBC-Nov-9, all −1R.
+
 ### 🔧 2026-11-25: IB Gateway upgrade (1047 desupported 2026-12-15, minimum 1050.1)
 - **LIVE (native Windows):**
   - Gateway 1047 → **1051** (it was already installed at `C:\Jts\ibgateway\1051` since Oct 17,

@@ -40,6 +40,11 @@ services:
       # the emphasis _guard()'s own docstring places on this exact account/port match.
       - IB_ALLOW_LIVE=1
       - SLEEVE_ENABLED=1
+      # I3 (STRATEGY_IMPROVEMENT_SPEC): accumulating Irish UCITS T-bill shield (IB01, USD on
+      # LSEETF; no 30% US withholding). Switched 2026-11-26 (user-approved) after PAPER's clean
+      # SGOV -> IB01 migration on 2026-11-23. The sweep sells legacy SGOV first (US hours), then
+      # re-parks in IB01 (LSE hours). Remove this line to fall back to the default SGOV.
+      - CASH_SHIELD_SYMBOL=IB01
       - DASH_DB_NAME=/data/dashboard_live_docker.db
       # 2026-10-13 (spec GATEWAY_PASSKEY): the LIVE gateway now runs natively on WINDOWS (IBC-Live)
       # because IBKR requires the YubiKey PIN on every login and only Windows' WebAuthn dialog can

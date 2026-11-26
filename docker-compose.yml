@@ -30,7 +30,7 @@ services:
       - SUPABASE_METER_FILE=/app/logs/supabase_meter.jsonl
       # I3 (STRATEGY_IMPROVEMENT_SPEC, 2026-11-21): PAPER trials the accumulating Irish UCITS
       # T-bill shield (IB01, USD on LSEETF; no US withholding). The sweep sells any legacy SGOV
-      # first, then re-parks in IB01. LIVE keeps the default (SGOV) until this has run clean.
+      # first, then re-parks in IB01. LIVE switched too on 2026-11-26 after this ran clean.
       - CASH_SHIELD_SYMBOL=IB01
       # Absolute path -> pathlib's `parents[1] / DASH_DB_NAME` resolves to exactly this,
       # discarding the base (standard pathlib join-with-absolute-path behavior). Keeps this
