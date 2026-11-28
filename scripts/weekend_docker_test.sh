@@ -183,19 +183,18 @@ drun "2026-11-22 21:05" tick                  # live deadline (wake + 1h) passed
 check "live not reconnected -> critical" "$(tail -1 "$T/fake/pushes" | grep -o "^critical.*$C1" | cut -d'|' -f1)" "critical"
 check "verify cleared after paging" "$(ls "$T/state" | grep -c '^verify-' | tr -d ' ')" "0"
 
-echo "D4. an image without api_mode falls back to the old sleep for that weekend:"
+echo "D4. an image without api_mode is LEFT RUNNING (site stays up), one warning:"
 reset
 touch "$T/fake/$C1.old"
 drun "2026-11-21 07:00" tick
-check "old-image live dashboard stopped" "$(isrun $C1)" "no"
-check "and held" "$(cut -d' ' -f1 "$T/hold/$C1")" "weekend-sleep"
-check "critical push names it" "$(grep -c "^critical.*$C1" "$T/fake/pushes" | tr -d ' ')" "1"
+check "old-image live dashboard still running" "$(isrun $C1)" "yes"
+check "not held" "$([ -f "$T/hold/$C1" ] && echo held || echo free)" "free"
+check "one warning push names it" "$(grep -c "^warning.*$C1" "$T/fake/pushes" | tr -d ' ')" "1"
+check "no critical" "$(grep -c "^critical" "$T/fake/pushes" | tr -d ' ')" "0"
 check "paper dashboard still in display mode" "$(isrun $C2)" "yes"
 drun "2026-11-21 07:05" tick
-check "fallback sticks (not restarted)" "$(isrun $C1)" "no"
-check "no repeat critical" "$(grep -c "^critical" "$T/fake/pushes" | tr -d ' ')" "1"
-drun "2026-11-22 20:00" tick
-check "fallback dashboard woken at 20:00" "$(isrun $C1)" "yes"
+check "no repeat warning" "$(grep -c "^warning" "$T/fake/pushes" | tr -d ' ')" "1"
+check "never stopped" "$(grep -c "^stop.*$C1" "$T/fake/calls" | tr -d ' ')" "0"
 
 echo "D5. migration: dashboards already asleep from sleep mode are started into display:"
 reset

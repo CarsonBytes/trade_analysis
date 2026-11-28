@@ -17,8 +17,15 @@ Deviations from the text below:
   the reason. They are not greyed out.
 - (b) **Mode switch:** the script runs display mode only when `/home/cap/.weekend-sleep/mode` contains `display`
   (or `WEEKEND_MODE=display`). The default is the old sleep. So nothing changed on the box until the switch.
-- (c) **Fallback:** a dashboard that doesn't confirm `api_mode=off` on `/status` within 90 s, for example an old
-  image, is held and stopped for that weekend, with one `critical` push.
+- (c) **Fallback (revised 2026-11-28, user: "the website should still stay on while the gateway could be off"):**
+  a dashboard that doesn't confirm `api_mode=off` on `/status` within 90 s, for example an old image, is
+  **left running**, with one `warning`. It can't trade: its gateway is off, so it only lacks the banner.
+- **Real-container check, PAPER, 2026-11-28:**
+  - flag written → disconnected at 08:56:27, then display-only from the next tick, with the banner rendered and
+    `/status` showing `api_mode=off ok=true`;
+  - flag removed → "back ON" at 08:58:08, reconcile matched at 08:58:17.
+- **Mode switched to `display` on 2026-11-28 16:59 HKT,** effective from Sat 2026-12-05. LIVE still runs the old
+  image until its deploy: it stays up without the banner.
 - (d) **Reconnect check:** the dashboard's `/status` must report `ok=true` (a fresh account read) by wake + 15 min
   for PAPER and wake + 60 min for LIVE. This is checked across ticks.
 - (e) While API-off, `/status` `ok` doesn't require a fresh account read. The fleet page shows the instance

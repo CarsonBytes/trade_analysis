@@ -26,8 +26,8 @@
 # or the file $STATE_DIR/mode), the dashboards are NOT stopped. Only the paper gateway sleeps;
 # each dashboard instead gets /data/api-off (a self-expiring JSON flag) and stays up for
 # display with the broker API off. If a dashboard does not confirm api_mode=off on /status
-# within API_VERIFY_TIMEOUT, it falls back to being held + stopped (the old behaviour) for the
-# rest of that weekend, with a critical push. Default mode is `sleep` (unchanged behaviour).
+# within API_VERIFY_TIMEOUT (old image), it is LEFT RUNNING with one warning: the site stays
+# up, and with its gateway off it cannot trade. Default mode is `sleep` (unchanged behaviour).
 #
 # Everything is overridable by env for scripts/weekend_docker_test.sh (NOW_EPOCH, DOCKER, ...).
 set -uo pipefail
@@ -157,7 +157,7 @@ display_on() {   # $1 = wake epoch (flag `until`), $2 = week key
         c=${s%%:*}; port=$(echo "$s" | cut -d: -f2)
         foreign_held "$c" && continue
         if weekend_held "$c"; then
-            [ -f "$STATE_DIR/fallback-$c-$wk" ] && continue      # slept after a failed attempt
+            [ -f "$STATE_DIR/fallback-$c-$wk" ] && continue      # (legacy) slept after a failed attempt
             # migration from sleep mode: release the weekend hold and start it into API-off
             if [ "$DRY_RUN" = 1 ]; then log "dry-run: would release $c and start it API-off"; continue; fi
             rm -f "${HOLD_DIR:?}/${c:?}"
@@ -169,11 +169,12 @@ display_on() {   # $1 = wake epoch (flag `until`), $2 = week key
         if [ "$DRY_RUN" = 1 ]; then log "dry-run: would write $API_FLAG in $c"; continue; fi
         flag_write "$c" "$json" || log "display: writing $API_FLAG in $c failed"
         if [ -n "$port" ] && ! wait_api "$port" off; then
-            # Not confirmed (old image without api_mode, or unreachable): fall back to the old
-            # behaviour for the rest of this weekend -- hold + stop it.
+            # Not confirmed (old image without api_mode, or /status unreachable). User,
+            # 2026-11-28: "the website should still stay on while the gateway could be off".
+            # So LEAVE IT RUNNING. It can't trade anyway: the paper gateway is stopped and
+            # the LIVE gateway is held by the 2FA weekend hold. It just lacks the banner and
+            # keeps retrying its connection every 30 s. Warn once (digest, not Telegram).
             touch "$STATE_DIR/fallback-$c-$wk"
-            echo "$WEEKEND_TAG $(TZ=Asia/Hong_Kong date '+%Y-%m-%d %H:%M:%S') HKT until $(hkt "$until") (display fallback; QUANT_WEEKEND_DISPLAY_SPEC)" > "$HOLD_DIR/$c"
-            "$DOCKER" stop -t "$STOP_TIMEOUT" "$c" >/dev/null 2>&1 || log "display: docker stop $c failed"
             fb+=("$c")
             continue
         fi
@@ -181,8 +182,8 @@ display_on() {   # $1 = wake epoch (flag `until`), $2 = week key
     done
     [ ${#wrote[@]} -gt 0 ] && { say "display: broker API off in ${wrote[*]} until $(hkt "$until") (dashboards stay up)"
         push info "quant weekend display mode: ${wrote[*]} up with broker API off until $(hkt "$until")"; }
-    [ ${#fb[@]} -gt 0 ] && { say "display: PROBLEM -- ${fb[*]} did not confirm api_mode=off; held + stopped instead"
-        push critical "quant weekend display mode FAILED for ${fb[*]}: no api_mode=off on /status; stopped them instead (weekend sleep)"; }
+    [ ${#fb[@]} -gt 0 ] && { say "display: WARNING -- ${fb[*]} did not confirm api_mode=off (old image?); left running for display, gateway is off so it cannot trade"
+        push warning "quant weekend display mode: ${fb[*]} did not confirm api_mode=off (old image? deploy it); left running, gateway off"; }
     return 0
 }
 

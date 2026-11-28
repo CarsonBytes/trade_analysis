@@ -21,9 +21,24 @@ Last updated 2026-10-17.
   - Only the paper gateway sleeps; the dashboards get the flag.
   - At wake, the gateway starts first, then the flags are removed and the reconnect is verified via
     `/status ok`.
-  - An old image that doesn't confirm falls back to sleep, with a critical push.
-  - **Gated by `/home/cap/.weekend-sleep/mode` = `display`.** The default is unchanged (sleep), and the
-    live cron is running the patched script in sleep mode.
+  - An old image that doesn't confirm is left running, with one warning; the site stays up and the gateway
+    is off.
+  - **Gated by `/home/cap/.weekend-sleep/mode` = `display`, set 2026-11-28 16:59 HKT,** effective
+    Sat 2026-12-05.
+- **PAPER deployed (77b2f35), API-off checked on the real container:** disconnect, banner, `/status` off, then
+  reconnect + reconcile when the flag was removed.
+- **LIVE deployed** 2026-11-28 17:35 HKT (dashboard + relay; no tracebacks).
+- **Display mode active this weekend:** the manual-wake override was dropped at 17:36 HKT.
+  - The paper gateway is stopped.
+  - Both dashboards are up with `api_mode=off` (LIVE logged "disconnecting" at 17:37:36 HKT).
+  - Both show the banner. They wake Sun 20:00 HKT.
+- **Note:** the Windows LIVE gateway stays logged in on Saturday by design. Its 2FA "hold" only blocks
+  auto-logins and alerts until the Sunday 20:35 touch. In display mode the dashboard just doesn't use it.
+- **Public URLs still 403 "Your request was blocked"** from this box (Cloudflare reports `loc=CA`). The same
+  happens for study.carsonng.com, so it's a zone-wide Cloudflare firewall rule, not the dashboards. The
+  origins answer 200 locally.
+- **Tunnel fix:** `C:\Users\Cap\.cloudflared\config.yml` sent quant-live to `localhost:8081`, where nothing
+  listens. It now points to 18081 (backup `.bak-20261128`). Restart cloudflared to apply.
 - **Tests:** test_api_mode 6/6, the dashboard suite 370 passed, weekend_docker_test 70/70.
 - **To switch on:**
   1. Push (deploys PAPER).
