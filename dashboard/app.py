@@ -426,6 +426,10 @@ def header_status() -> None:
     moved into the ⓘ info modal next to the title (_open_info_modal())."""
     from dashboard.execution import broker as _broker
     if _broker.is_ib():
+        from dashboard.core import api_mode
+        if api_mode.api_off():
+            ui.label(f"{_broker.name()}: API off (weekend) ○").classes("text-sm text-grey-6")                .tooltip(api_mode.describe() + " Figures shown are the last broker snapshot.")
+            return
         bc = service.STATE.get("broker_conn") or {}
         up = bc.get("available")
         ok = bc.get("ok")
@@ -483,6 +487,25 @@ def health_banner() -> None:
     somewhere; this just aggregates them into one scannable place instead of requiring a
     tour of the whole Board to notice something's off."""
     now = dt.datetime.now()
+    # QUANT_WEEKEND_DISPLAY_SPEC §2.2: neutral (not red) weekend-mode row on top.
+    from dashboard.core import api_mode
+    _off = api_mode.api_off()
+    if _off:
+        _asof = ""
+        try:
+            from dashboard.core import store as _snap_store
+            _snap, _ = _snap_store.cache_get("portfolio_snapshot")
+            if _snap and _snap.get("ts"):
+                _asof = " Figures as of " + dt.datetime.fromtimestamp(
+                    int(_snap["ts"]), dt.timezone(dt.timedelta(hours=8))
+                ).strftime("%a %d %b %H:%M HKT") + "."
+        except Exception:                              # noqa: BLE001 -- never break rendering
+            pass
+        with ui.row().classes("w-full items-center gap-2 px-3 py-1 rounded "
+                              "bg-blue-grey-1 text-blue-grey-9"):
+            ui.icon("bedtime").classes("text-blue-grey-7")
+            ui.label(api_mode.describe(_off) + _asof
+                     + " No orders, scans or broker polling until then.").classes("text-sm")
 
     def _age_txt(ts) -> tuple[str, str]:
         if ts is None:
@@ -3331,6 +3354,17 @@ _TICK_TIMEOUT_SEC = 120   # Defensive ceiling (2026-07-12): if ANY await inside 
                           # more fundamental cause.
 
 
+_api_state = {"off": False}
+
+
+def _ib_release() -> None:
+    """Drop any broker session now that the API is off (ib_client also refuses to connect)."""
+    from dashboard.execution import broker as _bk
+    if _bk.is_ib():
+        from dashboard.data import ib_client
+        ib_client.is_available()        # _ensure_conn() disconnects while api-off
+
+
 async def _tick() -> None:
     if _busy["flag"]:
         return
@@ -3345,6 +3379,26 @@ async def _tick() -> None:
     try:
         async def _do_tick_work():
             now = dt.datetime.now()
+            # QUANT_WEEKEND_DISPLAY_SPEC §2.2: broker API switched off (weekend flag) ->
+            # display only. No refresh_cheap (orders, reconcile, sweeps, broker polling),
+            # no LLM, no news. Panels keep the restored snapshot; the banner says why.
+            from dashboard.core import api_mode
+            _off = api_mode.api_off()
+            if _off:
+                if not _api_state["off"]:
+                    from dashboard.core.log import log
+                    log.info("api_mode: broker API OFF (%s) -- display only, tick skips "
+                             "broker/LLM work", api_mode.describe(_off))
+                    _api_state["off"] = True
+                    await run.io_bound(_ib_release)
+                    _refresh_all_panels()
+                service.STATE["last_status"] = api_mode.describe(_off)
+                return
+            if _api_state["off"]:
+                from dashboard.core.log import log
+                log.info("api_mode: broker API back ON -- resuming normal ticks "
+                         "(fresh connect runs a reconcile first)")
+                _api_state["off"] = False
             last_cheap = service.STATE["last_cheap"]
             if last_cheap is None or (now - last_cheap).total_seconds() >= SETTINGS["cheap_min"] * 60:
                 await run.io_bound(service.refresh_news)
@@ -3432,7 +3486,20 @@ async def _log_access(request, call_next):
     return response
 
 
+def _api_off_block(action: str) -> bool:
+    """QUANT_WEEKEND_DISPLAY_SPEC §2.2: True (and tells the user why) when the broker API is
+    switched off by the weekend flag, so broker-reaching buttons do nothing."""
+    from dashboard.core import api_mode
+    f = api_mode.api_off()
+    if not f:
+        return False
+    ui.notify(f"{action}: not available -- {api_mode.describe(f)}", type="warning")
+    return True
+
+
 async def _manual_refresh() -> None:
+    if _api_off_block("Refresh"):
+        return
     if _busy["flag"]:
         ui.notify("Refresh already running…"); return
     _busy["flag"] = True
@@ -3448,6 +3515,8 @@ async def _manual_refresh() -> None:
 
 async def _log_trades_now() -> None:
     """Manually turn the current signals into paper trades (no LLM call needed)."""
+    if _api_off_block("Log trades"):
+        return
     from dashboard.core import paper
     logs = await run.io_bound(paper.place_from_state, service.STATE)
     placed = [l for l in logs if "PLACED" in l]
@@ -3462,6 +3531,8 @@ def _open_withdraw() -> None:
     from dashboard.execution import broker as _bk
     if not _bk.is_ib():
         ui.notify("Withdrawal helper is IBKR-only.", type="warning"); return
+    if _api_off_block("Withdraw"):
+        return
     with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[500px]"):
         ui.label("Withdraw cash — from SGOV / cash shield first, never Core").classes("text-lg font-bold")
         ui.label("Sells SGOV if idle cash is short and reserves the amount so the auto-sweep "

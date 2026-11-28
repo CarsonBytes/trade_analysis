@@ -126,6 +126,19 @@ def _ensure_conn():
     if ib_async is None:
         return None
     ib = _S["ib"]
+    # QUANT_WEEKEND_DISPLAY_SPEC §2.2: while the api-off flag is active, never connect (no
+    # clientId churn, no reconnect spam) and drop an existing session once.
+    from dashboard.core import api_mode
+    if api_mode.api_off():
+        if ib is not None:
+            try:
+                if ib.isConnected():
+                    log.info("ib_client: broker API off (api-off flag) -- disconnecting")
+                    call(ib.disconnect, timeout=10)
+            except Exception as e:                     # noqa: BLE001
+                log.debug("ib_client: disconnect on api-off failed: %s", e)
+            _S["ib"], _S["connected"] = None, False
+        return None
     if ib is not None and ib.isConnected():
         return ib
     if time.time() - _S.get("last_attempt", 0.0) < _RECONNECT_THROTTLE_SEC:

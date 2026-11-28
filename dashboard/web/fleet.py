@@ -47,8 +47,19 @@ def status_snapshot() -> dict:
         "sleeve_enabled": None,
         "notify_configured": None,
         "db": os.environ.get("DASH_DB_NAME", "dashboard.db"),
+        "api_mode": "on",           # QUANT_WEEKEND_DISPLAY_SPEC: "off" while the weekend flag is active
+        "api_off_until": None,
         "error": None,
     }
+    try:
+        from dashboard.core import api_mode
+        _off = api_mode.api_off()
+        if _off:
+            out["api_mode"] = "off"
+            out["api_off_until"] = dt.datetime.fromtimestamp(
+                _off["until"], dt.timezone.utc).isoformat(timespec="seconds")
+    except Exception:                                  # noqa: BLE001
+        pass
     try:
         from dashboard.core import paper, sleeve, store
         from dashboard.web import service
@@ -105,10 +116,14 @@ def status_snapshot() -> dict:
         # overall verdict: the tick loop is alive AND we have account data AND that data
         # is a FRESH broker read (not an old cached snapshot) AND the DD-halt gate is
         # not currently engaged
+        # API off (weekend display mode): a cached snapshot is EXPECTED, so freshness of the
+        # account read is not required -- the loop alive + a snapshot to show is "ok".
+        _fresh_ok = (out["api_mode"] == "off" or
+                     (out["acct_age_sec"] is not None and out["acct_age_sec"] < 900))
         out["ok"] = bool(
             out["tick_age_sec"] is not None and out["tick_age_sec"] < 300
             and out["nl"] is not None
-            and out["acct_age_sec"] is not None and out["acct_age_sec"] < 900
+            and _fresh_ok
             and not out["dd_halted"]
         )
     except Exception as e:                             # noqa: BLE001 -- never 500 on /status
@@ -121,12 +136,16 @@ def render_status_html(snap: dict) -> str:
     no external assets, safe to load over a slow tunnel."""
     ok = snap.get("ok")
     color, dot, word = ("#16a34a", "#16a34a", "OK") if ok else ("#dc2626", "#dc2626", "CHECK")
+    if ok and snap.get("api_mode") == "off":
+        color, dot, word = "#6b7280", "#9ca3af", "WEEKEND (API off)"
     nl = snap.get("nl")
     ccy = snap.get("_ccy") or ""
     age = snap.get("tick_age_sec")
     aage = snap.get("acct_age_sec")
     rows = [
         ("Mode", snap.get("mode", "?")),
+        ("Broker API", "off until " + str(snap.get("api_off_until"))
+         if snap.get("api_mode") == "off" else "on"),
         ("Total value", f"{ccy} {nl:,.0f}" if isinstance(nl, (int, float)) else "unavailable"),
         ("Open positions", str(snap.get("positions"))),
         (
@@ -178,7 +197,7 @@ _FLEET_PAGE = """<!doctype html>
 <div id="rows">loading…</div>
 <script>
 const INSTANCES = __INSTANCES__;
-function cell(ok){return ok===true ? '#16a34a' : '#dc2626';}
+function cell(ok,off){return ok===true ? (off ? '#9ca3af' : '#16a34a') : '#dc2626';}
 async function load(){
   const rows=document.getElementById('rows'); rows.innerHTML='';
   for(const [name,url] of INSTANCES){
@@ -193,8 +212,9 @@ async function load(){
       const dd=(s.dd_pct==null)?'n/a':(s.dd_pct>0?'+':'')+s.dd_pct+'%';
       const age=(s.tick_age_sec==null)?'n/a':s.tick_age_sec+'s';
       const aage=(s.acct_age_sec==null)?'<b>stale/cache</b>':s.acct_age_sec+'s';
-      div.innerHTML=`<span class="dot" style="background:${cell(s.ok)}"></span>`+
-        `<span class="name">${name} — ${s.ok?'OK':'CHECK'} <small>(${s.mode})</small></span>`+
+      const off=s.api_mode==='off';
+      div.innerHTML=`<span class="dot" style="background:${cell(s.ok,off)}"></span>`+
+        `<span class="name">${name} — ${s.ok?(off?'WEEKEND (API off)':'OK'):'CHECK'} <small>(${s.mode})</small></span>`+
         `<div class="sub">value ${nl} · positions ${s.positions??'?'} · DD ${dd}`+
         ` · tick ${age} · acct data ${aage}${s.dd_halted?' · <b style="color:#dc2626">DD HALT</b>':''}</div>`;
     }catch(e){

@@ -5,6 +5,32 @@ Last updated 2026-10-17.
 
 ---
 
+### 🖥️ 2026-11-28: weekend display mode built (dashboards stay up, broker API off). Not deployed, not on
+- **Ask:** "keep quant live and quant paper displaying, the API just turns off". Spec:
+  QUANT_WEEKEND_DISPLAY_SPEC.md (E1-E4 as recommended).
+- **Dashboard:** a `/data/api-off` JSON flag (`core/api_mode.py`).
+  - **While the flag is active:**
+    - no broker connect (an existing session is dropped);
+    - `_tick` skips refresh_cheap/LLM/news, so there are no orders, reconcile or sweeps;
+    - header reads "API off (weekend)", a neutral banner shows "Figures as of …", and the broker buttons
+      show a toast instead of acting;
+    - `/status` reports `api_mode: off`.
+  - **Fails open:** a malformed flag, or one past its `until` + 2 h, is ignored, with a warning and a notable
+    event.
+- **Script:** `weekend-docker.sh` display mode.
+  - Only the paper gateway sleeps; the dashboards get the flag.
+  - At wake, the gateway starts first, then the flags are removed and the reconnect is verified via
+    `/status ok`.
+  - An old image that doesn't confirm falls back to sleep, with a critical push.
+  - **Gated by `/home/cap/.weekend-sleep/mode` = `display`.** The default is unchanged (sleep), and the
+    live cron is running the patched script in sleep mode.
+- **Tests:** test_api_mode 6/6, the dashboard suite 370 passed, weekend_docker_test 70/70.
+- **To switch on:**
+  1. Push (deploys PAPER).
+  2. LIVE deploy (user go-ahead).
+  3. `echo display > /home/cap/.weekend-sleep/mode` before Sat 2026-12-05 06:30 HKT.
+  4. Then measure Windows free RAM at that sleep. The estimate is +1.9 GB, against +2.7 GB in sleep mode.
+
 ### 🚀 2026-11-26: LIVE now runs the Nov-21 strategy bundle; "no trades" is the plan, not a fault
 - **Why LIVE was idle (last entry DIA Nov 5):** it scans 2–7×/day. The only 5/5 setup is DBC, which
   the re-entry gate blocks (Oct 26 loss at 33.68, so price needs >34.64; it's at ~29.3, and the gate
